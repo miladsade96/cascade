@@ -101,7 +101,7 @@ The earlier load test also found a non-contiguous Fetch pagination defect. Fetch
 
 ## Verification
 
-`sbt test` passed **15/15** tests:
+After the classic-group and static-replication milestones, `sbt test` passed **25/25** tests:
 
 - Wire codec unit tests
 - Fetch pagination regression
@@ -109,7 +109,15 @@ The earlier load test also found a non-contiguous Fetch pagination defect. Fetch
 - Broker-wide background flush test
 - Active and multi-segment crash-tail recovery tests
 - Raw-socket Kafka protocol integration test, including proof that `acks=1` does not force inline
-- Kafka 4.3.1 Admin/Producer/Consumer end-to-end test
+- Durable committed-offset journal recovery and corrupt-tail truncation tests
+- Classic group-coordinator membership, synchronization, heartbeat, commit, and leave tests
+- Kafka 4.3.1 Admin/Producer/Consumer end-to-end tests, including a two-consumer rebalance and committed-offset recovery across broker restart
+- Metadata-journal checksum recovery and uncommitted-replica visibility tests
+- Three-broker Kafka-client test covering RF=3 replication, ISR shrink, leader-epoch promotion, continued production, and exact consumption after the original partition leader stops
+
+A post-change one-million-record regression run passed exact verification at **607,661 produced records/s** and **544,883 consumed records/s**. This is within the normal short-run variance of the 614,413/556,232 calibration above and shows no material idle group-coordinator regression in the data path.
+
+After adding the cluster path, another single-node one-million-record regression passed exact verification at **615,592 produced records/s** and **527,001 consumed records/s**. Produce acknowledgement latency remained <=500 ms at p99 with a 422.632 ms maximum. The replicated three-node path has correctness coverage but does not yet have a dedicated sustained-throughput benchmark, so these numbers must not be presented as replicated-cluster capacity.
 
 ## Verdict
 

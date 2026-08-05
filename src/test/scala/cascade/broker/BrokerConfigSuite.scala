@@ -26,3 +26,28 @@ final class BrokerConfigSuite extends FunSuite:
       BrokerConfig.parse(Array("--flush-policy", "eventually"))
     }
   }
+
+  test("parses a static metadata and replication quorum") {
+    val config = BrokerConfig.parse(
+      Array(
+        "--node-id",
+        "2",
+        "--cluster-nodes",
+        "1@node-a:9092,2@node-b:9092,3@node-c:9092",
+        "--controller-id",
+        "1",
+        "--default-replication-factor",
+        "3",
+        "--min-insync-replicas",
+        "2",
+        "--peer-timeout-ms",
+        "1500"
+      )
+    )
+
+    assertEquals(config.nodeId, 2)
+    assertEquals(config.clusterNodes.map(_.id), Vector(1, 2, 3))
+    assertEquals(config.defaultReplicationFactor, 3)
+    assertEquals(config.minInSyncReplicas, 2)
+    assertEquals(config.peerTimeoutMillis, 1500)
+  }

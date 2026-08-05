@@ -91,6 +91,11 @@ final class ByteCursor(private val bytes: Array[Byte]):
     else if length < -1 then throw ProtocolException(s"invalid nullable bytes length: $length")
     else Some(readBytes(length))
 
+  def readByteArray(): Array[Byte] =
+    val length = readInt()
+    if length < 0 then throw ProtocolException("non-null byte array has a negative length")
+    readBytes(length)
+
   def readArray[A](readElement: => A): Vector[A] =
     val length = readInt()
     if length < 0 then throw ProtocolException(s"non-null array has invalid length: $length")
@@ -216,6 +221,10 @@ final class ByteWriter(initialCapacity: Int = 256):
     case Some(payload) =>
       writeInt(payload.length)
       writeBytes(payload)
+
+  def writeByteArray(value: Array[Byte]): this.type =
+    writeInt(value.length)
+    writeBytes(value)
 
   def writeArray[A](values: Iterable[A])(writeElement: A => Unit): this.type =
     writeInt(values.size)

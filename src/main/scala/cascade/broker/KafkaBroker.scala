@@ -1,5 +1,7 @@
 package cascade.broker
 
+import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, ReplicationManager}
+import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
@@ -9,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   private val running = AtomicBoolean(false)
+  private val closed = AtomicBoolean(false)
   private val server = ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val registry = TopicRegistry(
@@ -18,16 +21,31 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     config.flushIntervalMillis,
     config.flushBytes
   )
+  private val groupCoordinator = GroupCoordinator(config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"))
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null
+  @volatile private var clusterManager: ClusterManager | Null = null
+  @volatile private var replicationManager: ReplicationManager | Null = null
+  @volatile private var peerClient: PeerClient | Null = null
 
   def start(): Unit = synchronized {
+    if closed.get() then throw IllegalStateException("broker is closed")
     if running.get() then throw IllegalStateException("broker is already running")
     server.setReuseAddress(true)
     server.bind(InetSocketAddress(config.bindHost, config.port))
-    handler = RequestHandler(config, registry, advertisedPort)
+    val localNode = config.clusterNodes.find(_.id == config.nodeId).getOrElse {
+      ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
+    }
+    val peers = PeerClient()
+    val cluster = ClusterManager(config, registry, localNode, peers)
+    val replication = ReplicationManager(config, cluster, registry, peers)
+    peerClient = peers
+    clusterManager = cluster
+    replicationManager = replication
+    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, advertisedPort)
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
+    cluster.start()
   }
 
   def boundPort: Int = server.getLocalPort
@@ -39,11 +57,16 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   def flushStatistics: FlushStatistics = registry.flushStatistics
 
   override def close(): Unit = synchronized {
-    if running.compareAndSet(true, false) then
+    if closed.compareAndSet(false, true) then
+      running.set(false)
       server.close()
       connections.shutdownNow()
       Option(acceptThread).foreach(_.join(5000))
       connections.awaitTermination(5, TimeUnit.SECONDS)
+      Option(replicationManager).foreach(_.close())
+      Option(clusterManager).foreach(_.close())
+      Option(peerClient).foreach(_.close())
+      groupCoordinator.close()
       registry.close()
   }
 

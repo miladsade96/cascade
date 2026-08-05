@@ -60,6 +60,7 @@ final class PartitionLog(
     .flatMap(_.index.lastOption)
     .map(entry => Math.addExact(entry.lastOffset, 1L))
     .getOrElse(0L)
+  private var committedOffset: Long = nextOffset
   private var unflushedBytes = 0L
   private var inFlightFlushBytes = 0L
   private var flushInProgress = false
@@ -68,13 +69,31 @@ final class PartitionLog(
   private var forcedBytes = 0L
   private var forceNanos = 0L
 
-  def highWatermark: Long = synchronized(nextOffset)
+  def highWatermark: Long = synchronized(committedOffset)
+
+  def logEndOffset: Long = synchronized(nextOffset)
 
   def logStartOffset: Long = synchronized {
     segments.iterator.flatMap(_.index.headOption).map(_.baseOffset).nextOption().getOrElse(nextOffset)
   }
 
-  def append(recordSet: Array[Byte]): AppendResult =
+  def append(recordSet: Array[Byte]): AppendResult = appendInternal(recordSet, commitImmediately = true)
+
+  def appendReplica(recordSet: Array[Byte], expectedBaseOffset: Long): AppendResult = synchronized {
+    if nextOffset != expectedBaseOffset then
+      throw ProtocolException(s"replica offset mismatch: expected $expectedBaseOffset, log-end=$nextOffset")
+    appendInternal(recordSet, commitImmediately = false)
+  }
+
+  def commitThrough(offsetExclusive: Long): Unit = synchronized {
+    if offsetExclusive < committedOffset || offsetExclusive > nextOffset then
+      throw ProtocolException(
+        s"invalid commit watermark $offsetExclusive; current=$committedOffset, log-end=$nextOffset"
+      )
+    committedOffset = offsetExclusive
+  }
+
+  private def appendInternal(recordSet: Array[Byte], commitImmediately: Boolean): AppendResult =
     var scheduleFlush = false
     val result = synchronized {
       val prepared = RecordBatch.prepare(recordSet, nextOffset)
@@ -92,6 +111,7 @@ final class PartitionLog(
         case FlushPolicy.Sync => flushDirtySegments()
         case FlushPolicy.Periodic =>
           scheduleFlush = rolloverFlushRequested || unflushedBytes >= maxUnflushedBytes
+      if commitImmediately then committedOffset = nextOffset
       AppendResult(firstOffset, nextOffset - 1)
     }
     if scheduleFlush then requestFlush()
@@ -125,7 +145,7 @@ final class PartitionLog(
       var entryIndex = 0
       while entryIndex < segment.index.length && hasCapacity do
         val entry = segment.index(entryIndex)
-        if entry.lastOffset >= offset then
+        if entry.lastOffset >= offset && entry.lastOffset < committedOffset then
           val fits = output.size().toLong + entry.size.toLong <= maxBytes.toLong
           if included && !fits then hasCapacity = false
           else
@@ -135,12 +155,12 @@ final class PartitionLog(
             included = true
         entryIndex += 1
       segmentIndex += 1
-    FetchResult(nextOffset, logStartOffset, output.toByteArray)
+    FetchResult(committedOffset, logStartOffset, output.toByteArray)
   }
 
   def offsetForTimestamp(timestamp: Long): Long = synchronized {
     if timestamp == -2L then logStartOffset
-    else if timestamp == -1L then nextOffset
+    else if timestamp == -1L then committedOffset
     else logStartOffset // Timestamp index is a later compatibility milestone.
   }
 

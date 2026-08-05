@@ -5,18 +5,44 @@ object ApiKey:
   val Fetch: Short = 1
   val ListOffsets: Short = 2
   val Metadata: Short = 3
+  val OffsetCommit: Short = 8
+  val OffsetFetch: Short = 9
+  val FindCoordinator: Short = 10
+  val JoinGroup: Short = 11
+  val Heartbeat: Short = 12
+  val LeaveGroup: Short = 13
+  val SyncGroup: Short = 14
   val ApiVersions: Short = 18
   val CreateTopics: Short = 19
 
 object Errors:
   val None: Short = 0
   val UnknownTopicOrPartition: Short = 3
+  val LeaderNotAvailable: Short = 5
+  val NotLeaderOrFollower: Short = 6
+  val RequestTimedOut: Short = 7
+  val ReplicaNotAvailable: Short = 9
+  val NotEnoughReplicas: Short = 19
+  val NotEnoughReplicasAfterAppend: Short = 20
   val InvalidTopic: Short = 17
   val InvalidRequest: Short = 42
   val UnsupportedVersion: Short = 35
   val TopicAlreadyExists: Short = 36
   val InvalidPartitions: Short = 37
   val InvalidReplicationFactor: Short = 38
+  val NotController: Short = 41
+  val CoordinatorLoadInProgress: Short = 14
+  val CoordinatorNotAvailable: Short = 15
+  val NotCoordinator: Short = 16
+  val IllegalGeneration: Short = 22
+  val InconsistentGroupProtocol: Short = 23
+  val InvalidGroupId: Short = 24
+  val UnknownMemberId: Short = 25
+  val InvalidSessionTimeout: Short = 26
+  val RebalanceInProgress: Short = 27
+  val GroupAuthorizationFailed: Short = 30
+  val MemberIdRequired: Short = 79
+  val FencedLeaderEpoch: Short = 74
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
@@ -26,6 +52,13 @@ object Compatibility:
     ApiVersion(ApiKey.Fetch, 6, 6),
     ApiVersion(ApiKey.ListOffsets, 2, 2),
     ApiVersion(ApiKey.Metadata, 4, 4),
+    ApiVersion(ApiKey.OffsetCommit, 7, 7),
+    ApiVersion(ApiKey.OffsetFetch, 5, 5),
+    ApiVersion(ApiKey.FindCoordinator, 2, 2),
+    ApiVersion(ApiKey.JoinGroup, 5, 5),
+    ApiVersion(ApiKey.Heartbeat, 3, 3),
+    ApiVersion(ApiKey.LeaveGroup, 2, 2),
+    ApiVersion(ApiKey.SyncGroup, 3, 3),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
     ApiVersion(ApiKey.CreateTopics, 2, 2)
   )

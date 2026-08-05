@@ -92,6 +92,25 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("replica appends remain invisible until their high watermark is committed") {
+    val directory = Files.createTempDirectory("cascade-replica-watermark-test")
+    try
+      val log = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        val result = log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 0L)
+        assertEquals(result.baseOffset, 0L)
+        assertEquals(log.logEndOffset, 1L)
+        assertEquals(log.highWatermark, 0L)
+        assertEquals(log.fetch(0L, 1024).records.length, 0)
+
+        log.commitThrough(1L)
+        assertEquals(log.highWatermark, 1L)
+        assertEquals(log.fetch(0L, 1024).records.length, 61)
+        intercept[cascade.protocol.ProtocolException](log.appendReplica(TestRecordBatch.single(), 0L))
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   test("recovery truncates an incomplete batch from the active segment") {
     val directory = Files.createTempDirectory("cascade-tail-recovery-test")
     try

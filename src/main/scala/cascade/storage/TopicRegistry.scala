@@ -24,6 +24,7 @@ final class TopicRegistry(
   private val closed = AtomicBoolean(false)
   private val flushQueued = AtomicBoolean(false)
   private val backgroundFailure = AtomicReference[Throwable]()
+  private val PartitionDirectory = "partition-([0-9]+)".r
   private val flusher: Option[ScheduledExecutorService] = flushPolicy match
     case FlushPolicy.Periodic =>
       Some(Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-log-flusher").factory()))
@@ -43,6 +44,8 @@ final class TopicRegistry(
 
   def partition(topic: String, index: Int): Option[PartitionLog] =
     partitions(topic).flatMap(_.lift(index))
+
+  def validateTopicName(name: String): Boolean = validTopicName(name)
 
   def createTopic(name: String, partitionCount: Int): CreateTopicResult = synchronized {
     ensureHealthy()
@@ -152,5 +155,3 @@ final class TopicRegistry(
   private def validTopicName(name: String): Boolean =
     name.nonEmpty && name.length <= 249 && name != "." && name != ".." &&
       name.forall(character => character.isLetterOrDigit || character == '.' || character == '_' || character == '-')
-
-  private val PartitionDirectory = "partition-([0-9]+)".r

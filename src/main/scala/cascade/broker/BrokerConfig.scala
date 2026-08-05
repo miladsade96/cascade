@@ -1,5 +1,6 @@
 package cascade.broker
 
+import cascade.cluster.ClusterNode
 import cascade.storage.FlushPolicy
 import java.nio.file.{Path, Paths}
 
@@ -15,6 +16,11 @@ final case class BrokerConfig(
     flushIntervalMillis: Long = 1000L,
     flushBytes: Long = 64L * 1024 * 1024,
     nodeId: Int = 1,
+    clusterNodes: Vector[ClusterNode] = Vector.empty,
+    controllerId: Int = 1,
+    defaultReplicationFactor: Int = 1,
+    minInSyncReplicas: Int = 1,
+    peerTimeoutMillis: Int = 3000,
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -22,6 +28,20 @@ final case class BrokerConfig(
   require(maxRequestBytes >= 1024, "max request size must be at least 1 KiB")
   require(flushIntervalMillis > 0, "flush interval must be positive")
   require(flushBytes > 0, "flush bytes must be positive")
+  require(defaultReplicationFactor > 0, "default replication factor must be positive")
+  require(minInSyncReplicas > 0, "minimum in-sync replicas must be positive")
+  require(peerTimeoutMillis > 0, "peer timeout must be positive")
+  require(clusterNodes.map(_.id).distinct.size == clusterNodes.size, "cluster node IDs must be unique")
+  require(clusterNodes.isEmpty || clusterNodes.exists(_.id == nodeId), "cluster nodes must contain this node ID")
+  require(clusterNodes.isEmpty || clusterNodes.exists(_.id == controllerId), "cluster nodes must contain the controller ID")
+  require(
+    clusterNodes.isEmpty || defaultReplicationFactor <= clusterNodes.size,
+    "default replication factor cannot exceed cluster size"
+  )
+  require(
+    minInSyncReplicas <= defaultReplicationFactor,
+    "minimum in-sync replicas cannot exceed default replication factor"
+  )
 
 object BrokerConfig:
   def parse(arguments: Array[String]): BrokerConfig =
@@ -39,6 +59,13 @@ object BrokerConfig:
       case "--flush-interval-ms" :: value :: tail => loop(tail, config.copy(flushIntervalMillis = value.toLong))
       case "--flush-bytes" :: value :: tail => loop(tail, config.copy(flushBytes = value.toLong))
       case "--node-id" :: value :: tail => loop(tail, config.copy(nodeId = value.toInt))
+      case "--cluster-nodes" :: value :: tail =>
+        loop(tail, config.copy(clusterNodes = value.split(',').toVector.map(ClusterNode.parse)))
+      case "--controller-id" :: value :: tail => loop(tail, config.copy(controllerId = value.toInt))
+      case "--default-replication-factor" :: value :: tail =>
+        loop(tail, config.copy(defaultReplicationFactor = value.toInt))
+      case "--min-insync-replicas" :: value :: tail => loop(tail, config.copy(minInSyncReplicas = value.toInt))
+      case "--peer-timeout-ms" :: value :: tail => loop(tail, config.copy(peerTimeoutMillis = value.toInt))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
     loop(arguments.toList, BrokerConfig())

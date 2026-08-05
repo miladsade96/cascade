@@ -9,6 +9,20 @@ import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 final class BrokerIntegrationSuite extends FunSuite:
+  test("close is safe before start and permanently closes the broker") {
+    val directory = Files.createTempDirectory("cascade-broker-lifecycle")
+    val broker = KafkaBroker(
+      BrokerConfig(bindHost = "127.0.0.1", port = 0, advertisedHost = "127.0.0.1", dataDirectory = directory)
+    )
+    try
+      broker.close()
+      broker.close()
+      intercept[IllegalStateException](broker.start())
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   test("serves discovery, auto-creation, produce, and fetch over persistent Kafka TCP framing") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
