@@ -1,0 +1,11 @@
+.bsp/
+.idea/
+.metals/
+.tools/
+.vscode/
+target/
+project/project/
+project/target/
+data/
+*.log
+
