@@ -4,31 +4,33 @@
   <img src="docs/assets/cascade-logo.png" alt="Cascade logo: high-speed cascading data streams" width="960">
 </p>
 
-> A pure Scala 3 streaming log with Kafka wire-protocol compatibility, durable storage, idempotent and transactional delivery, classic consumer groups, and a tested static replication path.
+> I'm building a fast Kafka-style streaming log in pure Scala 3.
 
-Cascade is built so existing Kafka-protocol clients can connect without a Cascade-specific SDK. The broker runtime uses only Scala and the JDK; Apache Kafka's Java client is a test-scoped compatibility oracle, not a runtime dependency.
+I built Cascade around the Kafka wire protocol so existing Kafka clients can connect without a custom SDK. If a language has a client that speaks one of the supported protocol versions, it can talk to Cascade.
 
-Cascade already demonstrates the core mechanics of a Kafka-style system, including broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, and leader promotion.
+The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
+
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, and leader promotion.
 
 > [!IMPORTANT]
-> Cascade is an advanced development broker, not yet a production replacement for an Apache Kafka cluster. Single-node delivery semantics are implemented and tested. The three-node mode is a static replication milestone and still lacks coordinator replication, controller election, replica catch-up, and other production gates documented below.
+> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics, but three-node mode is still a static replication milestone. Coordinator replication, controller election, replica catch-up, and the other production gates below are still missing.
 
-## Performance at a glance
+## Performance I measured
 
-Measured on the documented Windows development machine with Java 21, eight partitions, four producers, four consumers, 1 KiB deterministic incompressible payloads, LZ4, `acks=all`, and periodic background flushing:
+I measured this on my Windows development machine with Java 21, eight partitions, four producers, four consumers, 1 KiB deterministic incompressible payloads, LZ4, `acks=all`, and periodic background flushing:
 
 | Workload | Produce | Consume | Exact verification |
 | --- | ---: | ---: | ---: |
 | 10,000,000 records, sustained | **182,285 records/s** / **178.0 MiB/s** | **473,058 records/s** | **10,000,000 / 10,000,000** |
 | 1,000,000 records, calibration | **614,413 records/s** / **600.0 MiB/s** | **556,232 records/s** / **543.2 MiB/s** | **1,000,000 / 1,000,000** |
 
-The corrected background-flush path improved sustained ten-million-record production from 57,400 to 182,285 records/s, a **3.18x increase**, and reduced the write phase from 174.2 to 54.9 seconds. The long run explicitly forced 9.58 GiB in 47.6 cumulative seconds, showing that sustained production was storage-bound on that machine.
+After I fixed the background-flush path, sustained ten-million-record production went from 57,400 to 182,285 records/s: a **3.18x improvement**. The write phase dropped from 174.2 to 54.9 seconds. That run forced 9.58 GiB in 47.6 cumulative seconds, so the drive was the main limit on this machine.
 
-The one-million result benefits heavily from the filesystem cache and must not be extrapolated as sustained disk throughput. These are shared-JVM development-machine regression measurements, not production capacity claims. See [the complete heavy-load report](docs/performance/2026-08-05-heavy-load.md) for the environment, latency distribution, CPU, GC, heap, storage, and methodology.
+The one-million test is much shorter and benefits a lot from the filesystem cache. I don't present either result as production capacity. The [full heavy-load report](docs/performance/2026-08-05-heavy-load.md) includes the machine, workload, latency, CPU, GC, heap, storage, and test method.
 
-## Why Cascade is interesting
+## What I'm building
 
-| Capability | What Cascade demonstrates |
+| Area | What is implemented |
 | --- | --- |
 | Language-neutral access | Length-prefixed Kafka TCP frames and an explicit `ApiVersions` contract; no custom client library required |
 | Pure Scala/JDK runtime | Scala 3 broker implementation with Java 21 virtual threads and positional file I/O |
@@ -37,9 +39,9 @@ The one-million result benefits heavily from the filesystem cache and must not b
 | Durable state | CRC32C-protected metadata, consumer-offset, and delivery-state journals with forced commits and corrupt/partial-tail recovery |
 | Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
 | Static replication | RF=3 partition assignment, synchronous ISR replication, committed high watermarks, leader epochs, ISR shrink, and surviving-replica promotion |
-| Measurable performance | Reproducible one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
+| Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
-## Existing features
+## What works now
 
 ### Kafka-compatible networking
 
@@ -50,7 +52,7 @@ The one-million result benefits heavily from the filesystem cache and must not b
 - Explicitly advertised API keys and versions rather than a broad, unverified compatibility claim.
 - Kafka 4.3.1 Admin, Producer, transactional Producer, explicit Consumer, and subscribed Consumer interoperability tests.
 
-Any language with a client that speaks the supported Kafka protocol versions can connect to Cascade. Automated end-to-end compatibility currently uses the Kafka Java client; broader Python, Go, .NET, and other client matrices remain upcoming qualification work.
+Any language can connect if its client speaks one of the supported Kafka protocol versions. For now, my automated end-to-end tests use the Kafka Java client. I still need to add proper client matrices for Python, Go, .NET, and other languages.
 
 ### Storage and durability
 
@@ -64,11 +66,11 @@ Any language with a client that speaks the supported Kafka protocol versions can
 - `sync` flushing for strict per-append local persistence.
 - Clean shutdown forces all remaining dirty segments.
 
-Kafka acknowledgements and local disk forcing are separate controls. In single-node periodic mode, `acks=1` and `acks=all` acknowledge a local append before the next scheduled force and can be lost after a simultaneous process, OS, or power failure. In cluster mode, `acks=all` requires the configured minimum ISR and waits for every current ISR member to append before advancing the committed high watermark.
+Kafka acknowledgements and local disk forcing are separate settings. In single-node periodic mode, `acks=1` and `acks=all` acknowledge a local append before the next scheduled force. A process, OS, or power failure before that force can lose those records. In cluster mode, `acks=all` requires the configured minimum ISR and waits for every current ISR member to append before the committed high watermark advances.
 
 ### Idempotence and transactions
 
-Single-node mode supports the Kafka delivery-semantics path:
+In single-node mode I support this Kafka delivery-semantics path:
 
 - Durable producer ID allocation and producer-epoch fencing.
 - Per-partition sequence validation with wraparound after `Int.MaxValue`.
@@ -81,7 +83,7 @@ Single-node mode supports the Kafka delivery-semantics path:
 - Transaction timeouts and automatic abort when a new epoch fences an old owner.
 - Applied checkpoints that recover an interrupted transactional offset commit without replaying old transactions over newer offsets.
 
-This provides the building blocks for exactly-once processing on one broker. Producer and transaction coordinator state is not replicated in the current static-cluster mode, so cross-broker delivery failover is not yet claimed.
+This gives Cascade the building blocks for exactly-once processing on one broker. I haven't replicated producer and transaction coordinator state in static-cluster mode, so I'm not claiming cross-broker delivery failover yet.
 
 ### Consumer groups
 
@@ -93,7 +95,7 @@ This provides the building blocks for exactly-once processing on one broker. Pro
 - Offset recovery across restart and partial/corrupt-tail truncation.
 - Transactional offset staging and commit through `TxnOffsetCommit`.
 
-Clients exposing Kafka's newer consumer protocol should set `group.protocol=classic` until Cascade implements that protocol.
+If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic` for now.
 
 ### Static three-node replication
 
@@ -106,16 +108,16 @@ Clients exposing Kafka's newer consumer protocol should set `group.protocol=clas
 - Failure detection, ISR shrink, and promotion of a surviving replica with a new leader epoch.
 - Real Kafka-client end-to-end verification before and after the original partition leader stops.
 
-Membership and the controller remain static. Returning replicas cannot catch up or safely rejoin the ISR yet, and the controller/group/delivery coordinators do not have production failover.
+Membership and the controller are still static. A returning replica can't catch up or safely rejoin the ISR yet. I also haven't added production failover for the controller, group coordinator, or delivery coordinator.
 
-## Quick start
+## Run Cascade
 
 ### Requirements
 
 - JDK 21+
 - Network access to Maven Central for the first build
 
-The checked-in launchers download SBT automatically.
+The included launchers download SBT the first time you run them.
 
 ### Run the tests and start one broker
 
@@ -134,7 +136,7 @@ chmod +x sbt
 ./sbt "run --host 0.0.0.0 --port 9092 --advertised-host localhost --data-dir data"
 ```
 
-Point a Kafka-protocol client at `localhost:9092`. A representative single-node producer configuration is:
+Point any supported Kafka client at `localhost:9092`. A basic single-node producer configuration is:
 
 ```properties
 bootstrap.servers=localhost:9092
@@ -150,9 +152,9 @@ group.protocol=classic
 isolation.level=read_committed
 ```
 
-Set `transactional.id` on a producer to use Kafka transactions. Use `read_uncommitted` when a consumer intentionally needs to inspect aborted transactional records.
+Set `transactional.id` on a producer when you want to use transactions. Use `read_uncommitted` only when the consumer should also see aborted transactional records.
 
-### Run a static three-node development cluster
+### Run a static three-node cluster for development
 
 Run each command in a separate process and give every broker its own data directory:
 
@@ -162,11 +164,11 @@ Run each command in a separate process and give every broker its own data direct
 .\sbt.bat "run --host 127.0.0.1 --port 9094 --advertised-host 127.0.0.1 --advertised-port 9094 --node-id 3 --data-dir data-3 --cluster-nodes 1@127.0.0.1:9092,2@127.0.0.1:9093,3@127.0.0.1:9094 --controller-id 1 --default-replication-factor 3 --min-insync-replicas 2"
 ```
 
-Keep `enable.idempotence=false` in static-cluster testing until producer/transaction coordinator state is replicated.
+For now, keep `enable.idempotence=false` in static-cluster tests. I haven't replicated producer and transaction coordinator state yet.
 
 ## Kafka wire compatibility
 
-Cascade returns this exact matrix from `ApiVersions`:
+Cascade returns exactly this matrix from `ApiVersions`:
 
 | API | Key | Versions | Implemented behavior |
 | --- | ---: | ---: | --- |
@@ -189,7 +191,7 @@ Cascade returns this exact matrix from `ApiVersions`:
 | EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
 | TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
 
-The implementation follows the [Apache Kafka 4.3 protocol grammar](https://kafka.apache.org/43/design/protocol/), but only the versions above are currently advertised and accepted.
+I follow the [Apache Kafka 4.3 protocol grammar](https://kafka.apache.org/43/design/protocol/). Cascade only advertises and accepts the versions listed above; I don't want to claim support for versions I haven't tested.
 
 ## Architecture
 
@@ -216,9 +218,9 @@ Request routing
               +-- ISR follower replication and committed watermark
 ```
 
-The data path avoids record deserialization. File-channel positional I/O prevents shared channel-position races, partition logs serialize offset assignment, and Fetch returns complete record batches. Transactional appends reserve their range before storage so `EndTxn` cannot race an in-flight append and the last stable offset does not move past open work.
+I keep records serialized on the data path. Positional file I/O avoids shared channel-position races, each partition serializes offset assignment, and Fetch returns complete record batches. A transactional append reserves its range before storage. That stops `EndTxn` from racing an in-flight append and keeps the last stable offset behind open work.
 
-## Heavy-load results
+## Heavy-load test details
 
 ### Ten-million sustained workload
 
@@ -254,7 +256,7 @@ flush byte limit    64 MiB per partition
 | Consumer verification | **10,000,000 / 10,000,000 passed** |
 | Peak shared-JVM heap | 5,221.3 MiB |
 
-The acknowledgement histogram starts when each asynchronous `send` is offered, so saturation latency includes producer-side queueing. Producers offered data faster than the local system-temp device could force it for a sustained ten-gigabyte run, which is why p95 exceeded five seconds even after the flush correction.
+I start the acknowledgement timer when each asynchronous `send` is offered, so saturation latency includes producer-side queueing. The producers offered data faster than my local temporary drive could force it during a sustained ten-gigabyte run. That's why p95 stayed above five seconds after the flush fix.
 
 ### One-million calibration
 
@@ -268,7 +270,7 @@ The acknowledgement histogram starts when each asynchronous `send` is offered, s
 | Consumer verification | **1,000,000 / 1,000,000 passed** |
 | Peak shared-JVM heap | 1,259.0 MiB |
 
-A later post-cluster regression run remained at 615,592 produced and 527,001 consumed records/s with p99 acknowledgement latency at or below 500 ms and a 422.632 ms maximum. This confirms no material single-node regression, but short cache-assisted runs are not sustained storage benchmarks.
+After adding the cluster path, I ran this test again. It reached 615,592 produced and 527,001 consumed records/s, with p99 acknowledgement latency at or below 500 ms and a 422.632 ms maximum. I didn't find a meaningful single-node regression, but this short cache-assisted test isn't a sustained storage benchmark.
 
 ### Reproduce the load test
 
@@ -276,7 +278,7 @@ A later post-cluster regression run remained at 615,592 produced and 527,001 con
 ./sbt "Test/runMain cascade.performance.LoadTest --records 10000000 --payload-bytes 1024 --partitions 8 --producers 4 --consumers 4 --compression lz4 --flush-policy periodic --flush-interval-ms 1000 --flush-bytes 67108864"
 ```
 
-On Windows, replace `./sbt` with `.\sbt.bat`. Use `--keep-data` to retain the generated segment directory. The harness is deliberately excluded from ordinary `sbt test` so CI remains deterministic and fast.
+On Windows, replace `./sbt` with `.\sbt.bat`. Add `--keep-data` if you want to keep the generated segment directory. I leave this harness out of normal `sbt test` runs because it's large and its result depends on the machine.
 
 The harness reports:
 
@@ -286,19 +288,19 @@ The harness reports:
 - Stored bytes, bytes per record, force count/volume/time, and pending dirty bytes.
 - Peak heap and exact consumed-record verification.
 
-See [the complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) for the comparison against the former per-request-force implementation and detailed interpretation.
+The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) compares this result with the old per-request-force implementation and explains what changed.
 
 ## Verification
 
-The current `sbt test` suite passes **39/39 tests** across three layers:
+The current `sbt test` suite passes **39/39 tests** in three layers:
 
 - Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, and metadata recovery.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, and idempotent state recovery after broker restart.
 - Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
 
-The load harness separately verifies exact record counts at one-million and ten-million scale.
+The load harness separately checks the exact record count at one million and ten million records.
 
-## Upcoming features
+## What I plan to build next
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
@@ -311,9 +313,9 @@ The load harness separately verifies exact record counts at one-million and ten-
 | 7 | Qualification | Multi-day soak, kill/crash/power-loss simulation, network partitions, disk-full/corruption testing, and dedicated-host replicated-cluster benchmarks |
 | 8 | Profile-driven optimization | Zero-copy Fetch with `FileChannel.transferTo`, selector/worker pools, multi-device log placement, and further changes justified by profiling |
 
-The measurable release gates live in [docs/production-readiness.md](docs/production-readiness.md). Cascade should not be described as a production Kafka replacement until every blocking gate passes on the documented deployment topology.
+I track the release gates in [docs/production-readiness.md](docs/production-readiness.md). I won't call Cascade a production Kafka replacement until every blocking gate passes on the deployment topology I document.
 
-## Current limitations
+## What is still missing
 
 - The controller and broker membership are static; there is no controller election.
 - Offline replicas cannot catch up or safely rejoin the ISR automatically.
@@ -345,7 +347,7 @@ The measurable release gates live in [docs/production-readiness.md](docs/product
 | `--peer-timeout-ms` | `3000` | Internal metadata and replica RPC timeout |
 | `--no-auto-create` | Off | Disable Metadata/Produce auto-creation |
 
-## Additional documentation
+## More documentation
 
 - [Production-readiness gates](docs/production-readiness.md)
 - [Heavy-load report](docs/performance/2026-08-05-heavy-load.md)
