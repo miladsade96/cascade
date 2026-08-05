@@ -3,10 +3,11 @@ package cascade
 import java.nio.{ByteBuffer, ByteOrder}
 
 object TestRecordBatch:
-  def single(offset: Long = 0L): Array[Byte] =
-    val buffer = ByteBuffer.allocate(61).order(ByteOrder.BIG_ENDIAN)
+  def single(offset: Long = 0L, totalBytes: Int = 61): Array[Byte] =
+    require(totalBytes >= 61, "record batch must contain the complete magic-v2 header")
+    val buffer = ByteBuffer.allocate(totalBytes).order(ByteOrder.BIG_ENDIAN)
     buffer.putLong(offset)
-    buffer.putInt(49) // bytes after batchLength
+    buffer.putInt(totalBytes - 12) // bytes after batchLength
     buffer.putInt(0) // partition leader epoch
     buffer.put(2.toByte)
     buffer.putInt(0) // CRC is opaque to storage tests
@@ -19,4 +20,3 @@ object TestRecordBatch:
     buffer.putInt(-1)
     buffer.putInt(1)
     buffer.array()
-

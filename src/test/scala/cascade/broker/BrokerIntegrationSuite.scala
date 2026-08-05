@@ -45,6 +45,8 @@ final class BrokerIntegrationSuite extends FunSuite:
         assertEquals(produced.readInt(), 0)
         assertEquals(produced.readShort(), Errors.None)
         assertEquals(produced.readLong(), 0L)
+        assertEquals(broker.flushStatistics.forces, 0L)
+        assert(broker.flushStatistics.pendingBytes > 0L)
 
         val fetched = request(output, input, fetchRequest("events", correlationId = 4))
         assertEquals(fetched.readInt(), 4)
@@ -122,7 +124,9 @@ final class BrokerIntegrationSuite extends FunSuite:
         port = 0,
         advertisedHost = "127.0.0.1",
         dataDirectory = directory,
-        segmentBytes = 1024 * 1024
+        segmentBytes = 1024 * 1024,
+        flushIntervalMillis = 60_000,
+        flushBytes = Long.MaxValue
       )
     )
     try

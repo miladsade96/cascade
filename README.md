@@ -66,6 +66,14 @@ The record hot path does not deserialize records or decompress client batches. C
 
 Concurrency is deliberately simple: Java 21 virtual threads isolate slow connections, requests remain ordered within each connection, and each partition log serializes offset assignment with its append. File-channel positional I/O prevents shared channel-position races. Fetches are batch aligned, as required by Kafka's record-set semantics.
 
+### Durability and flushing
+
+Kafka acknowledgements and physical disk flushing are separate concerns. In Cascade's current single-replica mode, `acks=1` and `acks=all` both acknowledge after the leader append; `acks=all` will gain additional meaning when replication and ISR tracking are implemented.
+
+The default `periodic` policy batches `FileChannel.force(false)` operations across dirty data instead of forcing every Produce request. A broker-wide flusher runs forces outside partition append locks, schedules an immediate pass after 64 MiB becomes dirty or a segment rolls, and otherwise limits the dirty interval to one second. Clean shutdown always flushes remaining data. Use `--flush-policy sync` only when every single-node append must reach stable storage before acknowledgement; it is intentionally much slower.
+
+Periodic acknowledgements can be lost after a process, OS, or power failure before the next flush. Recovery truncates an incomplete batch tail and, if necessary, discards later segments whose offsets depend on that tail. Production-grade durability ultimately requires replicated in-sync replicas rather than per-request single-disk fsync.
+
 ## Tests
 
 `sbt test` runs all three layers:
@@ -73,6 +81,18 @@ Concurrency is deliberately simple: Java 21 virtual threads isolate slow connect
 - Unit: primitive/flexible wire codecs, bounds failures, record-batch offsets, segment rollover, and recovery.
 - Integration: a real TCP socket sends hand-encoded ApiVersions, Metadata, Produce, and Fetch frames over one persistent connection.
 - End to end: Apache Kafka client 4.3.1 creates a topic through `Admin`, writes through `KafkaProducer`, and reads through `KafkaConsumer`.
+
+### Reproducible heavy-load test
+
+The load harness uses real Kafka clients, durable acknowledgements, explicit partitions, incompressible payload variants, and full consumer record-count verification. It reports producer/consumer throughput, acknowledgement latency buckets, process CPU, GC, peak heap, and storage amplification:
+
+```bash
+./sbt "Test/runMain cascade.performance.LoadTest --records 1000000 --payload-bytes 1024 --partitions 8 --producers 4 --consumers 4 --compression lz4 --flush-policy periodic --flush-interval-ms 1000 --flush-bytes 67108864"
+```
+
+Use `--keep-data` to retain the generated segment directory for inspection. The harness is intentionally not part of `sbt test`, so ordinary CI runs remain deterministic and quick.
+
+The latest measured run, including exact verification of all one million consumed records, is recorded in [`docs/performance/2026-08-05-heavy-load.md`](docs/performance/2026-08-05-heavy-load.md).
 
 ## Current limits and roadmap
 
@@ -95,10 +115,12 @@ The current milestone is a durable, language-neutral, single-node log. It intent
 | `--data-dir` | `data` | Topic and partition segment root |
 | `--max-request-bytes` | `104857600` | Hard frame-size bound |
 | `--segment-bytes` | `134217728` | Segment rollover target |
+| `--flush-policy` | `periodic` | `periodic` batched background forces or strict per-append `sync` |
+| `--flush-interval-ms` | `1000` | Maximum dirty age before a periodic force |
+| `--flush-bytes` | `67108864` | Dirty-byte threshold that schedules a force |
 | `--node-id` | `1` | Broker/controller ID |
 | `--no-auto-create` | off | Disable Metadata/Produce auto-creation |
 
 ## License
 
 Apache License 2.0.
-

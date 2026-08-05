@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.protocol.ProtocolException
-import cascade.storage.TopicRegistry
+import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
@@ -11,7 +11,13 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   private val running = AtomicBoolean(false)
   private val server = ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
-  private val registry = TopicRegistry(config.dataDirectory, config.segmentBytes)
+  private val registry = TopicRegistry(
+    config.dataDirectory,
+    config.segmentBytes,
+    config.flushPolicy,
+    config.flushIntervalMillis,
+    config.flushBytes
+  )
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null
 
@@ -29,6 +35,8 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   def advertisedPort: Int = config.advertisedPort.getOrElse(boundPort)
 
   def bootstrapServers: String = s"${config.advertisedHost}:$advertisedPort"
+
+  def flushStatistics: FlushStatistics = registry.flushStatistics
 
   override def close(): Unit = synchronized {
     if running.compareAndSet(true, false) then

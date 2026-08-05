@@ -147,7 +147,7 @@ final class RequestHandler(config: BrokerConfig, registry: TopicRegistry, advert
       val partitionResults = partitions.map { case (index, records) =>
         (registry.partition(topic, index), records) match
           case (Some(log), Some(batch)) =>
-            val result = log.append(batch, force = acknowledgements != 0)
+            val result = log.append(batch)
             (index, Errors.None, result.baseOffset)
           case _ => (index, Errors.UnknownTopicOrPartition, -1L)
       }
