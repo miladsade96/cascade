@@ -1,5 +1,9 @@
 # Cascade
 
+<p align="center">
+  <img src="docs/assets/cascade-logo.png" alt="Cascade logo: high-speed cascading data streams" width="960">
+</p>
+
 > A pure Scala 3 streaming log with Kafka wire-protocol compatibility, durable storage, idempotent and transactional delivery, classic consumer groups, and a tested static replication path.
 
 Cascade is built so existing Kafka-protocol clients can connect without a Cascade-specific SDK. The broker runtime uses only Scala and the JDK; Apache Kafka's Java client is a test-scoped compatibility oracle, not a runtime dependency.

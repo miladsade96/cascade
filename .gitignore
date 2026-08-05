@@ -9,3 +9,4 @@ project/target/
 data/
 *.log
 
+/docs/launch-announcement.md
