@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
-import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
@@ -260,6 +260,155 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("Kafka transactions expose committed records, hide aborted records, and recover after restart") {
+    val directory = Files.createTempDirectory("cascade-transactions-e2e")
+    try
+      val firstBroker = testBroker(directory)
+      try
+        firstBroker.start()
+        val admin = Admin.create(adminProperties(firstBroker.bootstrapServers))
+        try admin.createTopics(java.util.List.of(new NewTopic("transaction-events", 1, 1.toShort))).all().get()
+        finally admin.close(Duration.ofSeconds(5))
+
+        val producer = KafkaProducer[Array[Byte], Array[Byte]](
+          transactionalProducerProperties(firstBroker.bootstrapServers, "recoverable-producer")
+        )
+        try
+          producer.initTransactions()
+          producer.beginTransaction()
+          producer.send(ProducerRecord("transaction-events", "committed-before-restart".getBytes(StandardCharsets.UTF_8))).get()
+          producer.commitTransaction()
+
+          producer.beginTransaction()
+          producer.send(ProducerRecord("transaction-events", "aborted-before-restart".getBytes(StandardCharsets.UTF_8))).get()
+          producer.abortTransaction()
+        finally producer.close(Duration.ofSeconds(5))
+      finally firstBroker.close()
+
+      val secondBroker = testBroker(directory)
+      try
+        secondBroker.start()
+        val producer = KafkaProducer[Array[Byte], Array[Byte]](
+          transactionalProducerProperties(secondBroker.bootstrapServers, "recoverable-producer")
+        )
+        try
+          producer.initTransactions()
+          producer.beginTransaction()
+          producer.send(ProducerRecord("transaction-events", "committed-after-restart".getBytes(StandardCharsets.UTF_8))).get()
+          producer.commitTransaction()
+        finally producer.close(Duration.ofSeconds(5))
+
+        val committedConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(secondBroker.bootstrapServers, readCommitted = true)
+        )
+        try
+          val partition = TopicPartition("transaction-events", 0)
+          committedConsumer.assign(java.util.List.of(partition))
+          committedConsumer.seekToBeginning(java.util.List.of(partition))
+          assertEquals(
+            pollValues(committedConsumer, expected = 2),
+            Vector("committed-before-restart", "committed-after-restart")
+          )
+        finally committedConsumer.close()
+
+        val uncommittedConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(secondBroker.bootstrapServers, readCommitted = false)
+        )
+        try
+          val partition = TopicPartition("transaction-events", 0)
+          uncommittedConsumer.assign(java.util.List.of(partition))
+          uncommittedConsumer.seekToBeginning(java.util.List.of(partition))
+          assertEquals(
+            pollValues(uncommittedConsumer, expected = 3),
+            Vector("committed-before-restart", "aborted-before-restart", "committed-after-restart")
+          )
+        finally uncommittedConsumer.close()
+      finally secondBroker.close()
+    finally deleteTree(directory)
+  }
+
+  test("Kafka transactions gate the last stable offset and atomically commit consumer offsets") {
+    val directory = Files.createTempDirectory("cascade-exactly-once-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try admin.createTopics(java.util.List.of(new NewTopic("transaction-output", 1, 1.toShort))).all().get()
+      finally admin.close(Duration.ofSeconds(5))
+
+      val partition = TopicPartition("transaction-output", 0)
+      val groupId = "exactly-once-workers"
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](
+        transactionalProducerProperties(broker.bootstrapServers, "exactly-once-producer")
+      )
+      try
+        producer.initTransactions()
+        producer.beginTransaction()
+        producer.send(ProducerRecord("transaction-output", "committed".getBytes(StandardCharsets.UTF_8))).get()
+        producer.sendOffsetsToTransaction(
+          Map(partition -> OffsetAndMetadata(1L)).asJava,
+          classicGroupMetadata(groupId)
+        )
+
+        val openTransactionReader = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(broker.bootstrapServers, readCommitted = true)
+        )
+        try
+          openTransactionReader.assign(java.util.List.of(partition))
+          openTransactionReader.seekToBeginning(java.util.List.of(partition))
+          assertEquals(openTransactionReader.endOffsets(java.util.List.of(partition)).get(partition).longValue(), 0L)
+          assert(openTransactionReader.poll(Duration.ofMillis(300)).isEmpty)
+        finally openTransactionReader.close()
+
+        producer.commitTransaction()
+
+        val groupConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(broker.bootstrapServers, groupId)
+        )
+        try
+          val committed = groupConsumer.committed(java.util.Set.of(partition)).get(partition)
+          assertEquals(Option(committed).map(_.offset()), Some(1L))
+        finally groupConsumer.close()
+
+        producer.beginTransaction()
+        producer.send(ProducerRecord("transaction-output", "aborted".getBytes(StandardCharsets.UTF_8))).get()
+        producer.sendOffsetsToTransaction(
+          Map(partition -> OffsetAndMetadata(2L)).asJava,
+          classicGroupMetadata(groupId)
+        )
+        producer.abortTransaction()
+
+        val unchangedGroupConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(broker.bootstrapServers, groupId)
+        )
+        try
+          val committed = unchangedGroupConsumer.committed(java.util.Set.of(partition)).get(partition)
+          assertEquals(Option(committed).map(_.offset()), Some(1L))
+        finally unchangedGroupConsumer.close()
+      finally producer.close(Duration.ofSeconds(5))
+
+      val committedReader = KafkaConsumer[Array[Byte], Array[Byte]](
+        consumerProperties(broker.bootstrapServers, readCommitted = true)
+      )
+      try
+        committedReader.assign(java.util.List.of(partition))
+        committedReader.seekToBeginning(java.util.List.of(partition))
+        assertEquals(pollValues(committedReader, expected = 1), Vector("committed"))
+      finally committedReader.close()
+
+      val uncommittedReader = KafkaConsumer[Array[Byte], Array[Byte]](
+        consumerProperties(broker.bootstrapServers)
+      )
+      try
+        uncommittedReader.assign(java.util.List.of(partition))
+        uncommittedReader.seekToBeginning(java.util.List.of(partition))
+        assertEquals(pollValues(uncommittedReader, expected = 2), Vector("committed", "aborted"))
+      finally uncommittedReader.close()
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   private def producerProperties(bootstrapServers: String): Properties =
     val properties = Properties()
     properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
@@ -271,6 +420,17 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
     properties
 
+  private def transactionalProducerProperties(bootstrapServers: String, transactionalId: String): Properties =
+    val properties = producerProperties(bootstrapServers)
+    properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
+    properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
+    properties.put(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, "30000")
+    properties
+
+  @annotation.nowarn("cat=deprecation")
+  private def classicGroupMetadata(groupId: String): ConsumerGroupMetadata =
+    ConsumerGroupMetadata(groupId, -1, "", java.util.Optional.empty[String]())
+
   private def adminProperties(bootstrapServers: String): Properties =
     val properties = Properties()
     properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
@@ -278,7 +438,7 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
     properties
 
-  private def consumerProperties(bootstrapServers: String): Properties =
+  private def consumerProperties(bootstrapServers: String, readCommitted: Boolean = false): Properties =
     val properties = Properties()
     properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
     properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
@@ -287,6 +447,10 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
     properties.put(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "10000")
     properties.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
+    properties.put(
+      ConsumerConfig.ISOLATION_LEVEL_CONFIG,
+      if readCommitted then "read_committed" else "read_uncommitted"
+    )
     properties
 
   private def groupConsumerProperties(

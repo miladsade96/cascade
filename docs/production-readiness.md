@@ -10,6 +10,7 @@ Cascade is not yet a production replacement for an Apache Kafka cluster. This do
 - Size-based segments, restart discovery, partial-tail recovery, and configurable synchronous or batched periodic flushing.
 - Classic consumer-group join, sync, heartbeat, leave, rebalance, and session expiry.
 - CRC32C-protected, forced committed-offset journal with restart recovery.
+- Idempotent producer IDs, epoch fencing, bounded duplicate detection, sequence validation/recovery, transactions, timeouts, transactional offsets, and `read_committed` isolation in single-node mode.
 - Static-cluster metadata images durably accepted by a majority, controller quorum recovery, round-robin replica assignment, leader epochs, ISR failure detection, and surviving-replica promotion.
 - Synchronous parallel leader-to-follower batch replication, `min.insync.replicas` admission, committed high-watermark visibility, and leader-only fetch/offset lookup.
 - Real Kafka 4.3.1 client coverage for Admin, Producer, explicit Consumer, subscribed consumers, rebalance, committed-offset recovery, broker restart, three-node replication, and partition-leader shutdown.
@@ -21,7 +22,7 @@ Cascade is not yet a production replacement for an Apache Kafka cluster. This do
 | --- | --- | --- |
 | Availability | At least three brokers, replicated partitions, ISR tracking, leader election, and verified recovery from broker/process/disk loss | Static three-node replication and graceful leader-loss failover pass; crash/disk-loss recovery, catch-up and re-admission remain |
 | Metadata | Durable quorum controller, fencing, leader epochs, reassignment, and cluster membership changes | Majority-replicated metadata images and partition leader epochs implemented; controller election, dynamic membership and reassignment remain |
-| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Not implemented |
+| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Implemented and acceptance-tested in single-node mode; coordinator-state replication and failover remain blocking for cluster deployment |
 | Storage lifecycle | Time/size retention, log and offset compaction, timestamp/transaction indexes, disk-pressure handling, and safe deletion | Not implemented |
 | Security | TLS, SASL mechanisms, authorization/ACLs, audit events, and secret rotation | Not implemented |
 | Resource isolation | Client/user quotas, request and connection limits, bounded queues, overload shedding, and multi-tenant tests | Partial frame bounds only |

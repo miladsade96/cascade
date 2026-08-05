@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.*
+import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
 import cascade.storage.TopicRegistry
@@ -11,6 +12,7 @@ final class RequestHandler(
     groupCoordinator: GroupCoordinator,
     clusterManager: ClusterManager,
     replicationManager: ReplicationManager,
+    deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int
 ):
   def handle(frame: Array[Byte]): Option[Array[Byte]] =
@@ -38,6 +40,11 @@ final class RequestHandler(
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.CreateTopics => createTopics(body)
+      case ApiKey.InitProducerId => initProducerId(body)
+      case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(body)
+      case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
+      case ApiKey.EndTxn => endTxn(body)
+      case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
       case ApiKey.Produce      => produce(body)
       case ApiKey.Fetch        => fetch(body)
       case ApiKey.ListOffsets  => listOffsets(body)
@@ -77,13 +84,13 @@ final class RequestHandler(
     cursor.readString()
     val coordinatorType = cursor.readByte()
     cursor.ensureFullyRead()
-    val supported = coordinatorType == 0.toByte
+    val supported = coordinatorType == 0.toByte || coordinatorType == 1.toByte
     val coordinator = if clusterManager.isEnabled then clusterManager.controllerNode else
       ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
     val writer = ByteWriter()
     writer.writeInt(0)
     writer.writeShort(if supported then Errors.None else Errors.CoordinatorNotAvailable)
-    writer.writeNullableString(if supported then None else Some("only group coordination is supported"))
+    writer.writeNullableString(if supported then None else Some("unsupported coordinator type"))
     writer.writeInt(if supported then coordinator.id else -1)
     writer.writeString(if supported then coordinator.host else "")
     writer.writeInt(if supported then coordinator.port else -1)
@@ -309,7 +316,7 @@ final class RequestHandler(
     Some(writer.result())
 
   private def produce(cursor: ByteCursor): Option[Array[Byte]] =
-    cursor.readNullableString() // transactional_id
+    val transactionalId = cursor.readNullableString()
     val acknowledgements = cursor.readShort()
     val timeoutMillis = cursor.readInt()
     val requests = cursor.readArray {
@@ -332,7 +339,15 @@ final class RequestHandler(
       val partitionResults = partitions.map { case (index, records) =>
         records match
           case Some(batch) =>
-            val result = replicationManager.append(topic, index, batch, acknowledgements, timeoutMillis)
+            val result = deliveryCoordinator.append(
+              transactionalId,
+              topic,
+              index,
+              batch,
+              acknowledgements,
+              timeoutMillis,
+              replicationManager
+            )
             (index, result.errorCode, result.baseOffset)
           case None => (index, Errors.InvalidRequest, -1L)
       }
@@ -356,7 +371,7 @@ final class RequestHandler(
     cursor.readInt() // max_wait_ms
     cursor.readInt() // min_bytes
     val requestMaxBytes = cursor.readInt()
-    cursor.readByte() // isolation_level
+    val readCommitted = cursor.readByte() == 1.toByte
     val requests = cursor.readArray {
       val topic = cursor.readString()
       val partitions = cursor.readArray {
@@ -383,7 +398,15 @@ final class RequestHandler(
             case None => (index, Errors.UnknownTopicOrPartition, None)
             case Some(log) =>
               val budget = math.min(math.max(0, partitionMaxBytes), responseBudget)
-              val result = log.fetch(offset, budget)
+              val lastStableOffset =
+                if readCommitted then deliveryCoordinator.lastStableOffset(topic, index, log.highWatermark)
+                else log.highWatermark
+              val result = log.fetch(
+                offset,
+                budget,
+                lastStableOffset,
+                batch => !readCommitted || deliveryCoordinator.visible(topic, index, batch)
+              )
               responseBudget = math.max(0, responseBudget - result.records.length)
               (index, Errors.None, Some(result))
       }
@@ -397,7 +420,7 @@ final class RequestHandler(
       writer.writeArray(partitions) { case (index, error, result) =>
         writer.writeInt(index).writeShort(error)
         writer.writeLong(result.map(_.highWatermark).getOrElse(-1L))
-        writer.writeLong(result.map(_.highWatermark).getOrElse(-1L))
+        writer.writeLong(result.map(_.lastStableOffset).getOrElse(-1L))
         writer.writeLong(result.map(_.logStartOffset).getOrElse(-1L))
         writer.writeInt(-1) // aborted_transactions: null
         writer.writeNullableBytes(result.map(_.records))
@@ -407,7 +430,7 @@ final class RequestHandler(
 
   private def listOffsets(cursor: ByteCursor): Option[Array[Byte]] =
     cursor.readInt() // replica_id
-    cursor.readByte() // isolation_level
+    val readCommitted = cursor.readByte() == 1.toByte
     val requests = cursor.readArray {
       val topic = cursor.readString()
       val partitions = cursor.readArray((cursor.readInt(), cursor.readLong()))
@@ -428,9 +451,107 @@ final class RequestHandler(
         else
           registry.partition(topic, index) match
             case Some(log) =>
-              writer.writeInt(index).writeShort(Errors.None).writeLong(-1L).writeLong(log.offsetForTimestamp(timestamp)): Unit
+              val offset =
+                if timestamp == -1L then
+                  deliveryCoordinator.latestOffset(topic, index, log.highWatermark, readCommitted)
+                else log.offsetForTimestamp(timestamp)
+              writer.writeInt(index).writeShort(Errors.None).writeLong(-1L).writeLong(offset): Unit
             case None =>
               writer.writeInt(index).writeShort(Errors.UnknownTopicOrPartition).writeLong(-1L).writeLong(-1L): Unit
       }
     }
     Some(writer.result())
+
+  private def initProducerId(cursor: ByteCursor): Option[Array[Byte]] =
+    val transactionalId = cursor.readNullableString()
+    val timeoutMillis = cursor.readInt()
+    cursor.ensureFullyRead()
+    val result = deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
+    Some(
+      ByteWriter()
+        .writeInt(0)
+        .writeShort(result.errorCode)
+        .writeLong(result.producerId)
+        .writeShort(result.producerEpoch)
+        .result()
+    )
+
+  private def addPartitionsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
+    val transactionalId = cursor.readString()
+    val producerId = cursor.readLong()
+    val producerEpoch = cursor.readShort()
+    val requested = cursor.readArray {
+      val topic = cursor.readString()
+      (topic, cursor.readArray(cursor.readInt()))
+    }
+    cursor.ensureFullyRead()
+    val valid = requested.flatMap { case (topic, partitions) =>
+      partitions.filter(partitionExists(topic, _)).map(index => cascade.storage.TopicPartition(topic, index))
+    }
+    val transactionError = deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(requested) { case (topic, partitions) =>
+      writer.writeString(topic)
+      writer.writeArray(partitions) { index =>
+        val error = if partitionExists(topic, index) then transactionError else Errors.UnknownTopicOrPartition
+        writer.writeInt(index).writeShort(error): Unit
+      }
+    }
+    Some(writer.result())
+
+  private def addOffsetsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
+    val transactionalId = cursor.readString()
+    val producerId = cursor.readLong()
+    val producerEpoch = cursor.readShort()
+    val groupId = cursor.readString()
+    cursor.ensureFullyRead()
+    val error = deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
+    Some(ByteWriter().writeInt(0).writeShort(error).result())
+
+  private def endTxn(cursor: ByteCursor): Option[Array[Byte]] =
+    val transactionalId = cursor.readString()
+    val producerId = cursor.readLong()
+    val producerEpoch = cursor.readShort()
+    val committed = cursor.readBoolean()
+    cursor.ensureFullyRead()
+    val error = deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
+    Some(ByteWriter().writeInt(0).writeShort(error).result())
+
+  private def txnOffsetCommit(cursor: ByteCursor): Option[Array[Byte]] =
+    final case class RequestedOffset(index: Int, value: PendingOffset, exists: Boolean)
+    val transactionalId = cursor.readString()
+    val groupId = cursor.readString()
+    val producerId = cursor.readLong()
+    val producerEpoch = cursor.readShort()
+    val requested = cursor.readArray {
+      val topic = cursor.readString()
+      val offsets = cursor.readArray {
+        val index = cursor.readInt()
+        val offset = cursor.readLong()
+        val leaderEpoch = cursor.readInt()
+        val metadata = cursor.readNullableString()
+        RequestedOffset(
+          index,
+          PendingOffset(groupId, topic, index, offset, leaderEpoch, metadata),
+          partitionExists(topic, index)
+        )
+      }
+      (topic, offsets)
+    }
+    cursor.ensureFullyRead()
+    val values = requested.flatMap(_._2).filter(_.exists).map(_.value)
+    val transactionError =
+      deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(requested) { case (topic, offsets) =>
+      writer.writeString(topic)
+      writer.writeArray(offsets) { offset =>
+        val error = if offset.exists then transactionError else Errors.UnknownTopicOrPartition
+        writer.writeInt(offset.index).writeShort(error): Unit
+      }
+    }
+    Some(writer.result())
+
+  private def partitionExists(topic: String, partition: Int): Boolean =
+    if clusterManager.isEnabled then clusterManager.partition(topic, partition).nonEmpty
+    else registry.partition(topic, partition).nonEmpty

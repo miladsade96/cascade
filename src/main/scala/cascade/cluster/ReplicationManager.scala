@@ -9,6 +9,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 final case class ReplicatedAppendResult(errorCode: Short, baseOffset: Long)
 
+trait ReplicatedAppender:
+  def append(
+      topic: String,
+      partition: Int,
+      records: Array[Byte],
+      acknowledgements: Short,
+      timeoutMillis: Int
+  ): ReplicatedAppendResult
+
 /** Synchronous leader-to-follower record-batch replication with ISR high-watermark commits. */
 final class ReplicationManager(
     config: BrokerConfig,
@@ -16,7 +25,8 @@ final class ReplicationManager(
     registry: TopicRegistry,
     peerClient: PeerClient
 )
-    extends AutoCloseable:
+    extends ReplicatedAppender,
+      AutoCloseable:
   private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val partitionLocks = ConcurrentHashMap[String, Object]()
   private val closed = AtomicBoolean(false)

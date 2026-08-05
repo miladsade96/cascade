@@ -14,6 +14,11 @@ object ApiKey:
   val SyncGroup: Short = 14
   val ApiVersions: Short = 18
   val CreateTopics: Short = 19
+  val InitProducerId: Short = 22
+  val AddPartitionsToTxn: Short = 24
+  val AddOffsetsToTxn: Short = 25
+  val EndTxn: Short = 26
+  val TxnOffsetCommit: Short = 28
 
 object Errors:
   val None: Short = 0
@@ -26,6 +31,14 @@ object Errors:
   val NotEnoughReplicasAfterAppend: Short = 20
   val InvalidTopic: Short = 17
   val InvalidRequest: Short = 42
+  val OutOfOrderSequenceNumber: Short = 45
+  val InvalidProducerEpoch: Short = 47
+  val InvalidTxnState: Short = 48
+  val InvalidProducerIdMapping: Short = 49
+  val InvalidTransactionTimeout: Short = 50
+  val ConcurrentTransactions: Short = 51
+  val TransactionalIdAuthorizationFailed: Short = 53
+  val UnknownProducerId: Short = 59
   val UnsupportedVersion: Short = 35
   val TopicAlreadyExists: Short = 36
   val InvalidPartitions: Short = 37
@@ -43,6 +56,7 @@ object Errors:
   val GroupAuthorizationFailed: Short = 30
   val MemberIdRequired: Short = 79
   val FencedLeaderEpoch: Short = 74
+  val ProducerFenced: Short = 90
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
@@ -60,7 +74,12 @@ object Compatibility:
     ApiVersion(ApiKey.LeaveGroup, 2, 2),
     ApiVersion(ApiKey.SyncGroup, 3, 3),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
-    ApiVersion(ApiKey.CreateTopics, 2, 2)
+    ApiVersion(ApiKey.CreateTopics, 2, 2),
+    ApiVersion(ApiKey.InitProducerId, 1, 1),
+    ApiVersion(ApiKey.AddPartitionsToTxn, 1, 1),
+    ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
+    ApiVersion(ApiKey.EndTxn, 1, 1),
+    ApiVersion(ApiKey.TxnOffsetCommit, 2, 2)
   )
 
   private val byKey = supported.map(version => version.apiKey -> version).toMap

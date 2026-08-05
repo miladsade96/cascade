@@ -6,13 +6,15 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.nio.file.{Files, Path}
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ArrayBuffer, ArrayDeque, HashMap}
 import scala.jdk.CollectionConverters.*
 
 final case class AppendResult(baseOffset: Long, lastOffset: Long)
-final case class FetchResult(highWatermark: Long, logStartOffset: Long, records: Array[Byte])
+final case class FetchResult(highWatermark: Long, lastStableOffset: Long, logStartOffset: Long, records: Array[Byte])
 
-private final case class BatchIndex(baseOffset: Long, lastOffset: Long, position: Long, size: Int)
+private final case class BatchIndex(metadata: RecordBatchMetadata, position: Long, size: Int):
+  def baseOffset: Long = metadata.baseOffset
+  def lastOffset: Long = metadata.lastOffset
 private final case class FlushTarget(segment: LogSegment, bytes: Long, dirtySinceNanos: Long)
 
 private final class LogSegment(val baseOffset: Long, val path: Path):
@@ -52,8 +54,10 @@ final class PartitionLog(
   Files.createDirectories(directory)
 
   private val flushIntervalNanos = Math.multiplyExact(flushIntervalMillis, 1_000_000L)
+  private val producerHistoryLimit = 5
 
   private val segments = ArrayBuffer.empty[LogSegment]
+  private val recentProducerBatches = HashMap.empty[Long, ArrayDeque[RecordBatchMetadata]]
   loadSegments()
 
   private var nextOffset: Long = segments.lastOption
@@ -103,7 +107,9 @@ final class PartitionLog(
         val segment = writableSegment(batch.bytes.length, batch.baseOffset)
         val position = segment.channel.size()
         writeFully(segment.channel, ByteBuffer.wrap(batch.bytes), position)
-        segment.index += BatchIndex(batch.baseOffset, batch.lastOffset, position, batch.bytes.length)
+        val metadata = RecordBatch.metadata(batch.bytes)
+        segment.index += BatchIndex(metadata, position, batch.bytes.length)
+        indexProducerBatch(metadata)
         markDirty(segment, batch.bytes.length)
         nextOffset = Math.addExact(batch.lastOffset, 1L)
       }
@@ -135,7 +141,16 @@ final class PartitionLog(
     FlushStatistics(forceCount, forcedBytes, forceNanos, unflushedBytes + inFlightFlushBytes)
   }
 
-  def fetch(offset: Long, maxBytes: Int): FetchResult = synchronized {
+  def fetch(offset: Long, maxBytes: Int): FetchResult =
+    fetch(offset, maxBytes, highWatermark, _ => true)
+
+  def fetch(
+      offset: Long,
+      maxBytes: Int,
+      lastStableOffset: Long,
+      include: RecordBatchMetadata => Boolean
+  ): FetchResult = synchronized {
+    val visibleEnd = math.min(committedOffset, lastStableOffset)
     val output = ByteArrayOutputStream(math.min(math.max(maxBytes, 0), 1024 * 1024))
     var included = false
     var hasCapacity = true
@@ -145,7 +160,7 @@ final class PartitionLog(
       var entryIndex = 0
       while entryIndex < segment.index.length && hasCapacity do
         val entry = segment.index(entryIndex)
-        if entry.lastOffset >= offset && entry.lastOffset < committedOffset then
+        if entry.lastOffset >= offset && entry.lastOffset < visibleEnd && include(entry.metadata) then
           val fits = output.size().toLong + entry.size.toLong <= maxBytes.toLong
           if included && !fits then hasCapacity = false
           else
@@ -155,7 +170,20 @@ final class PartitionLog(
             included = true
         entryIndex += 1
       segmentIndex += 1
-    FetchResult(committedOffset, logStartOffset, output.toByteArray)
+    FetchResult(committedOffset, visibleEnd, logStartOffset, output.toByteArray)
+  }
+
+  def producerBatches(producerId: Long): Vector[RecordBatchMetadata] = synchronized {
+    segments.iterator
+      .flatMap(_.index.iterator)
+      .map(_.metadata)
+      .filter(_.producerId == producerId)
+      .toVector
+  }
+
+  /** The bounded Kafka duplicate-detection window, kept off the append path's full segment index. */
+  def recentBatches(producerId: Long): Vector[RecordBatchMetadata] = synchronized {
+    recentProducerBatches.get(producerId).fold(Vector.empty)(_.toVector)
   }
 
   def offsetForTimestamp(timestamp: Long): Long = synchronized {
@@ -219,7 +247,9 @@ final class PartitionLog(
         else
           val batch = new Array[Byte](totalSize)
           readFully(segment.channel, ByteBuffer.wrap(batch), position)
-          segment.index += BatchIndex(RecordBatch.baseOffset(batch), RecordBatch.lastOffset(batch), position, totalSize)
+          val metadata = RecordBatch.metadata(batch)
+          segment.index += BatchIndex(metadata, position, totalSize)
+          indexProducerBatch(metadata)
           position += totalSize
     if position < fileSize then
       segment.channel.truncate(position)
@@ -231,6 +261,12 @@ final class PartitionLog(
     if segment.unflushedBytes == 0L then segment.dirtySinceNanos = System.nanoTime()
     segment.unflushedBytes = Math.addExact(segment.unflushedBytes, bytes.toLong)
     unflushedBytes = Math.addExact(unflushedBytes, bytes.toLong)
+
+  private def indexProducerBatch(metadata: RecordBatchMetadata): Unit =
+    if metadata.producerId >= 0L then
+      val history = recentProducerBatches.getOrElseUpdate(metadata.producerId, ArrayDeque.empty)
+      history.append(metadata)
+      while history.length > producerHistoryLimit do history.removeHead(): Unit
 
   private def beginBackgroundFlush(): Vector[FlushTarget] =
     flushInProgress = true

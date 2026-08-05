@@ -20,3 +20,22 @@ object TestRecordBatch:
     buffer.putInt(-1)
     buffer.putInt(1)
     buffer.array()
+
+  def producer(
+      producerId: Long,
+      producerEpoch: Short,
+      baseSequence: Int,
+      transactional: Boolean = false,
+      recordCount: Int = 1,
+      totalBytes: Int = 61
+  ): Array[Byte] =
+    require(recordCount > 0, "producer batch must contain records")
+    val batch = single(totalBytes = totalBytes)
+    val buffer = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
+    buffer.putShort(21, (if transactional then 0x10 else 0).toShort)
+    buffer.putInt(23, recordCount - 1)
+    buffer.putLong(43, producerId)
+    buffer.putShort(51, producerEpoch)
+    buffer.putInt(53, baseSequence)
+    buffer.putInt(57, recordCount)
+    batch

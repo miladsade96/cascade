@@ -8,6 +8,7 @@ lazy val root = (project in file("."))
     Compile / run / fork := true,
     Test / fork := true,
     Test / parallelExecution := false,
+    Test / javaOptions += "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn",
     scalacOptions ++= Seq(
       "-deprecation",
       "-feature",

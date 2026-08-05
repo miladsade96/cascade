@@ -80,6 +80,124 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("idempotent producer retries return the original offset and reject sequence gaps") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("idempotent", correlationId = 1))
+
+        val initialized = request(output, input, initProducerIdRequest(correlationId = 2))
+        assertEquals(initialized.readInt(), 2)
+        assertEquals(initialized.readInt(), 0)
+        assertEquals(initialized.readShort(), Errors.None)
+        val producerId = initialized.readLong()
+        val producerEpoch = initialized.readShort()
+        initialized.ensureFullyRead()
+
+        val batch = TestRecordBatch.producer(producerId, producerEpoch, baseSequence = 0)
+        val first = request(output, input, produceRequest("idempotent", batch, correlationId = 3))
+        assertProduceResult(first, 3, Errors.None, 0L)
+        val duplicate = request(output, input, produceRequest("idempotent", batch, correlationId = 4))
+        assertProduceResult(duplicate, 4, Errors.None, 0L)
+
+        val gap = TestRecordBatch.producer(producerId, producerEpoch, baseSequence = 2)
+        val rejected = request(output, input, produceRequest("idempotent", gap, correlationId = 5))
+        assertProduceResult(rejected, 5, Errors.OutOfOrderSequenceNumber, -1L)
+
+        val fetched = request(output, input, fetchRequest("idempotent", correlationId = 6))
+        assertEquals(fetched.readInt(), 6)
+        fetched.readInt()
+        fetched.readInt()
+        fetched.readString()
+        fetched.readInt()
+        fetched.readInt()
+        assertEquals(fetched.readShort(), Errors.None)
+        assertEquals(fetched.readLong(), 1L)
+        assertEquals(fetched.readLong(), 1L)
+        fetched.readLong()
+        fetched.readInt()
+        assertEquals(fetched.readNullableBytes().map(_.length), Some(batch.length))
+      finally socket.close()
+    }
+  }
+
+  test("idempotent sequence state recovers from partition logs after broker restart") {
+    val directory = Files.createTempDirectory("cascade-idempotent-recovery")
+    var producerId = -1L
+    var producerEpoch = -1.toShort
+    try
+      val firstBroker = brokerFor(directory)
+      try
+        firstBroker.start()
+        val socket = Socket("127.0.0.1", firstBroker.boundPort)
+        try
+          val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+          val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+          request(output, input, metadataRequest("recoverable-idempotent", correlationId = 1))
+          val initialized = request(output, input, initProducerIdRequest(correlationId = 2))
+          initialized.readInt()
+          initialized.readInt()
+          assertEquals(initialized.readShort(), Errors.None)
+          producerId = initialized.readLong()
+          producerEpoch = initialized.readShort()
+          initialized.ensureFullyRead()
+
+          val batch = TestRecordBatch.producer(producerId, producerEpoch, baseSequence = 0)
+          assertProduceResult(
+            request(output, input, produceRequest("recoverable-idempotent", batch, correlationId = 3)),
+            3,
+            Errors.None,
+            0L,
+            "recoverable-idempotent"
+          )
+        finally socket.close()
+      finally firstBroker.close()
+
+      val secondBroker = brokerFor(directory)
+      try
+        secondBroker.start()
+        val socket = Socket("127.0.0.1", secondBroker.boundPort)
+        try
+          val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+          val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+          val duplicate = TestRecordBatch.producer(producerId, producerEpoch, baseSequence = 0)
+          assertProduceResult(
+            request(output, input, produceRequest("recoverable-idempotent", duplicate, correlationId = 4)),
+            4,
+            Errors.None,
+            0L,
+            "recoverable-idempotent"
+          )
+
+          val next = TestRecordBatch.producer(producerId, producerEpoch, baseSequence = 1)
+          assertProduceResult(
+            request(output, input, produceRequest("recoverable-idempotent", next, correlationId = 5)),
+            5,
+            Errors.None,
+            1L,
+            "recoverable-idempotent"
+          )
+
+          val fetched = request(output, input, fetchRequest("recoverable-idempotent", correlationId = 6))
+          fetched.readInt()
+          fetched.readInt()
+          fetched.readInt()
+          fetched.readString()
+          fetched.readInt()
+          fetched.readInt()
+          assertEquals(fetched.readShort(), Errors.None)
+          assertEquals(fetched.readLong(), 2L)
+          assertEquals(fetched.readLong(), 2L)
+          fetched.readLong()
+          fetched.readInt()
+          assertEquals(fetched.readNullableBytes().map(_.length), Some(duplicate.length + next.length))
+        finally socket.close()
+      finally secondBroker.close()
+    finally deleteTree(directory)
+  }
+
   private def apiVersionsRequest(correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.ApiVersions, 4, correlationId, flexible = true)
     writer.writeCompactString("cascade-test").writeCompactString("1.0").writeEmptyTaggedFields().result()
@@ -98,6 +216,30 @@ final class BrokerIntegrationSuite extends FunSuite:
       }
     }
     writer.result()
+
+  private def initProducerIdRequest(correlationId: Int): Array[Byte] =
+    requestHeader(ApiKey.InitProducerId, 1, correlationId)
+      .writeNullableString(None)
+      .writeInt(60_000)
+      .result()
+
+  private def assertProduceResult(
+      cursor: ByteCursor,
+      correlationId: Int,
+      expectedError: Short,
+      expectedOffset: Long,
+      expectedTopic: String = "idempotent"
+  ): Unit =
+    assertEquals(cursor.readInt(), correlationId)
+    assertEquals(cursor.readInt(), 1)
+    assertEquals(cursor.readString(), expectedTopic)
+    assertEquals(cursor.readInt(), 1)
+    assertEquals(cursor.readInt(), 0)
+    assertEquals(cursor.readShort(), expectedError)
+    assertEquals(cursor.readLong(), expectedOffset)
+    cursor.readLong()
+    assertEquals(cursor.readInt(), 0)
+    cursor.ensureFullyRead()
 
   private def fetchRequest(topic: String, correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.Fetch, 6, correlationId)
@@ -132,7 +274,16 @@ final class BrokerIntegrationSuite extends FunSuite:
 
   private def withBroker(test: KafkaBroker => Unit): Unit =
     val directory = Files.createTempDirectory("cascade-broker-integration")
-    val broker = KafkaBroker(
+    val broker = brokerFor(directory)
+    try
+      broker.start()
+      test(broker)
+    finally
+      broker.close()
+      deleteTree(directory)
+
+  private def brokerFor(directory: java.nio.file.Path): KafkaBroker =
+    KafkaBroker(
       BrokerConfig(
         bindHost = "127.0.0.1",
         port = 0,
@@ -143,12 +294,6 @@ final class BrokerIntegrationSuite extends FunSuite:
         flushBytes = Long.MaxValue
       )
     )
-    try
-      broker.start()
-      test(broker)
-    finally
-      broker.close()
-      deleteTree(directory)
 
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)

@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, ReplicationManager}
+import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -26,6 +27,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   @volatile private var handler: RequestHandler | Null = null
   @volatile private var clusterManager: ClusterManager | Null = null
   @volatile private var replicationManager: ReplicationManager | Null = null
+  @volatile private var deliveryCoordinator: DeliveryCoordinator | Null = null
   @volatile private var peerClient: PeerClient | Null = null
 
   def start(): Unit = synchronized {
@@ -39,10 +41,12 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     val peers = PeerClient()
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
+    val delivery = DeliveryCoordinator(config.dataDirectory.resolve(".cascade").resolve("delivery-state.log"), registry, groupCoordinator)
     peerClient = peers
     clusterManager = cluster
     replicationManager = replication
-    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, advertisedPort)
+    deliveryCoordinator = delivery
+    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort)
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
     cluster.start()
@@ -66,6 +70,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
       Option(peerClient).foreach(_.close())
+      Option(deliveryCoordinator).foreach(_.close())
       groupCoordinator.close()
       registry.close()
   }
