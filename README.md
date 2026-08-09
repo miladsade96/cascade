@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, and leader promotion.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, and quorum controller election.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics, but three-node mode is still a static replication milestone. Returning replicas can now recover and safely rejoin the ISR, but coordinator replication, controller election, and the other production gates below are still missing.
+> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics and a static-membership three-node cluster with controller failover. Returning replicas can recover and safely rejoin the ISR, but coordinator-state replication, persisted high-watermark recovery, incremental replica transfer, and the other production gates below are still missing.
 
 ## Performance I measured
 
@@ -38,7 +38,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Delivery guarantees | Producer IDs, epoch fencing, bounded duplicate detection, sequence recovery, transactions, timeouts, transactional offsets, and `read_committed` |
 | Durable state | CRC32C-protected metadata, consumer-offset, and delivery-state journals with forced commits and corrupt/partial-tail recovery |
 | Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
-| Static replication | RF=3 assignment, synchronous ISR replication, committed high watermarks, leader promotion, divergent-tail replacement, and safe replica re-admission |
+| Static-membership cluster | Durable quorum controller election, broker fencing, RF=3 assignment, synchronous ISR replication, committed high watermarks, leader promotion, divergent-tail replacement, and safe replica re-admission |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -97,9 +97,14 @@ This gives Cascade the building blocks for exactly-once processing on one broker
 
 If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic` for now.
 
-### Static three-node replication
+### Static-membership three-node cluster
 
 - Majority-committed, monotonic metadata images.
+- Durable controller terms and one vote per term in a forced CRC32C journal.
+- Majority election with metadata-freshness voting, randomized retry deadlines, and a preferred initial candidate.
+- Controller heartbeats and leases that fence isolated or not-yet-synchronized brokers.
+- A committed controller-term image that bumps every partition leader epoch after election.
+- Dynamic controller discovery in Kafka Metadata and coordinator responses.
 - Round-robin replica assignment and configurable default replication factor.
 - Partition leaders, leader epochs, replica sets, and ISR state.
 - Parallel synchronous leader-to-follower append.
@@ -109,9 +114,9 @@ If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic
 - Full committed-prefix recovery for a returning replica, including replacement of a divergent local tail.
 - Partition fencing during recovery so Produce cannot race the copy or ISR admission.
 - ISR re-admission only after catch-up succeeds and the new metadata image reaches quorum.
-- Real Kafka-client end-to-end verification before and after the original partition leader stops.
+- Real Kafka-client end-to-end verification across partition-leader loss, controller loss, stale-term rejection, metadata creation after election, and broker restart/rejoin.
 
-Membership and the controller are still static. Recovery currently copies the complete committed log instead of using an incremental snapshot or segment transfer, so it favors correctness over recovery bandwidth. I also haven't added production failover for the controller, group coordinator, or delivery coordinator.
+Broker membership is still static, but the controller is elected from that configured quorum. Recovery currently copies the complete committed log instead of using an incremental snapshot or segment transfer, so it favors correctness over recovery bandwidth. Group, offset, producer, and transaction coordinator state is still local to one broker, so those services don't have production failover yet.
 
 ## Run Cascade
 
@@ -209,7 +214,7 @@ Virtual-thread connection handler
         v
 Request routing
         |
-        +-- metadata quorum journal + static controller
+        +-- metadata quorum + durable controller election and fencing
         +-- classic group coordinator + durable offset journal
         +-- producer/transaction coordinator + delivery journal
         +-- partition log
@@ -295,11 +300,11 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current `sbt test` suite passes **41/41 tests** in three layers:
+The current `sbt test` suite passes **46/46 tests** in three layers:
 
-- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, replica reset, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, and metadata recovery.
+- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, replica reset, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, and durable controller term/vote recovery.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, and idempotent state recovery after broker restart.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, divergent-tail replacement, safe replica re-admission, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
 
 The load harness separately checks the exact record count at one million and ten million records.
 
@@ -307,7 +312,7 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Availability and replication | Quorum controller election, broker fencing, incremental replica recovery, reassignment, and persisted high-watermark recovery |
+| 1 | Availability and replication | Persisted high-watermark recovery, incremental replica transfer, reassignment, and dynamic quorum membership |
 | 2 | Coordinator failover | Replicated classic-group, consumer-offset, producer, and transaction coordinator state across brokers |
 | 3 | Storage lifecycle | Time/size retention, log compaction, offset compaction/expiry, timestamp and transaction indexes, disk-pressure handling, and safe deletion |
 | 4 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
@@ -320,7 +325,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 
 ## What is still missing
 
-- The controller and broker membership are static; there is no controller election.
+- Broker and voter membership is statically configured; online membership changes and joint-consensus reconfiguration are not implemented.
 - Replica recovery currently recopies the full committed prefix and pauses Produce for that partition; incremental segment transfer is not implemented yet.
 - Group, offset, producer, and transaction coordinator state is not replicated for failover.
 - Retention, compaction, timestamp indexes, quotas, TLS/SASL, ACLs, and operational endpoints are not implemented.
@@ -344,11 +349,13 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--flush-bytes` | `67108864` | Per-partition dirty-byte threshold that schedules a force |
 | `--node-id` | `1` | Broker/controller ID |
 | `--cluster-nodes` | Empty | Static comma-separated voters as `id@host:port`; empty selects single-node mode |
-| `--controller-id` | `1` | Fixed metadata and classic-group controller |
+| `--controller-id` | `1` | Preferred initial controller candidate; any configured voter can be elected later |
 | `--default-replication-factor` | `1` | Replication factor used for auto-created topics |
 | `--min-insync-replicas` | `1` | Minimum ISR required by `acks=all` |
 | `--peer-timeout-ms` | `3000` | Internal metadata and replica RPC timeout |
 | `--replica-recovery-timeout-ms` | `300000` | Maximum controller wait for one replica recovery operation |
+| `--controller-heartbeat-ms` | `250` | Elected-controller heartbeat interval |
+| `--controller-election-timeout-ms` | `1500` | Controller lease and minimum election timeout; must be at least three heartbeat intervals |
 | `--no-auto-create` | Off | Disable Metadata/Produce auto-creation |
 
 ## More documentation
