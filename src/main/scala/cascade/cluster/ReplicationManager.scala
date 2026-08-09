@@ -47,6 +47,7 @@ final class ReplicationManager(
           val result = log.append(records)
           ReplicatedAppendResult(Errors.None, result.baseOffset)
         case None => ReplicatedAppendResult(Errors.UnknownTopicOrPartition, -1L)
+    else if cluster.isBrokerFenced then ReplicatedAppendResult(Errors.BrokerNotAvailable, -1L)
     else
       cluster.partition(topic, partition) match
         case None => ReplicatedAppendResult(Errors.UnknownTopicOrPartition, -1L)
@@ -75,7 +76,8 @@ final class ReplicationManager(
     val key = partitionKey(topic, partition)
     val lock = partitionLocks.computeIfAbsent(key, _ => Object())
     lock.synchronized {
-      cluster.partition(topic, partition) match
+      if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+      else cluster.partition(topic, partition) match
         case None => Errors.UnknownTopicOrPartition
         case Some(metadata) if metadata.leaderId != config.nodeId => Errors.NotLeaderOrFollower
         case Some(metadata) if metadata.leaderEpoch != leaderEpoch => Errors.FencedLeaderEpoch
@@ -194,7 +196,8 @@ final class ReplicationManager(
     val expectedBaseOffset = cursor.readLong()
     val records = cursor.readByteArray()
     cursor.ensureFullyRead()
-    val (error, logEnd) = cluster.partition(topic, partition) match
+    val (error, logEnd) = if cluster.isBrokerFenced then (Errors.BrokerNotAvailable, -1L)
+    else cluster.partition(topic, partition) match
       case None => (Errors.UnknownTopicOrPartition, -1L)
       case Some(metadata) if metadata.leaderEpoch != leaderEpoch => (Errors.FencedLeaderEpoch, -1L)
       case Some(metadata) if metadata.leaderId == config.nodeId || !metadata.replicas.contains(config.nodeId) =>
@@ -215,7 +218,8 @@ final class ReplicationManager(
     val leaderEpoch = cursor.readInt()
     val committedOffset = cursor.readLong()
     cursor.ensureFullyRead()
-    val error = cluster.partition(topic, partition) match
+    val error = if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else cluster.partition(topic, partition) match
       case None => Errors.UnknownTopicOrPartition
       case Some(metadata) if metadata.leaderEpoch != leaderEpoch => Errors.FencedLeaderEpoch
       case Some(metadata) if !metadata.replicas.contains(config.nodeId) => Errors.NotLeaderOrFollower
@@ -245,7 +249,8 @@ final class ReplicationManager(
     val leaderEpoch = cursor.readInt()
     val startOffset = cursor.readLong()
     cursor.ensureFullyRead()
-    val error = cluster.partition(topic, partition) match
+    val error = if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else cluster.partition(topic, partition) match
       case None => Errors.UnknownTopicOrPartition
       case Some(metadata) if metadata.leaderId != leaderId || metadata.leaderEpoch != leaderEpoch =>
         Errors.FencedLeaderEpoch
