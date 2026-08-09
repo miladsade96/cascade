@@ -3,11 +3,11 @@ package cascade.cluster
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 
 object MetadataCodec:
-  private val FormatVersion: Short = 1
+  private val FormatVersion: Short = 2
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     val writer = ByteWriter()
-    writer.writeShort(FormatVersion).writeLong(metadata.version)
+    writer.writeShort(FormatVersion).writeLong(metadata.version).writeLong(metadata.controllerTerm)
     writer.writeArray(metadata.topics) { topic =>
       writer.writeString(topic.name)
       writer.writeArray(topic.partitions) { partition =>
@@ -23,8 +23,10 @@ object MetadataCodec:
   def decode(bytes: Array[Byte]): ClusterMetadata =
     val cursor = ByteCursor(bytes)
     val format = cursor.readShort()
-    if format != FormatVersion then throw ProtocolException(s"unsupported cluster metadata format: $format")
+    if format != 1 && format != FormatVersion then
+      throw ProtocolException(s"unsupported cluster metadata format: $format")
     val version = cursor.readLong()
+    val controllerTerm = if format >= 2 then cursor.readLong() else 0L
     val topics = cursor.readArray {
       val name = cursor.readString()
       val partitions = cursor.readArray {
@@ -39,4 +41,4 @@ object MetadataCodec:
       TopicMetadata(name, partitions)
     }
     cursor.ensureFullyRead()
-    ClusterMetadata(version, topics)
+    ClusterMetadata(version, topics, controllerTerm)

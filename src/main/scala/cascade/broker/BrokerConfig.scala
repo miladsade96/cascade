@@ -22,6 +22,8 @@ final case class BrokerConfig(
     minInSyncReplicas: Int = 1,
     peerTimeoutMillis: Int = 3000,
     replicaRecoveryTimeoutMillis: Int = 300000,
+    controllerHeartbeatMillis: Int = 250,
+    controllerElectionTimeoutMillis: Int = 1500,
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -33,6 +35,11 @@ final case class BrokerConfig(
   require(minInSyncReplicas > 0, "minimum in-sync replicas must be positive")
   require(peerTimeoutMillis > 0, "peer timeout must be positive")
   require(replicaRecoveryTimeoutMillis > 0, "replica recovery timeout must be positive")
+  require(controllerHeartbeatMillis > 0, "controller heartbeat interval must be positive")
+  require(
+    controllerElectionTimeoutMillis.toLong >= controllerHeartbeatMillis.toLong * 3L,
+    "controller election timeout must be at least three heartbeat intervals"
+  )
   require(clusterNodes.map(_.id).distinct.size == clusterNodes.size, "cluster node IDs must be unique")
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == nodeId), "cluster nodes must contain this node ID")
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == controllerId), "cluster nodes must contain the controller ID")
@@ -70,6 +77,10 @@ object BrokerConfig:
       case "--peer-timeout-ms" :: value :: tail => loop(tail, config.copy(peerTimeoutMillis = value.toInt))
       case "--replica-recovery-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(replicaRecoveryTimeoutMillis = value.toInt))
+      case "--controller-heartbeat-ms" :: value :: tail =>
+        loop(tail, config.copy(controllerHeartbeatMillis = value.toInt))
+      case "--controller-election-timeout-ms" :: value :: tail =>
+        loop(tail, config.copy(controllerElectionTimeoutMillis = value.toInt))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
     loop(arguments.toList, BrokerConfig())

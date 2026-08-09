@@ -23,7 +23,9 @@ final case class PartitionMetadata(
 
 final case class TopicMetadata(name: String, partitions: Vector[PartitionMetadata])
 
-final case class ClusterMetadata(version: Long, topics: Vector[TopicMetadata]):
+final case class ClusterMetadata(version: Long, topics: Vector[TopicMetadata], controllerTerm: Long = 0L):
+  require(version >= 0L, "metadata version must be non-negative")
+  require(controllerTerm >= 0L, "metadata controller term must be non-negative")
   lazy val byName: Map[String, TopicMetadata] = topics.map(topic => topic.name -> topic).toMap
 
 object ClusterMetadata:
@@ -35,6 +37,8 @@ object InternalApi:
   val MetadataCommit: Short = -102
   val MetadataSnapshot: Short = -103
   val CreateTopic: Short = -104
+  val ControllerVote: Short = -105
+  val ControllerHeartbeat: Short = -106
   val ReplicaAppend: Short = -110
   val ReplicaCommit: Short = -111
   val ReplicaCatchUp: Short = -112
