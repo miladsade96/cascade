@@ -26,6 +26,7 @@ object Errors:
   val LeaderNotAvailable: Short = 5
   val NotLeaderOrFollower: Short = 6
   val RequestTimedOut: Short = 7
+  val BrokerNotAvailable: Short = 8
   val ReplicaNotAvailable: Short = 9
   val NotEnoughReplicas: Short = 19
   val NotEnoughReplicasAfterAppend: Short = 20

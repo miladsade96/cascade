@@ -86,15 +86,21 @@ final class RequestHandler(
     val coordinatorType = cursor.readByte()
     cursor.ensureFullyRead()
     val supported = coordinatorType == 0.toByte || coordinatorType == 1.toByte
-    val coordinator = if clusterManager.isEnabled then clusterManager.controllerNode else
-      ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
+    val coordinator =
+      if clusterManager.isEnabled then clusterManager.controllerNode
+      else Some(ClusterNode(config.nodeId, config.advertisedHost, advertisedPort))
+    val available = supported && coordinator.nonEmpty
     val writer = ByteWriter()
     writer.writeInt(0)
-    writer.writeShort(if supported then Errors.None else Errors.CoordinatorNotAvailable)
-    writer.writeNullableString(if supported then None else Some("unsupported coordinator type"))
-    writer.writeInt(if supported then coordinator.id else -1)
-    writer.writeString(if supported then coordinator.host else "")
-    writer.writeInt(if supported then coordinator.port else -1)
+    writer.writeShort(if available then Errors.None else Errors.CoordinatorNotAvailable)
+    writer.writeNullableString(
+      if !supported then Some("unsupported coordinator type")
+      else if coordinator.isEmpty then Some("controller election is in progress")
+      else None
+    )
+    writer.writeInt(coordinator.filter(_ => available).map(_.id).getOrElse(-1))
+    writer.writeString(coordinator.filter(_ => available).map(_.host).getOrElse(""))
+    writer.writeInt(coordinator.filter(_ => available).map(_.port).getOrElse(-1))
     Some(writer.result())
 
   private def joinGroup(header: RequestHeader, cursor: ByteCursor): Option[Array[Byte]] =
@@ -106,6 +112,18 @@ final class RequestHandler(
     val protocolType = cursor.readString()
     val protocols = cursor.readArray(GroupProtocol(cursor.readString(), cursor.readByteArray()))
     cursor.ensureFullyRead()
+    if !isCoordinator then
+      return Some(
+        ByteWriter()
+          .writeInt(0)
+          .writeShort(Errors.NotCoordinator)
+          .writeInt(-1)
+          .writeString("")
+          .writeString("")
+          .writeString(memberId)
+          .writeArray(Vector.empty[Unit])(_ => ())
+          .result()
+      )
     val result = groupCoordinator.join(
       JoinGroupCommand(
         groupId,
@@ -138,13 +156,15 @@ final class RequestHandler(
     val memberId = cursor.readString()
     cursor.readNullableString()
     cursor.ensureFullyRead()
-    Some(ByteWriter().writeInt(0).writeShort(groupCoordinator.heartbeat(groupId, generationId, memberId)).result())
+    val error = if isCoordinator then groupCoordinator.heartbeat(groupId, generationId, memberId) else Errors.NotCoordinator
+    Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def leaveGroup(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readString()
     val memberId = cursor.readString()
     cursor.ensureFullyRead()
-    Some(ByteWriter().writeInt(0).writeShort(groupCoordinator.leave(groupId, memberId)).result())
+    val error = if isCoordinator then groupCoordinator.leave(groupId, memberId) else Errors.NotCoordinator
+    Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def syncGroup(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readString()
@@ -153,7 +173,9 @@ final class RequestHandler(
     cursor.readNullableString()
     val assignments = cursor.readArray((cursor.readString(), cursor.readByteArray()))
     cursor.ensureFullyRead()
-    val result = groupCoordinator.sync(groupId, generationId, memberId, assignments)
+    val result =
+      if isCoordinator then groupCoordinator.sync(groupId, generationId, memberId, assignments)
+      else SyncGroupResult(Errors.NotCoordinator, Array.emptyByteArray)
     Some(ByteWriter().writeInt(0).writeShort(result.errorCode).writeByteArray(result.assignment).result())
 
   private def offsetCommit(cursor: ByteCursor): Option[Array[Byte]] =
@@ -180,7 +202,9 @@ final class RequestHandler(
     }
     cursor.ensureFullyRead()
     val validValues = requests.flatMap(_._2).filter(_.exists).map(_.value)
-    val groupError = groupCoordinator.commitOffsets(groupId, generationId, memberId, validValues)
+    val groupError =
+      if isCoordinator then groupCoordinator.commitOffsets(groupId, generationId, memberId, validValues)
+      else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requests) { case (topic, partitions) =>
       writer.writeString(topic)
@@ -202,11 +226,11 @@ final class RequestHandler(
       case Some(topics) => topics.map { case (topic, partitions) =>
           val values = partitions.map { partition =>
             val key = GroupOffsetKey(groupId, topic, partition)
-            (partition, groupCoordinator.fetchOffset(key))
+            (partition, Option.when(isCoordinator)(groupCoordinator.fetchOffset(key)).flatten)
           }
           (topic, values)
         }
-      case None =>
+      case None if isCoordinator =>
         groupCoordinator.allOffsets(groupId)
           .groupBy(_._1.topic)
           .toVector
@@ -214,6 +238,7 @@ final class RequestHandler(
           .map { case (topic, values) =>
             (topic, values.sortBy(_._1.partition).map { case (key, value) => (key.partition, Some(value)) })
           }
+      case None => Vector.empty
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(offsets) { case (topic, partitions) =>
       writer.writeString(topic)
@@ -222,10 +247,10 @@ final class RequestHandler(
         writer.writeLong(committed.map(_.offset).getOrElse(-1L))
         writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
         writer.writeNullableString(committed.flatMap(_.metadata))
-        writer.writeShort(Errors.None): Unit
+        writer.writeShort(if isCoordinator then Errors.None else Errors.NotCoordinator): Unit
       }
     }
-    writer.writeShort(Errors.None)
+    writer.writeShort(if isCoordinator then Errors.None else Errors.NotCoordinator)
     Some(writer.result())
 
   private def metadata(cursor: ByteCursor): Option[Array[Byte]] =
@@ -253,7 +278,7 @@ final class RequestHandler(
       writer.writeNullableString(None)
     }
     writer.writeNullableString(Some("cascade-cluster"))
-    writer.writeInt(if clusterManager.isEnabled then config.controllerId else config.nodeId)
+    writer.writeInt(if clusterManager.isEnabled then clusterManager.controllerId else config.nodeId)
     writer.writeArray(topicNames) { topic =>
       val clusterTopic = clusterManager.topic(topic)
       val localPartitions = registry.partitions(topic)
@@ -264,7 +289,10 @@ final class RequestHandler(
         case Some(metadata) =>
           writer.writeShort(Errors.None).writeString(topic).writeBoolean(topic.startsWith("__"))
           writer.writeArray(metadata.partitions) { partition =>
-            writer.writeShort(if partition.leaderId < 0 then Errors.LeaderNotAvailable else Errors.None)
+            val partitionError =
+              if clusterManager.isBrokerFenced || partition.leaderId < 0 then Errors.LeaderNotAvailable
+              else Errors.None
+            writer.writeShort(partitionError)
             writer.writeInt(partition.partition)
             writer.writeInt(partition.leaderId)
             writer.writeArray(partition.replicas)(writer.writeInt)
@@ -390,7 +418,9 @@ final class RequestHandler(
     val results = requests.map { case (topic, partitions) =>
       val values = partitions.map { case (index, offset, partitionMaxBytes) =>
         val partitionMetadata = clusterManager.partition(topic, index)
-        if clusterManager.isEnabled && partitionMetadata.isEmpty then
+        if clusterManager.isEnabled && clusterManager.isBrokerFenced then
+          (index, Errors.BrokerNotAvailable, None)
+        else if clusterManager.isEnabled && partitionMetadata.isEmpty then
           (index, Errors.UnknownTopicOrPartition, None)
         else if clusterManager.isEnabled && partitionMetadata.exists(_.leaderId != config.nodeId) then
           (index, Errors.NotLeaderOrFollower, None)
@@ -445,7 +475,9 @@ final class RequestHandler(
       writer.writeString(topic)
       writer.writeArray(partitions) { case (index, timestamp) =>
         val partitionMetadata = clusterManager.partition(topic, index)
-        if clusterManager.isEnabled && partitionMetadata.isEmpty then
+        if clusterManager.isEnabled && clusterManager.isBrokerFenced then
+          writer.writeInt(index).writeShort(Errors.BrokerNotAvailable).writeLong(-1L).writeLong(-1L): Unit
+        else if clusterManager.isEnabled && partitionMetadata.isEmpty then
           writer.writeInt(index).writeShort(Errors.UnknownTopicOrPartition).writeLong(-1L).writeLong(-1L): Unit
         else if clusterManager.isEnabled && partitionMetadata.exists(_.leaderId != config.nodeId) then
           writer.writeInt(index).writeShort(Errors.NotLeaderOrFollower).writeLong(-1L).writeLong(-1L): Unit
@@ -467,7 +499,9 @@ final class RequestHandler(
     val transactionalId = cursor.readNullableString()
     val timeoutMillis = cursor.readInt()
     cursor.ensureFullyRead()
-    val result = deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
+    val result =
+      if isCoordinator then deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
+      else InitProducerIdResult(Errors.NotCoordinator, -1L, -1)
     Some(
       ByteWriter()
         .writeInt(0)
@@ -489,7 +523,9 @@ final class RequestHandler(
     val valid = requested.flatMap { case (topic, partitions) =>
       partitions.filter(partitionExists(topic, _)).map(index => cascade.storage.TopicPartition(topic, index))
     }
-    val transactionError = deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
+    val transactionError =
+      if isCoordinator then deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
+      else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requested) { case (topic, partitions) =>
       writer.writeString(topic)
@@ -506,7 +542,9 @@ final class RequestHandler(
     val producerEpoch = cursor.readShort()
     val groupId = cursor.readString()
     cursor.ensureFullyRead()
-    val error = deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
+    val error =
+      if isCoordinator then deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
+      else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def endTxn(cursor: ByteCursor): Option[Array[Byte]] =
@@ -515,7 +553,9 @@ final class RequestHandler(
     val producerEpoch = cursor.readShort()
     val committed = cursor.readBoolean()
     cursor.ensureFullyRead()
-    val error = deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
+    val error =
+      if isCoordinator then deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
+      else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def txnOffsetCommit(cursor: ByteCursor): Option[Array[Byte]] =
@@ -542,7 +582,8 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val values = requested.flatMap(_._2).filter(_.exists).map(_.value)
     val transactionError =
-      deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
+      if isCoordinator then deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
+      else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requested) { case (topic, offsets) =>
       writer.writeString(topic)
@@ -556,3 +597,5 @@ final class RequestHandler(
   private def partitionExists(topic: String, partition: Int): Boolean =
     if clusterManager.isEnabled then clusterManager.partition(topic, partition).nonEmpty
     else registry.partition(topic, partition).nonEmpty
+
+  private def isCoordinator: Boolean = !clusterManager.isEnabled || clusterManager.isActiveController
