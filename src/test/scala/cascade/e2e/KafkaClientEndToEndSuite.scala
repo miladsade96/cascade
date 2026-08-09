@@ -2,7 +2,7 @@ package cascade.e2e
 
 import cascade.TestRecordBatch
 import cascade.broker.{BrokerConfig, KafkaBroker}
-import cascade.cluster.{ClusterNode, InternalApi, PeerClient}
+import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient}
 import cascade.protocol.{ByteWriter, Errors}
 import cascade.storage.{FlushPolicy, PartitionLog}
 import java.nio.charset.StandardCharsets
@@ -262,6 +262,161 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("a quorum elects a new controller, fences the old term, and keeps serving Kafka clients") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-controller-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 3,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 800,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 600
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    var restartedBroker: Option[KafkaBroker] = None
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        val firstController = awaitController(admin)
+        val firstTerm = controllerTerm(nodes(firstController - 1))
+        admin.createTopics(java.util.List.of(new NewTopic("controller-events", 3, 3.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        val partition = firstController - 1
+        awaitInSyncReplicas(admin, "controller-events", partition, Set(1, 2, 3))
+        produceValue(bootstrapServers, "controller-events", partition, "before-controller-loss", expectedOffset = 0L)
+
+        brokers(firstController - 1).close()
+        val nextController = awaitController(admin, excludedId = Some(firstController))
+        assertNotEquals(nextController, firstController)
+
+        val peer = PeerClient()
+        try
+          val staleHeartbeat = peer.call(
+            nodes(nextController - 1),
+            InternalApi.ControllerHeartbeat,
+            ByteWriter()
+              .writeLong(firstTerm)
+              .writeInt(firstController)
+              .writeLong(firstTerm)
+              .writeLong(0L)
+              .result(),
+            1000
+          )
+          assert(staleHeartbeat.readLong() > firstTerm)
+          assertEquals(staleHeartbeat.readShort(), Errors.NotController)
+          staleHeartbeat.readLong()
+          staleHeartbeat.readLong()
+          staleHeartbeat.ensureFullyRead()
+        finally peer.close()
+
+        admin.createTopics(java.util.List.of(new NewTopic("created-after-election", 1, 2.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        val survivors = Set(1, 2, 3) - firstController
+        awaitInSyncReplicas(admin, "controller-events", partition, survivors)
+        produceValue(bootstrapServers, "controller-events", partition, "after-controller-loss", expectedOffset = 1L)
+
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers))
+        try
+          val topicPartition = TopicPartition("controller-events", partition)
+          consumer.assign(java.util.List.of(topicPartition))
+          consumer.seekToBeginning(java.util.List.of(topicPartition))
+          assertEquals(
+            pollValues(consumer, expected = 2),
+            Vector("before-controller-loss", "after-controller-loss")
+          )
+        finally consumer.close()
+
+        val replacement = KafkaBroker(configs(firstController - 1))
+        restartedBroker = Some(replacement)
+        replacement.start()
+        awaitInSyncReplicas(admin, "controller-events", partition, Set(1, 2, 3))
+        assertEquals(awaitController(admin), nextController)
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      restartedBroker.foreach(_.close())
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
+  test("an isolated controller loses its quorum lease and fences replica writes") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-controller-lease-${node.id}"))
+    val brokers = nodes.zip(directories).map { case (node, directory) =>
+      KafkaBroker(
+        BrokerConfig(
+          bindHost = "127.0.0.1",
+          port = node.port,
+          advertisedHost = node.host,
+          advertisedPort = Some(node.port),
+          dataDirectory = directory,
+          flushPolicy = FlushPolicy.Sync,
+          nodeId = node.id,
+          clusterNodes = nodes,
+          controllerId = 1,
+          defaultReplicationFactor = 3,
+          minInSyncReplicas = 2,
+          peerTimeoutMillis = 300,
+          controllerHeartbeatMillis = 100,
+          controllerElectionTimeoutMillis = 600
+        )
+      )
+    }
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        val controllerId = awaitController(admin)
+        admin.createTopics(java.util.List.of(new NewTopic("lease-events", 3, 3.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        val partition = controllerId - 1
+        awaitInSyncReplicas(admin, "lease-events", partition, Set(1, 2, 3))
+        val metadata = clusterMetadata(nodes(controllerId - 1))
+        val leaderEpoch = metadata.byName("lease-events").partitions(partition).leaderEpoch
+
+        nodes.indices.filter(_ != controllerId - 1).foreach(index => brokers(index).close())
+        val peer = PeerClient()
+        try
+          val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos
+          var error = Errors.None
+          while error != Errors.BrokerNotAvailable && System.nanoTime() < deadline do
+            val response = peer.call(
+              nodes(controllerId - 1),
+              InternalApi.ReplicaCommit,
+              ByteWriter()
+                .writeString("lease-events")
+                .writeInt(partition)
+                .writeInt(leaderEpoch)
+                .writeLong(0L)
+                .result(),
+              1000
+            )
+            error = response.readShort()
+            response.ensureFullyRead()
+            if error != Errors.BrokerNotAvailable then Thread.sleep(100L)
+          assertEquals(error, Errors.BrokerNotAvailable)
+        finally peer.close()
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
   test("a returning replica replaces a divergent tail before it rejoins the ISR") {
     val ports = freePorts(3)
     val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
@@ -295,14 +450,20 @@ final class KafkaClientEndToEndSuite extends FunSuite:
 
           val peer = PeerClient()
           try
+            val snapshot = peer.call(nodes(2), InternalApi.MetadataSnapshot, Array.emptyByteArray, 1000)
+            snapshot.readLong()
+            snapshot.readInt()
+            val currentMetadata = MetadataCodec.decode(snapshot.readByteArray())
+            snapshot.ensureFullyRead()
+            val currentPartition = currentMetadata.byName("recovering-events").partitions(1)
             val reset = peer.call(
               nodes(2),
               InternalApi.ReplicaReset,
               ByteWriter()
                 .writeString("recovering-events")
                 .writeInt(1)
-                .writeInt(2)
-                .writeInt(0)
+                .writeInt(currentPartition.leaderId)
+                .writeInt(currentPartition.leaderEpoch)
                 .writeLong(0L)
                 .result(),
               1000
@@ -613,6 +774,37 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         .getOrElse(Set.empty)
       if actual != expected then Thread.sleep(100L)
     assertEquals(actual, expected)
+
+  private def awaitController(admin: Admin, excludedId: Option[Int] = None): Int =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var controllerId = -1
+    while (controllerId < 0 || excludedId.contains(controllerId)) && System.nanoTime() < deadline do
+      try
+        val candidate = admin.describeCluster().controller().get(5, TimeUnit.SECONDS)
+        controllerId = Option(candidate).map(_.id()).getOrElse(-1)
+      catch case _: Throwable => controllerId = -1
+      if controllerId < 0 || excludedId.contains(controllerId) then Thread.sleep(100L)
+    assert(controllerId >= 0 && !excludedId.contains(controllerId), s"controller election did not complete: $controllerId")
+    controllerId
+
+  private def controllerTerm(node: ClusterNode): Long =
+    val (term, _) = controllerSnapshot(node)
+    term
+
+  private def clusterMetadata(node: ClusterNode): cascade.cluster.ClusterMetadata =
+    val (_, metadata) = controllerSnapshot(node)
+    metadata
+
+  private def controllerSnapshot(node: ClusterNode): (Long, cascade.cluster.ClusterMetadata) =
+    val peer = PeerClient()
+    try
+      val snapshot = peer.call(node, InternalApi.MetadataSnapshot, Array.emptyByteArray, 1000)
+      val term = snapshot.readLong()
+      snapshot.readInt()
+      val metadata = MetadataCodec.decode(snapshot.readByteArray())
+      snapshot.ensureFullyRead()
+      (term, metadata)
+    finally peer.close()
 
   private def testBroker(directory: java.nio.file.Path): KafkaBroker =
     KafkaBroker(
