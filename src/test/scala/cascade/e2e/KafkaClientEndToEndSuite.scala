@@ -1,8 +1,10 @@
 package cascade.e2e
 
+import cascade.TestRecordBatch
 import cascade.broker.{BrokerConfig, KafkaBroker}
-import cascade.cluster.ClusterNode
-import cascade.storage.FlushPolicy
+import cascade.cluster.{ClusterNode, InternalApi, PeerClient}
+import cascade.protocol.{ByteWriter, Errors}
+import cascade.storage.{FlushPolicy, PartitionLog}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.net.ServerSocket
@@ -260,6 +262,101 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("a returning replica replaces a divergent tail before it rejoins the ISR") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-rejoin-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 3,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 1000
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    var returnedBroker: Option[KafkaBroker] = None
+    try
+      try
+        brokers.foreach(_.start())
+        val admin = Admin.create(adminProperties(bootstrapServers))
+        try
+          admin.createTopics(java.util.List.of(new NewTopic("recovering-events", 2, 3.toShort))).all().get()
+          awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2, 3))
+
+          val peer = PeerClient()
+          try
+            val reset = peer.call(
+              nodes(2),
+              InternalApi.ReplicaReset,
+              ByteWriter()
+                .writeString("recovering-events")
+                .writeInt(1)
+                .writeInt(2)
+                .writeInt(0)
+                .writeLong(0L)
+                .result(),
+              1000
+            )
+            assertEquals(reset.readShort(), Errors.InvalidRequest)
+            reset.ensureFullyRead()
+          finally peer.close()
+
+          produceValue(bootstrapServers, "recovering-events", 1, "before-failure", expectedOffset = 0L)
+          brokers(2).close()
+          awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2))
+          produceValue(bootstrapServers, "recovering-events", 1, "while-away", expectedOffset = 1L)
+
+          val divergent = PartitionLog(
+            directories(2).resolve("recovering-events").resolve("partition-1"),
+            flushPolicy = FlushPolicy.Sync
+          )
+          try
+            assertEquals(divergent.logEndOffset, 1L)
+            assertEquals(divergent.append(TestRecordBatch.single(totalBytes = 100)).baseOffset, 1L)
+            assertEquals(divergent.logEndOffset, 2L)
+          finally divergent.close()
+
+          val replacement = KafkaBroker(configs(2))
+          returnedBroker = Some(replacement)
+          replacement.start()
+          awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2, 3))
+          produceValue(bootstrapServers, "recovering-events", 1, "after-recovery", expectedOffset = 2L)
+        finally admin.close(Duration.ofSeconds(5))
+      finally
+        returnedBroker.foreach(_.close())
+        brokers.foreach(_.close())
+
+      val leader = PartitionLog(
+        directories(1).resolve("recovering-events").resolve("partition-1"),
+        flushPolicy = FlushPolicy.Sync
+      )
+      val recovered = PartitionLog(
+        directories(2).resolve("recovering-events").resolve("partition-1"),
+        flushPolicy = FlushPolicy.Sync
+      )
+      try
+        assertEquals(leader.logEndOffset, 3L)
+        assertEquals(recovered.logEndOffset, leader.logEndOffset)
+        assert(
+          recovered.fetch(0L, 1024 * 1024).records.sameElements(leader.fetch(0L, 1024 * 1024).records),
+          "the recovered replica must exactly match the authoritative leader log"
+        )
+      finally
+        recovered.close()
+        leader.close()
+    finally directories.foreach(deleteTree)
+  }
+
   test("Kafka transactions expose committed records, hide aborted records, and recover after restart") {
     val directory = Files.createTempDirectory("cascade-transactions-e2e")
     try
@@ -479,6 +576,43 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     val result = values.result()
     assertEquals(result.size, expected)
     result
+
+  private def produceValue(
+      bootstrapServers: String,
+      topic: String,
+      partition: Int,
+      value: String,
+      expectedOffset: Long
+  ): Unit =
+    val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrapServers))
+    try
+      val metadata = producer.send(
+        ProducerRecord[Array[Byte], Array[Byte]](
+          topic,
+          partition,
+          null,
+          value.getBytes(StandardCharsets.UTF_8)
+        )
+      ).get(15, TimeUnit.SECONDS)
+      assertEquals(metadata.offset(), expectedOffset)
+    finally producer.close(Duration.ofSeconds(5))
+
+  private def awaitInSyncReplicas(
+      admin: Admin,
+      topic: String,
+      partition: Int,
+      expected: Set[Int]
+  ): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var actual = Set.empty[Int]
+    while actual != expected && System.nanoTime() < deadline do
+      val description = admin.describeTopics(java.util.List.of(topic)).allTopicNames().get(5, TimeUnit.SECONDS).get(topic)
+      actual = description.partitions().asScala
+        .find(_.partition() == partition)
+        .map(_.isr().asScala.map(_.id()).toSet)
+        .getOrElse(Set.empty)
+      if actual != expected then Thread.sleep(100L)
+    assertEquals(actual, expected)
 
   private def testBroker(directory: java.nio.file.Path): KafkaBroker =
     KafkaBroker(

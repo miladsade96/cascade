@@ -8,6 +8,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
 
 final case class ClusterCreateResult(errorCode: Short, message: Option[String])
+private final case class ReplicaRecoveryTarget(
+    topic: String,
+    partition: Int,
+    leaderId: Int,
+    leaderEpoch: Int,
+    followerId: Int
+)
 
 /**
  * Static-membership metadata quorum. A fixed controller commits metadata images to a majority;
@@ -24,14 +31,22 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     Option.when(enabled)(MetadataStore(config.dataDirectory.resolve(".cascade").resolve("cluster-metadata.log")))
   @volatile private var current = store.map(_.metadata).getOrElse(ClusterMetadata.Empty)
   @volatile private var controllerReady = !enabled || config.nodeId != config.controllerId
+  @volatile private var replicationManager: ReplicationManager | Null = null
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
+  private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
   private val monitor: Option[ScheduledExecutorService] = Option.when(enabled && config.nodeId == config.controllerId) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-cluster-monitor").factory())
   }
 
   applyMetadata(current)
 
+  def attachReplicationManager(manager: ReplicationManager): Unit = synchronized {
+    if replicationManager != null then throw IllegalStateException("replication manager is already attached")
+    replicationManager = manager
+  }
+
   def start(): Unit =
+    if enabled && replicationManager == null then throw IllegalStateException("replication manager is not attached")
     if enabled && config.nodeId != config.controllerId then synchronizeFromController()
     else if enabled then recoverControllerState()
     monitor.foreach { executor =>
@@ -217,6 +232,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private def monitorPeers(): Unit =
     if !closed.get() then
       if !controllerReady then recoverControllerState()
+      retryPendingRecoveryReleases()
       nodes.filterNot(_.id == config.nodeId).foreach { node =>
         val healthy =
           try
@@ -230,7 +246,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           missedHeartbeats.update(node.id, value)
           value
         }
-        if misses == 3 then removeFailedNode(node.id)
+        if healthy && nodeNeedsRecovery(node.id) && synchronizeNode(node) then recoverNode(node.id)
+        else if misses >= 3 then removeFailedNode(node.id)
       }
 
   private def recoverControllerState(): Unit =
@@ -270,3 +287,143 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val next = ClusterMetadata(Math.addExact(current.version, 1L), changedTopics)
       if !propose(next) then System.err.println(s"Cascade could not commit metadata failover for node $nodeId")
   }
+
+  private def synchronizeNode(node: ClusterNode): Boolean =
+    try
+      val response = peerClient.call(
+        node,
+        InternalApi.MetadataCommit,
+        ByteWriter().writeByteArray(MetadataCodec.encode(current)).result(),
+        config.peerTimeoutMillis
+      )
+      val accepted = response.readShort() == Errors.None
+      response.ensureFullyRead()
+      accepted
+    catch case _: Throwable => false
+
+  private def recoverNode(nodeId: Int): Unit =
+    val targets = synchronized {
+      current.topics.flatMap { topic =>
+        topic.partitions.collect {
+          case partition
+              if partition.replicas.contains(nodeId) && !partition.inSyncReplicas.contains(nodeId) &&
+                partition.leaderId >= 0 =>
+            ReplicaRecoveryTarget(topic.name, partition.partition, partition.leaderId, partition.leaderEpoch, nodeId)
+        }
+      }
+    }
+    val results = targets.map(target => target -> requestReplicaRecovery(target))
+    results.collect { case (target, error) if error != Errors.None => target }.foreach { target =>
+      if !releaseReplicaRecovery(target, admitted = false) then
+        synchronized(pendingRecoveryReleases.update(target, false))
+    }
+    val recovered = results.collect { case (target, Errors.None) => target }
+    if recovered.nonEmpty then
+      val recoveredKeys = recovered.map(target => (target.topic, target.partition) -> target).toMap
+      val committed = synchronized {
+        val changedTopics = current.topics.map { topic =>
+          val changedPartitions = topic.partitions.map { partition =>
+            recoveredKeys.get((topic.name, partition.partition)) match
+              case Some(target)
+                  if partition.leaderId == target.leaderId && partition.leaderEpoch == target.leaderEpoch &&
+                    partition.replicas.contains(nodeId) && !partition.inSyncReplicas.contains(nodeId) =>
+                val admitted = partition.replicas.filter(id => partition.inSyncReplicas.contains(id) || id == nodeId)
+                partition.copy(inSyncReplicas = admitted)
+              case _ => partition
+          }
+          topic.copy(partitions = changedPartitions)
+        }
+        if changedTopics == current.topics then false
+        else propose(ClusterMetadata(Math.addExact(current.version, 1L), changedTopics))
+      }
+      recovered.foreach { target =>
+        if releaseReplicaRecovery(target, admitted = committed) then
+          synchronized(pendingRecoveryReleases.remove(target): Unit)
+        else synchronized(pendingRecoveryReleases.update(target, committed))
+      }
+
+  private def nodeNeedsRecovery(nodeId: Int): Boolean = synchronized {
+    current.topics.exists(_.partitions.exists { partition =>
+      partition.leaderId >= 0 && partition.replicas.contains(nodeId) && !partition.inSyncReplicas.contains(nodeId)
+    })
+  }
+
+  private def retryPendingRecoveryReleases(): Unit =
+    val pending = synchronized(pendingRecoveryReleases.toVector)
+    pending.foreach { case (target, requestedAdmission) =>
+      val stillAdmitted = synchronized {
+        current.byName.get(target.topic).flatMap(_.partitions.lift(target.partition)).exists { partition =>
+          partition.leaderId == target.leaderId && partition.leaderEpoch == target.leaderEpoch &&
+          partition.inSyncReplicas.contains(target.followerId)
+        }
+      }
+      if releaseReplicaRecovery(target, admitted = requestedAdmission && stillAdmitted) then
+        synchronized(pendingRecoveryReleases.remove(target): Unit)
+    }
+
+  private def requestReplicaRecovery(target: ReplicaRecoveryTarget): Short =
+    if target.leaderId == config.nodeId then
+      Option(replicationManager) match
+        case Some(manager) =>
+          manager.recoverReplica(
+            target.topic,
+            target.partition,
+            target.followerId,
+            target.leaderEpoch,
+            config.peerTimeoutMillis
+          )
+        case None => Errors.ReplicaNotAvailable
+    else
+      nodeById.get(target.leaderId) match
+        case None => Errors.ReplicaNotAvailable
+        case Some(leader) =>
+          try
+            val response = peerClient.call(
+              leader,
+              InternalApi.ReplicaCatchUp,
+              ByteWriter()
+                .writeString(target.topic)
+                .writeInt(target.partition)
+                .writeInt(target.followerId)
+                .writeInt(target.leaderEpoch)
+                .writeInt(config.peerTimeoutMillis)
+                .result(),
+              config.replicaRecoveryTimeoutMillis
+            )
+            val error = response.readShort()
+            response.ensureFullyRead()
+            error
+          catch case _: Throwable => Errors.ReplicaNotAvailable
+
+  private def releaseReplicaRecovery(target: ReplicaRecoveryTarget, admitted: Boolean): Boolean =
+    if target.leaderId == config.nodeId then
+      Option(replicationManager).exists(
+        _.completeReplicaRecovery(
+          target.topic,
+          target.partition,
+          target.followerId,
+          target.leaderEpoch,
+          admitted
+        ) == Errors.None
+      )
+    else
+      nodeById.get(target.leaderId).exists { leader =>
+        if admitted then synchronizeNode(leader): Unit
+        try
+          val response = peerClient.call(
+            leader,
+            InternalApi.ReplicaRecoveryComplete,
+            ByteWriter()
+              .writeString(target.topic)
+              .writeInt(target.partition)
+              .writeInt(target.followerId)
+              .writeInt(target.leaderEpoch)
+              .writeBoolean(admitted)
+              .result(),
+            config.peerTimeoutMillis
+          )
+          val error = response.readShort()
+          response.ensureFullyRead()
+          error == Errors.None
+        catch case _: Throwable => false
+      }

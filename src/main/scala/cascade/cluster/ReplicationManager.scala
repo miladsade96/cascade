@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 final case class ReplicatedAppendResult(errorCode: Short, baseOffset: Long)
+private final case class ReplicaRecoverySession(followerId: Int, leaderEpoch: Int)
 
 trait ReplicatedAppender:
   def append(
@@ -29,7 +30,9 @@ final class ReplicationManager(
       AutoCloseable:
   private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val partitionLocks = ConcurrentHashMap[String, Object]()
+  private val recoveries = ConcurrentHashMap[String, ReplicaRecoverySession]()
   private val closed = AtomicBoolean(false)
+  private val RecoveryChunkBytes = 8 * 1024 * 1024
 
   def append(
       topic: String,
@@ -52,12 +55,80 @@ final class ReplicationManager(
         case Some(metadata) =>
           val lock = partitionLocks.computeIfAbsent(s"$topic-$partition", _ => Object())
           lock.synchronized {
-            appendAsLeader(topic, partition, records, acknowledgements, timeoutMillis, metadata)
+            if recoveries.containsKey(partitionKey(topic, partition)) then
+              ReplicatedAppendResult(Errors.ReplicaNotAvailable, -1L)
+            else appendAsLeader(topic, partition, records, acknowledgements, timeoutMillis, metadata)
           }
+
+  /**
+   * Runs on the current leader. The partition lock fences Produce while the committed leader log
+   * replaces the returning replica's local copy. A successful session stays fenced until the
+   * controller commits ISR admission and explicitly releases it.
+   */
+  def recoverReplica(
+      topic: String,
+      partition: Int,
+      followerId: Int,
+      leaderEpoch: Int,
+      timeoutMillis: Int
+  ): Short =
+    val key = partitionKey(topic, partition)
+    val lock = partitionLocks.computeIfAbsent(key, _ => Object())
+    lock.synchronized {
+      cluster.partition(topic, partition) match
+        case None => Errors.UnknownTopicOrPartition
+        case Some(metadata) if metadata.leaderId != config.nodeId => Errors.NotLeaderOrFollower
+        case Some(metadata) if metadata.leaderEpoch != leaderEpoch => Errors.FencedLeaderEpoch
+        case Some(metadata) if !metadata.replicas.contains(followerId) || metadata.inSyncReplicas.contains(followerId) =>
+          Errors.InvalidRequest
+        case Some(_) =>
+          registry.partition(topic, partition) match
+            case None => Errors.UnknownTopicOrPartition
+            case Some(log) =>
+              nodeById(followerId) match
+                case None => Errors.ReplicaNotAvailable
+                case Some(follower) =>
+                  try
+                    copyCommittedLog(topic, partition, leaderEpoch, follower, log, timeoutMillis)
+                    recoveries.put(key, ReplicaRecoverySession(followerId, leaderEpoch))
+                    Errors.None
+                  catch
+                    case error: Throwable =>
+                      System.err.println(
+                        s"Cascade replica recovery failed for $topic-$partition on node $followerId: ${error.getMessage}"
+                      )
+                      Errors.ReplicaNotAvailable
+    }
+
+  /** Releases a recovery fence after ISR admission, or cancels it when metadata commit fails. */
+  def completeReplicaRecovery(
+      topic: String,
+      partition: Int,
+      followerId: Int,
+      leaderEpoch: Int,
+      admitted: Boolean
+  ): Short =
+    val key = partitionKey(topic, partition)
+    val lock = partitionLocks.computeIfAbsent(key, _ => Object())
+    lock.synchronized {
+      Option(recoveries.get(key)) match
+        case None => Errors.None
+        case Some(session) if session != ReplicaRecoverySession(followerId, leaderEpoch) => Errors.InvalidRequest
+        case Some(_) if admitted && !cluster.partition(topic, partition).exists { metadata =>
+              metadata.leaderId == config.nodeId && metadata.leaderEpoch == leaderEpoch &&
+              metadata.inSyncReplicas.contains(followerId)
+            } => Errors.ReplicaNotAvailable
+        case Some(_) =>
+          recoveries.remove(key): Unit
+          Errors.None
+    }
 
   def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.ReplicaAppend => replicaAppend(cursor)
     case InternalApi.ReplicaCommit => replicaCommit(cursor)
+    case InternalApi.ReplicaCatchUp => replicaCatchUp(cursor)
+    case InternalApi.ReplicaReset => replicaReset(cursor)
+    case InternalApi.ReplicaRecoveryComplete => replicaRecoveryComplete(cursor)
     case _ => throw IllegalArgumentException(s"unsupported replication API: $apiKey")
 
   override def close(): Unit =
@@ -158,7 +229,119 @@ final class ReplicationManager(
             catch case _: Throwable => Errors.InvalidRequest
     ByteWriter().writeShort(error).result()
 
+  private def replicaCatchUp(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val followerId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    val timeoutMillis = cursor.readInt()
+    cursor.ensureFullyRead()
+    ByteWriter().writeShort(recoverReplica(topic, partition, followerId, leaderEpoch, timeoutMillis)).result()
+
+  private def replicaReset(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val leaderId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    val startOffset = cursor.readLong()
+    cursor.ensureFullyRead()
+    val error = cluster.partition(topic, partition) match
+      case None => Errors.UnknownTopicOrPartition
+      case Some(metadata) if metadata.leaderId != leaderId || metadata.leaderEpoch != leaderEpoch =>
+        Errors.FencedLeaderEpoch
+      case Some(metadata) if metadata.inSyncReplicas.contains(config.nodeId) || !metadata.replicas.contains(config.nodeId) =>
+        Errors.InvalidRequest
+      case Some(_) =>
+        registry.partition(topic, partition) match
+          case None => Errors.UnknownTopicOrPartition
+          case Some(log) =>
+            try
+              log.resetReplica(startOffset)
+              Errors.None
+            catch case _: Throwable => Errors.ReplicaNotAvailable
+    ByteWriter().writeShort(error).result()
+
+  private def replicaRecoveryComplete(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val followerId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    val admitted = cursor.readBoolean()
+    cursor.ensureFullyRead()
+    ByteWriter()
+      .writeShort(completeReplicaRecovery(topic, partition, followerId, leaderEpoch, admitted))
+      .result()
+
+  private def copyCommittedLog(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      log: cascade.storage.PartitionLog,
+      timeoutMillis: Int
+  ): Unit =
+    val startOffset = log.logStartOffset
+    val targetHighWatermark = log.highWatermark
+    val resetPayload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .writeLong(startOffset)
+      .result()
+    val reset =
+      try peerClient.call(follower, InternalApi.ReplicaReset, resetPayload, timeoutMillis)
+      catch case _: Throwable =>
+        // Reset is idempotent, so retry once after PeerClient discards a stale pre-restart socket.
+        peerClient.call(follower, InternalApi.ReplicaReset, resetPayload, timeoutMillis)
+    val resetError = reset.readShort()
+    reset.ensureFullyRead()
+    if resetError != Errors.None then throw IllegalStateException(s"replica reset returned error $resetError")
+
+    var nextOffset = startOffset
+    while nextOffset < targetHighWatermark do
+      val records = log.fetch(nextOffset, RecoveryChunkBytes, targetHighWatermark, _ => true).records
+      if records.isEmpty then
+        throw IllegalStateException(s"leader returned no records before high watermark $targetHighWatermark")
+      val append = peerClient.call(
+        follower,
+        InternalApi.ReplicaAppend,
+        ByteWriter(records.length + 128)
+          .writeString(topic)
+          .writeInt(partition)
+          .writeInt(leaderEpoch)
+          .writeLong(nextOffset)
+          .writeByteArray(records)
+          .result(),
+        timeoutMillis
+      )
+      val appendError = append.readShort()
+      val followerLogEnd = append.readLong()
+      append.ensureFullyRead()
+      if appendError != Errors.None || followerLogEnd <= nextOffset || followerLogEnd > targetHighWatermark then
+        throw IllegalStateException(
+          s"replica append failed: error=$appendError, previous=$nextOffset, returned=$followerLogEnd"
+        )
+      nextOffset = followerLogEnd
+
+    val commit = peerClient.call(
+      follower,
+      InternalApi.ReplicaCommit,
+      ByteWriter()
+        .writeString(topic)
+        .writeInt(partition)
+        .writeInt(leaderEpoch)
+        .writeLong(targetHighWatermark)
+        .result(),
+      timeoutMillis
+    )
+    val commitError = commit.readShort()
+    commit.ensureFullyRead()
+    if commitError != Errors.None then throw IllegalStateException(s"replica commit returned error $commitError")
+
   private def nodeById(id: Int): Option[ClusterNode] = cluster.clusterNodes.find(_.id == id)
+
+  private def partitionKey(topic: String, partition: Int): String = s"$topic-$partition"
 
   private def invokePeers(
       nodes: Vector[ClusterNode],

@@ -37,5 +37,8 @@ object InternalApi:
   val CreateTopic: Short = -104
   val ReplicaAppend: Short = -110
   val ReplicaCommit: Short = -111
+  val ReplicaCatchUp: Short = -112
+  val ReplicaReset: Short = -113
+  val ReplicaRecoveryComplete: Short = -114
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaCommit
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaRecoveryComplete

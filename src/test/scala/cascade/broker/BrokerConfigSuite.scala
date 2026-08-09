@@ -41,7 +41,9 @@ final class BrokerConfigSuite extends FunSuite:
         "--min-insync-replicas",
         "2",
         "--peer-timeout-ms",
-        "1500"
+        "1500",
+        "--replica-recovery-timeout-ms",
+        "120000"
       )
     )
 
@@ -50,4 +52,5 @@ final class BrokerConfigSuite extends FunSuite:
     assertEquals(config.defaultReplicationFactor, 3)
     assertEquals(config.minInSyncReplicas, 2)
     assertEquals(config.peerTimeoutMillis, 1500)
+    assertEquals(config.replicaRecoveryTimeoutMillis, 120000)
   }

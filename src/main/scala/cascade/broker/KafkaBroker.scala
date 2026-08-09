@@ -41,6 +41,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     val peers = PeerClient()
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
+    cluster.attachReplicationManager(replication)
     val delivery = DeliveryCoordinator(config.dataDirectory.resolve(".cascade").resolve("delivery-state.log"), registry, groupCoordinator)
     peerClient = peers
     clusterManager = cluster

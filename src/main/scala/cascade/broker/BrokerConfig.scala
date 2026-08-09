@@ -21,6 +21,7 @@ final case class BrokerConfig(
     defaultReplicationFactor: Int = 1,
     minInSyncReplicas: Int = 1,
     peerTimeoutMillis: Int = 3000,
+    replicaRecoveryTimeoutMillis: Int = 300000,
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -31,6 +32,7 @@ final case class BrokerConfig(
   require(defaultReplicationFactor > 0, "default replication factor must be positive")
   require(minInSyncReplicas > 0, "minimum in-sync replicas must be positive")
   require(peerTimeoutMillis > 0, "peer timeout must be positive")
+  require(replicaRecoveryTimeoutMillis > 0, "replica recovery timeout must be positive")
   require(clusterNodes.map(_.id).distinct.size == clusterNodes.size, "cluster node IDs must be unique")
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == nodeId), "cluster nodes must contain this node ID")
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == controllerId), "cluster nodes must contain the controller ID")
@@ -66,6 +68,8 @@ object BrokerConfig:
         loop(tail, config.copy(defaultReplicationFactor = value.toInt))
       case "--min-insync-replicas" :: value :: tail => loop(tail, config.copy(minInSyncReplicas = value.toInt))
       case "--peer-timeout-ms" :: value :: tail => loop(tail, config.copy(peerTimeoutMillis = value.toInt))
+      case "--replica-recovery-timeout-ms" :: value :: tail =>
+        loop(tail, config.copy(replicaRecoveryTimeoutMillis = value.toInt))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
     loop(arguments.toList, BrokerConfig())
