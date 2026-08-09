@@ -13,7 +13,7 @@ The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client
 So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, and leader promotion.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics, but three-node mode is still a static replication milestone. Coordinator replication, controller election, replica catch-up, and the other production gates below are still missing.
+> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics, but three-node mode is still a static replication milestone. Returning replicas can now recover and safely rejoin the ISR, but coordinator replication, controller election, and the other production gates below are still missing.
 
 ## Performance I measured
 
@@ -38,7 +38,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Delivery guarantees | Producer IDs, epoch fencing, bounded duplicate detection, sequence recovery, transactions, timeouts, transactional offsets, and `read_committed` |
 | Durable state | CRC32C-protected metadata, consumer-offset, and delivery-state journals with forced commits and corrupt/partial-tail recovery |
 | Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
-| Static replication | RF=3 partition assignment, synchronous ISR replication, committed high watermarks, leader epochs, ISR shrink, and surviving-replica promotion |
+| Static replication | RF=3 assignment, synchronous ISR replication, committed high watermarks, leader promotion, divergent-tail replacement, and safe replica re-admission |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -106,9 +106,12 @@ If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic
 - `min.insync.replicas` admission for `acks=all`.
 - Leader-only Fetch/ListOffsets and committed high-watermark visibility.
 - Failure detection, ISR shrink, and promotion of a surviving replica with a new leader epoch.
+- Full committed-prefix recovery for a returning replica, including replacement of a divergent local tail.
+- Partition fencing during recovery so Produce cannot race the copy or ISR admission.
+- ISR re-admission only after catch-up succeeds and the new metadata image reaches quorum.
 - Real Kafka-client end-to-end verification before and after the original partition leader stops.
 
-Membership and the controller are still static. A returning replica can't catch up or safely rejoin the ISR yet. I also haven't added production failover for the controller, group coordinator, or delivery coordinator.
+Membership and the controller are still static. Recovery currently copies the complete committed log instead of using an incremental snapshot or segment transfer, so it favors correctness over recovery bandwidth. I also haven't added production failover for the controller, group coordinator, or delivery coordinator.
 
 ## Run Cascade
 
@@ -292,11 +295,11 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current `sbt test` suite passes **39/39 tests** in three layers:
+The current `sbt test` suite passes **41/41 tests** in three layers:
 
-- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, and metadata recovery.
+- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, replica reset, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, and metadata recovery.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, and idempotent state recovery after broker restart.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, divergent-tail replacement, safe replica re-admission, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
 
 The load harness separately checks the exact record count at one million and ten million records.
 
@@ -304,7 +307,7 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Availability and replication | Quorum controller election, broker fencing, offline-replica reconciliation, catch-up, safe ISR re-admission, reassignment, and persisted high-watermark recovery |
+| 1 | Availability and replication | Quorum controller election, broker fencing, incremental replica recovery, reassignment, and persisted high-watermark recovery |
 | 2 | Coordinator failover | Replicated classic-group, consumer-offset, producer, and transaction coordinator state across brokers |
 | 3 | Storage lifecycle | Time/size retention, log compaction, offset compaction/expiry, timestamp and transaction indexes, disk-pressure handling, and safe deletion |
 | 4 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
@@ -318,7 +321,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## What is still missing
 
 - The controller and broker membership are static; there is no controller election.
-- Offline replicas cannot catch up or safely rejoin the ISR automatically.
+- Replica recovery currently recopies the full committed prefix and pauses Produce for that partition; incremental segment transfer is not implemented yet.
 - Group, offset, producer, and transaction coordinator state is not replicated for failover.
 - Retention, compaction, timestamp indexes, quotas, TLS/SASL, ACLs, and operational endpoints are not implemented.
 - Only the classic consumer group protocol is supported.
@@ -345,6 +348,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--default-replication-factor` | `1` | Replication factor used for auto-created topics |
 | `--min-insync-replicas` | `1` | Minimum ISR required by `acks=all` |
 | `--peer-timeout-ms` | `3000` | Internal metadata and replica RPC timeout |
+| `--replica-recovery-timeout-ms` | `300000` | Maximum controller wait for one replica recovery operation |
 | `--no-auto-create` | Off | Disable Metadata/Produce auto-creation |
 
 ## More documentation
