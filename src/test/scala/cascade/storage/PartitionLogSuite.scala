@@ -111,6 +111,33 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("replica reset removes a divergent tail and rebuilds from an authoritative offset") {
+    val directory = Files.createTempDirectory("cascade-replica-reset-test")
+    try
+      val log = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 0L)
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 1L)
+        log.commitThrough(1L)
+        assertEquals(log.logEndOffset, 2L)
+        assertEquals(log.highWatermark, 1L)
+
+        log.resetReplica(0L)
+        assertEquals(log.logStartOffset, 0L)
+        assertEquals(log.logEndOffset, 0L)
+        assertEquals(log.highWatermark, 0L)
+        assertEquals(log.fetch(0L, 1024).records.length, 0)
+
+        log.appendReplica(TestRecordBatch.single(totalBytes = 100), expectedBaseOffset = 0L)
+        log.commitThrough(1L)
+        assertEquals(log.fetch(0L, 1024).records.length, 100)
+        val paths = Files.list(directory)
+        try assertEquals(paths.iterator().asScala.count(_.getFileName.toString.endsWith(".log")), 1)
+        finally paths.close()
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   test("recovery truncates an incomplete batch from the active segment") {
     val directory = Files.createTempDirectory("cascade-tail-recovery-test")
     try

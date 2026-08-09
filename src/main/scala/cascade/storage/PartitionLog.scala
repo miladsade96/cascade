@@ -89,6 +89,28 @@ final class PartitionLog(
     appendInternal(recordSet, commitImmediately = false)
   }
 
+  /**
+   * Drops a replica's local copy before an authoritative leader streams a new committed prefix.
+   * This is only safe while the replica is outside the ISR and the partition is fenced by the
+   * replication manager.
+   */
+  def resetReplica(startOffset: Long): Unit = synchronized {
+    if startOffset < 0L then throw ProtocolException(s"negative replica start offset: $startOffset")
+    awaitBackgroundFlush()
+    segments.foreach(_.close())
+    segments.foreach(segment => Files.deleteIfExists(segment.path): Unit)
+    segments.clear()
+    recentProducerBatches.clear()
+    nextOffset = startOffset
+    committedOffset = startOffset
+    unflushedBytes = 0L
+    inFlightFlushBytes = 0L
+    flushInProgress = false
+    rolloverFlushRequested = false
+    segments += openSegment(startOffset)
+    ()
+  }
+
   def commitThrough(offsetExclusive: Long): Unit = synchronized {
     if offsetExclusive < committedOffset || offsetExclusive > nextOffset then
       throw ProtocolException(
