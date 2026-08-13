@@ -8,7 +8,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 final case class ReplicatedAppendResult(errorCode: Short, baseOffset: Long)
-private final case class ReplicaRecoverySession(followerId: Int, leaderEpoch: Int)
 private final case class ReplicaRecoveryState(errorCode: Short, logStart: Long, logEnd: Long, highWatermark: Long)
 private final case class ReplicaRecoveryProbe(
     errorCode: Short,
@@ -35,7 +34,7 @@ final class ReplicationManager(
       AutoCloseable:
   private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val partitionLocks = ConcurrentHashMap[String, Object]()
-  private val recoveries = ConcurrentHashMap[String, ReplicaRecoverySession]()
+  private val recoveries = ConcurrentHashMap[String, ConcurrentHashMap[Int, Int]]()
   private val closed = AtomicBoolean(false)
 
   def append(
@@ -60,7 +59,7 @@ final class ReplicationManager(
         case Some(metadata) =>
           val lock = partitionLocks.computeIfAbsent(s"$topic-$partition", _ => Object())
           lock.synchronized {
-            if recoveries.containsKey(partitionKey(topic, partition)) then
+            if Option(recoveries.get(partitionKey(topic, partition))).exists(!_.isEmpty) then
               ReplicatedAppendResult(Errors.ReplicaNotAvailable, -1L)
             else appendAsLeader(topic, partition, records, acknowledgements, timeoutMillis, metadata)
           }
@@ -95,7 +94,7 @@ final class ReplicationManager(
                   case _ =>
                     // Fence only the final delta and ISR metadata transition.
                     copyCommittedLog(topic, partition, leaderEpoch, follower, log, timeoutMillis)
-                    recoveries.put(key, ReplicaRecoverySession(followerId, leaderEpoch))
+                    recoveries.computeIfAbsent(key, _ => ConcurrentHashMap[Int, Int]()).put(followerId, leaderEpoch): Unit
                     Errors.None
               }
             catch
@@ -116,15 +115,18 @@ final class ReplicationManager(
     val key = partitionKey(topic, partition)
     val lock = partitionLocks.computeIfAbsent(key, _ => Object())
     lock.synchronized {
-      Option(recoveries.get(key)) match
+      Option(recoveries.get(key)).flatMap(sessions => Option(sessions.get(followerId))) match
         case None => Errors.None
-        case Some(session) if session != ReplicaRecoverySession(followerId, leaderEpoch) => Errors.InvalidRequest
+        case Some(epoch) if epoch != leaderEpoch => Errors.InvalidRequest
         case Some(_) if admitted && !cluster.partition(topic, partition).exists { metadata =>
               metadata.leaderId == config.nodeId && metadata.leaderEpoch == leaderEpoch &&
               metadata.inSyncReplicas.contains(followerId)
             } => Errors.ReplicaNotAvailable
         case Some(_) =>
-          recoveries.remove(key): Unit
+          val sessions = recoveries.get(key)
+          if sessions != null then
+            sessions.remove(followerId): Unit
+            if sessions.isEmpty then recoveries.remove(key, sessions): Unit
           Errors.None
     }
 

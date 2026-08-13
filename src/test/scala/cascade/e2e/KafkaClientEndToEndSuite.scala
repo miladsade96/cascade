@@ -20,6 +20,7 @@ import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata,
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.errors.{InvalidReplicaAssignmentException, NoReassignmentInProgressException}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
 
@@ -542,6 +543,15 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         val topicPartition = TopicPartition("cancel-reassignment", 0)
         awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
 
+        val invalid = intercept[java.util.concurrent.ExecutionException] {
+          admin.alterPartitionReassignments(
+            Map(
+              topicPartition -> Optional.of(NewPartitionReassignment(java.util.List.of(Integer.valueOf(99))))
+            ).asJava
+          ).all().get(20, TimeUnit.SECONDS)
+        }
+        assert(invalid.getCause.isInstanceOf[InvalidReplicaAssignmentException])
+
         admin.alterPartitionReassignments(
           Map(
             topicPartition -> Optional.of(NewPartitionReassignment(java.util.List.of(Integer.valueOf(2), Integer.valueOf(3))))
@@ -559,9 +569,86 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         awaitNoReassignment(admin, topicPartition)
         awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
 
+        val missing = intercept[java.util.concurrent.ExecutionException] {
+          admin.alterPartitionReassignments(
+            Map(topicPartition -> Optional.empty[NewPartitionReassignment]()).asJava
+          ).all().get(20, TimeUnit.SECONDS)
+        }
+        assert(missing.getCause.isInstanceOf[NoReassignmentInProgressException])
+
         brokers(2).start()
         awaitController(admin)
         awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
+  test("one reassignment catches up multiple learners and transfers leadership") {
+    val ports = freePorts(4)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-reassignment-learners-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 1,
+        minInSyncReplicas = 1,
+        peerTimeoutMillis = 800,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 800,
+        replicaRecoveryChunkBytes = 4096
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        awaitController(admin)
+        admin.createTopics(java.util.List.of(new NewTopic("multi-learner-events", 1, 1.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, "multi-learner-events", 0, Set(1))
+        (0 until 32).foreach { index =>
+          produceValue(bootstrapServers, "multi-learner-events", 0, s"learner-$index", expectedOffset = index.toLong)
+        }
+
+        val topicPartition = TopicPartition("multi-learner-events", 0)
+        admin.alterPartitionReassignments(
+          Map(
+            topicPartition -> Optional.of(
+              NewPartitionReassignment(
+                java.util.List.of(Integer.valueOf(2), Integer.valueOf(3), Integer.valueOf(4))
+              )
+            )
+          ).asJava
+        ).all().get(20, TimeUnit.SECONDS)
+        awaitNoReassignment(admin, topicPartition)
+        awaitReplicaMembership(admin, topicPartition, Set(2, 3, 4), Set(2, 3, 4))
+
+        val description = admin.describeTopics(java.util.List.of("multi-learner-events"))
+          .allTopicNames().get(5, TimeUnit.SECONDS).get("multi-learner-events")
+        assertEquals(description.partitions().get(0).leader().id(), 2)
+        produceValue(bootstrapServers, "multi-learner-events", 0, "after-learners", expectedOffset = 32L)
+
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers))
+        try
+          consumer.assign(java.util.List.of(topicPartition))
+          consumer.seekToBeginning(java.util.List.of(topicPartition))
+          assertEquals(
+            pollValues(consumer, expected = 33),
+            (0 until 32).map(index => s"learner-$index").toVector :+ "after-learners"
+          )
+        finally consumer.close()
       finally admin.close(Duration.ofSeconds(5))
     finally
       brokers.foreach(_.close())

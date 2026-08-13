@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, and quorum controller election.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, and online partition reassignment.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics and a static-membership three-node cluster with controller failover. Returning replicas now recover incrementally and safely rejoin the ISR, but coordinator-state replication, reassignment, dynamic membership, and the other production gates below are still missing.
+> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics and a static-membership three-node cluster with controller failover. Returning and newly assigned replicas recover incrementally, reassignments survive controller loss, and old replicas stay authoritative until the target assignment is ready. Coordinator-state replication, dynamic membership, and the other production gates below are still missing.
 
 ## Performance I measured
 
@@ -114,11 +114,14 @@ If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic
 - Failure detection, ISR shrink, and promotion of a surviving replica with a new leader epoch.
 - Chained SHA-256 prefix probes that find a returning replica's last verified common batch boundary.
 - Bounded, configurable suffix transfer that preserves the shared prefix and replaces only a divergent or missing tail.
-- Partition fencing during recovery so Produce cannot race the copy or ISR admission.
+- A short final-delta fence so Produce cannot race ISR admission after the online bulk copy.
 - ISR re-admission only after catch-up succeeds and the new metadata image reaches quorum.
+- Durable online reassignment state with learners outside the ISR, add-before-remove ordering, replacement plans, and cancellation.
+- Bulk learner catch-up without blocking Produce, followed by a short final-delta fence and atomic target-assignment commit.
+- Kafka Admin `AlterPartitionReassignments` and `ListPartitionReassignments` compatibility, including controller-failover resume.
 - Real Kafka-client end-to-end verification across partition-leader loss, controller loss, stale-term rejection, metadata creation after election, and broker restart/rejoin.
 
-Broker membership is still static, but the controller is elected from that configured quorum. Recovery is incremental at Kafka batch boundaries and remains partition-fenced until ISR admission commits. Group, offset, producer, and transaction coordinator state is still local to one broker, so those services don't have production failover yet.
+Broker membership is still static, but the controller is elected from that configured quorum. Recovery is incremental at Kafka batch boundaries; only its final delta and ISR admission are partition-fenced. Group, offset, producer, and transaction coordinator state is still local to one broker, so those services don't have production failover yet.
 
 ## Run Cascade
 
@@ -200,6 +203,8 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | AddOffsetsToTxn | 25 | 1 | Consumer-group enrollment in a transaction |
 | EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
 | TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
+| AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
+| ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
 
 I follow the [Apache Kafka 4.3 protocol grammar](https://kafka.apache.org/43/design/protocol/). Cascade only advertises and accepts the versions listed above; I don't want to claim support for versions I haven't tested.
 
@@ -302,11 +307,11 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current `sbt test` suite passes **54/54 tests** in three layers:
+The current `sbt test` suite passes **59/59 tests** in three layers:
 
 - Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, and durable controller term/vote recovery.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, and idempotent state recovery after broker restart.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, reassignment visibility/cancellation, reassignment through controller loss, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
 
 The load harness separately checks the exact record count at one million and ten million records.
 
@@ -314,7 +319,7 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Availability and replication | Partition reassignment, dynamic quorum membership, and automated crash/power-loss qualification |
+| 1 | Availability and replication | Dynamic quorum membership with joint consensus and automated crash/power-loss qualification |
 | 2 | Coordinator failover | Replicated classic-group, consumer-offset, producer, and transaction coordinator state across brokers |
 | 3 | Storage lifecycle | Time/size retention, log compaction, offset compaction/expiry, timestamp and transaction indexes, disk-pressure handling, and safe deletion |
 | 4 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
@@ -328,7 +333,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## What is still missing
 
 - Broker and voter membership is statically configured; online membership changes and joint-consensus reconfiguration are not implemented.
-- Replica recovery transfers bounded record-batch chunks rather than zero-copy segment files; the recovering partition remains fenced during verification and transfer.
+- Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
 - Group, offset, producer, and transaction coordinator state is not replicated for failover.
 - Retention, compaction, timestamp indexes, quotas, TLS/SASL, ACLs, and operational endpoints are not implemented.
 - Only the classic consumer group protocol is supported.

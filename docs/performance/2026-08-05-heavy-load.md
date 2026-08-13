@@ -119,6 +119,8 @@ I then ran a one-million-record regression test. It passed exact verification at
 
 After adding the cluster path, I ran the single-node one-million-record test again. It passed at **615,592 produced records/s** and **527,001 consumed records/s**. Produce acknowledgement latency stayed at or below 500 ms at p99, with a 422.632 ms maximum. The three-node path has correctness coverage, but I haven't run a dedicated sustained-throughput benchmark for it, so I don't present these numbers as replicated-cluster capacity.
 
+After adding durable online partition reassignment, I ran the same one-million-record regression again. It consumed exactly **1,000,000 / 1,000,000** records at **540,738 produced records/s** and **283,351 consumed records/s**. The short-run consume result varied from the earlier cached calibration, but correctness and the production hot path remained healthy; reassignment recovery work is inactive when no move is running.
+
 ## My conclusion
 
 I fixed the bad flush behavior, the exact record checks pass, and sustained write performance improved a lot. On this development machine, explicit periodic persistence now tops out around 178 MiB/s.
