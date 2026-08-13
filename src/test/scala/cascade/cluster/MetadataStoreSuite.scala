@@ -51,6 +51,53 @@ final class MetadataStoreSuite extends FunSuite:
     assertEquals(MetadataCodec.decode(legacy), ClusterMetadata(7L, Vector.empty, controllerTerm = 0L))
   }
 
+  test("reassignment state round-trips and version two images default it to empty") {
+    val reassigning = ClusterMetadata(
+      9L,
+      Vector(
+        TopicMetadata(
+          "events",
+          Vector(
+            PartitionMetadata(
+              0,
+              1,
+              4,
+              Vector(3, 2, 1),
+              Vector(1, 2),
+              addingReplicas = Vector(3),
+              removingReplicas = Vector(1)
+            )
+          )
+        )
+      ),
+      controllerTerm = 6L
+    )
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(reassigning)), reassigning)
+
+    val writer = ByteWriter()
+      .writeShort(2)
+      .writeLong(9L)
+      .writeLong(6L)
+    writer.writeArray(Vector("events")) { name =>
+      writer.writeString(name)
+      writer.writeArray(Vector(0)) { partition =>
+        writer.writeInt(partition)
+        writer.writeInt(1)
+        writer.writeInt(4)
+        writer.writeArray(Vector(1, 2))(writer.writeInt)
+        writer.writeArray(Vector(1, 2))(writer.writeInt): Unit
+      }: Unit
+    }
+    assertEquals(
+      MetadataCodec.decode(writer.result()),
+      ClusterMetadata(
+        9L,
+        Vector(TopicMetadata("events", Vector(PartitionMetadata(0, 1, 4, Vector(1, 2), Vector(1, 2))))),
+        6L
+      )
+    )
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
