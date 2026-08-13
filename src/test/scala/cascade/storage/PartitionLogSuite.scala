@@ -111,6 +111,76 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("replica high watermark survives restart without exposing an uncommitted tail") {
+    val directory = Files.createTempDirectory("cascade-replica-watermark-restart-test")
+    try
+      val log = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 0L)
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 1L)
+        log.commitThrough(1L)
+        assertEquals(log.logEndOffset, 2L)
+        assertEquals(log.highWatermark, 1L)
+      finally log.close()
+
+      val recovered = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.logEndOffset, 2L)
+        assertEquals(recovered.highWatermark, 1L)
+        assertEquals(batchBaseOffsets(recovered.fetch(0L, 1024).records), Vector(0L))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
+  test("a high watermark ahead of a repaired log is clamped and re-checkpointed") {
+    val directory = Files.createTempDirectory("cascade-replica-watermark-clamp-test")
+    val segment = directory.resolve("00000000000000000000.log")
+    try
+      val log = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 0L)
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 1L)
+        log.commitThrough(2L)
+      finally log.close()
+
+      Files.write(segment, TestRecordBatch.single().take(20), StandardOpenOption.APPEND)
+      val channel = java.nio.channels.FileChannel.open(segment, StandardOpenOption.WRITE)
+      try channel.truncate(61L)
+      finally channel.close()
+
+      val recovered = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.logEndOffset, 1L)
+        assertEquals(recovered.highWatermark, 1L)
+      finally recovered.close()
+
+      val reopened = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try assertEquals(reopened.highWatermark, 1L)
+      finally reopened.close()
+    finally deleteTree(directory)
+  }
+
+  test("an existing checkpoint with no valid slot fails closed at the log start") {
+    val directory = Files.createTempDirectory("cascade-replica-watermark-corrupt-test")
+    val checkpoint = directory.resolve("high-watermark.checkpoint")
+    try
+      val log = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 0L)
+        log.appendReplica(TestRecordBatch.single(), expectedBaseOffset = 1L)
+        log.commitThrough(2L)
+      finally log.close()
+
+      Files.write(checkpoint, Array.fill[Byte](64)(0x55.toByte), StandardOpenOption.TRUNCATE_EXISTING)
+      val recovered = PartitionLog(directory, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.logEndOffset, 2L)
+        assertEquals(recovered.highWatermark, 0L)
+        assertEquals(recovered.fetch(0L, 1024).records.length, 0)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   test("replica reset removes a divergent tail and rebuilds from an authoritative offset") {
     val directory = Files.createTempDirectory("cascade-replica-reset-test")
     try
