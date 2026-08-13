@@ -208,6 +208,56 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("recovery fingerprints identify a shared prefix and change after divergence") {
+    val leaderDirectory = Files.createTempDirectory("cascade-recovery-fingerprint-leader")
+    val followerDirectory = Files.createTempDirectory("cascade-recovery-fingerprint-follower")
+    try
+      val leader = PartitionLog(leaderDirectory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      val follower = PartitionLog(followerDirectory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        (0 until 5).foreach { index =>
+          val bytes = TestRecordBatch.single(totalBytes = 61 + index)
+          leader.appendReplica(bytes, index.toLong)
+          follower.appendReplica(bytes, index.toLong)
+        }
+        leader.appendReplica(TestRecordBatch.single(totalBytes = 100), 5L)
+        follower.appendReplica(TestRecordBatch.single(totalBytes = 101), 5L)
+
+        assertEquals(leader.recoveryFingerprint(4L), follower.recoveryFingerprint(4L))
+        assertNotEquals(leader.recoveryFingerprint(5L), follower.recoveryFingerprint(5L))
+        assertEquals(leader.recoveryProbe(4L, 6L).map(_.baseOffset), Some(4L))
+      finally
+        follower.close()
+        leader.close()
+    finally
+      deleteTree(followerDirectory)
+      deleteTree(leaderDirectory)
+  }
+
+  test("replica truncation preserves a verified prefix and deletes divergent segments") {
+    val directory = Files.createTempDirectory("cascade-replica-truncate-test")
+    try
+      val log = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        (0 until 20).foreach(index => log.appendReplica(TestRecordBatch.single(totalBytes = 100), index.toLong))
+        log.commitThrough(10L)
+        assert(log.recoveryFingerprint(19L).nonEmpty)
+
+        log.truncateReplicaTo(10L)
+        assertEquals(log.logEndOffset, 10L)
+        assertEquals(log.highWatermark, 10L)
+        assertEquals(log.recoverySummary(0L, 10L, 20).map(_.baseOffset), (0L until 10L).toVector)
+        assertEquals(log.appendReplica(TestRecordBatch.single(), 10L).baseOffset, 10L)
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.logEndOffset, 11L)
+        assertEquals(recovered.highWatermark, 10L)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   test("recovery truncates an incomplete batch from the active segment") {
     val directory = Files.createTempDirectory("cascade-tail-recovery-test")
     try
