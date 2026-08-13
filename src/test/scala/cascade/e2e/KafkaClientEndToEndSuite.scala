@@ -10,11 +10,12 @@ import java.nio.file.Files
 import java.net.ServerSocket
 import java.time.Duration
 import java.util.Collection
+import java.util.Optional
 import java.util.Properties
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewPartitionReassignment, NewTopic}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
@@ -507,6 +508,66 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     finally directories.foreach(deleteTree)
   }
 
+  test("Kafka Admin lists and cancels a durable partition reassignment") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-reassignment-cancel-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 2,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 500,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 600
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.take(2).foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        awaitController(admin)
+        admin.createTopics(java.util.List.of(new NewTopic("cancel-reassignment", 1, 2.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        val topicPartition = TopicPartition("cancel-reassignment", 0)
+        awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
+
+        admin.alterPartitionReassignments(
+          Map(
+            topicPartition -> Optional.of(NewPartitionReassignment(java.util.List.of(Integer.valueOf(2), Integer.valueOf(3))))
+          ).asJava
+        ).all().get(20, TimeUnit.SECONDS)
+
+        val ongoing = awaitReassignment(admin, topicPartition)
+        assertEquals(ongoing.replicas().asScala.map(_.intValue()).toVector, Vector(2, 3, 1))
+        assertEquals(ongoing.addingReplicas().asScala.map(_.intValue()).toVector, Vector(3))
+        assertEquals(ongoing.removingReplicas().asScala.map(_.intValue()).toVector, Vector(1))
+
+        admin.alterPartitionReassignments(
+          Map(topicPartition -> Optional.empty[NewPartitionReassignment]()).asJava
+        ).all().get(20, TimeUnit.SECONDS)
+        awaitNoReassignment(admin, topicPartition)
+        awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
+
+        brokers(2).start()
+        awaitController(admin)
+        awaitReplicaMembership(admin, topicPartition, Set(1, 2), Set(1, 2))
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
   test("Kafka transactions expose committed records, hide aborted records, and recover after restart") {
     val directory = Files.createTempDirectory("cascade-transactions-e2e")
     try
@@ -763,6 +824,42 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         .getOrElse(Set.empty)
       if actual != expected then Thread.sleep(100L)
     assertEquals(actual, expected)
+
+  private def awaitReplicaMembership(
+      admin: Admin,
+      topicPartition: TopicPartition,
+      expectedReplicas: Set[Int],
+      expectedInSync: Set[Int]
+  ): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var replicas = Set.empty[Int]
+    var inSync = Set.empty[Int]
+    while (replicas != expectedReplicas || inSync != expectedInSync) && System.nanoTime() < deadline do
+      val description = admin.describeTopics(java.util.List.of(topicPartition.topic()))
+        .allTopicNames().get(5, TimeUnit.SECONDS).get(topicPartition.topic())
+      description.partitions().asScala.find(_.partition() == topicPartition.partition()).foreach { partition =>
+        replicas = partition.replicas().asScala.map(_.id()).toSet
+        inSync = partition.isr().asScala.map(_.id()).toSet
+      }
+      if replicas != expectedReplicas || inSync != expectedInSync then Thread.sleep(100L)
+    assertEquals(replicas, expectedReplicas)
+    assertEquals(inSync, expectedInSync)
+
+  private def awaitReassignment(admin: Admin, topicPartition: TopicPartition) =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var result: Option[org.apache.kafka.clients.admin.PartitionReassignment] = None
+    while result.isEmpty && System.nanoTime() < deadline do
+      result = Option(admin.listPartitionReassignments().reassignments().get(5, TimeUnit.SECONDS).get(topicPartition))
+      if result.isEmpty then Thread.sleep(100L)
+    result.getOrElse(fail(s"reassignment did not appear for $topicPartition"))
+
+  private def awaitNoReassignment(admin: Admin, topicPartition: TopicPartition): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var present = true
+    while present && System.nanoTime() < deadline do
+      present = admin.listPartitionReassignments().reassignments().get(5, TimeUnit.SECONDS).containsKey(topicPartition)
+      if present then Thread.sleep(100L)
+    assert(!present, s"reassignment remained visible for $topicPartition")
 
   private def awaitController(admin: Admin, excludedId: Option[Int] = None): Int =
     val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
