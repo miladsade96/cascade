@@ -2,13 +2,18 @@ package cascade.cluster
 
 import cascade.broker.BrokerConfig
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
-import cascade.storage.TopicRegistry
+import cascade.storage.{BatchFingerprint, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, TimeUnit}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 final case class ReplicatedAppendResult(errorCode: Short, baseOffset: Long)
 private final case class ReplicaRecoverySession(followerId: Int, leaderEpoch: Int)
+private final case class ReplicaRecoveryState(errorCode: Short, logStart: Long, logEnd: Long, highWatermark: Long)
+private final case class ReplicaRecoveryProbe(
+    errorCode: Short,
+    fingerprint: Option[BatchFingerprint]
+)
 
 trait ReplicatedAppender:
   def append(
@@ -32,7 +37,6 @@ final class ReplicationManager(
   private val partitionLocks = ConcurrentHashMap[String, Object]()
   private val recoveries = ConcurrentHashMap[String, ReplicaRecoverySession]()
   private val closed = AtomicBoolean(false)
-  private val RecoveryChunkBytes = 8 * 1024 * 1024
 
   def append(
       topic: String,
@@ -131,6 +135,9 @@ final class ReplicationManager(
     case InternalApi.ReplicaCatchUp => replicaCatchUp(cursor)
     case InternalApi.ReplicaReset => replicaReset(cursor)
     case InternalApi.ReplicaRecoveryComplete => replicaRecoveryComplete(cursor)
+    case InternalApi.ReplicaRecoveryState => replicaRecoveryState(cursor)
+    case InternalApi.ReplicaRecoveryProbe => replicaRecoveryProbe(cursor)
+    case InternalApi.ReplicaTruncate => replicaTruncate(cursor)
     case _ => throw IllegalArgumentException(s"unsupported replication API: $apiKey")
 
   override def close(): Unit =
@@ -277,6 +284,82 @@ final class ReplicationManager(
       .writeShort(completeReplicaRecovery(topic, partition, followerId, leaderEpoch, admitted))
       .result()
 
+  private def replicaRecoveryState(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val leaderId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    cursor.ensureFullyRead()
+    val result = replicaRecoveryAccess(topic, partition, leaderId, leaderEpoch) match
+      case error if error != Errors.None => ReplicaRecoveryState(error, -1L, -1L, -1L)
+      case _ =>
+        registry.partition(topic, partition) match
+          case None => ReplicaRecoveryState(Errors.UnknownTopicOrPartition, -1L, -1L, -1L)
+          case Some(log) => ReplicaRecoveryState(Errors.None, log.logStartOffset, log.logEndOffset, log.highWatermark)
+    ByteWriter()
+      .writeShort(result.errorCode)
+      .writeLong(result.logStart)
+      .writeLong(result.logEnd)
+      .writeLong(result.highWatermark)
+      .result()
+
+  private def replicaRecoveryProbe(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val leaderId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    val offsetInclusive = cursor.readLong()
+    val endOffsetExclusive = cursor.readLong()
+    cursor.ensureFullyRead()
+    val result = replicaRecoveryAccess(topic, partition, leaderId, leaderEpoch) match
+      case error if error != Errors.None => ReplicaRecoveryProbe(error, None)
+      case _ =>
+        registry.partition(topic, partition) match
+          case None => ReplicaRecoveryProbe(Errors.UnknownTopicOrPartition, None)
+          case Some(log) =>
+            try ReplicaRecoveryProbe(Errors.None, log.recoveryProbe(offsetInclusive, endOffsetExclusive))
+            catch case _: Throwable => ReplicaRecoveryProbe(Errors.InvalidRequest, None)
+    val writer = ByteWriter().writeShort(result.errorCode).writeBoolean(result.fingerprint.nonEmpty)
+    result.fingerprint.foreach(fingerprint => writeFingerprint(writer, fingerprint))
+    writer.result()
+
+  private def replicaTruncate(cursor: ByteCursor): Array[Byte] =
+    val topic = cursor.readString()
+    val partition = cursor.readInt()
+    val leaderId = cursor.readInt()
+    val leaderEpoch = cursor.readInt()
+    val offsetExclusive = cursor.readLong()
+    cursor.ensureFullyRead()
+    val error = replicaRecoveryAccess(topic, partition, leaderId, leaderEpoch) match
+      case denied if denied != Errors.None => denied
+      case _ =>
+        registry.partition(topic, partition) match
+          case None => Errors.UnknownTopicOrPartition
+          case Some(log) =>
+            try
+              log.truncateReplicaTo(offsetExclusive)
+              Errors.None
+            catch case _: Throwable => Errors.InvalidRequest
+    ByteWriter().writeShort(error).result()
+
+  private def replicaRecoveryAccess(topic: String, partition: Int, leaderId: Int, leaderEpoch: Int): Short =
+    if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else cluster.partition(topic, partition) match
+      case None => Errors.UnknownTopicOrPartition
+      case Some(metadata) if metadata.leaderId != leaderId || metadata.leaderEpoch != leaderEpoch =>
+        Errors.FencedLeaderEpoch
+      case Some(metadata) if metadata.inSyncReplicas.contains(config.nodeId) || !metadata.replicas.contains(config.nodeId) =>
+        Errors.InvalidRequest
+      case Some(_) => Errors.None
+
+  private def writeFingerprint(writer: ByteWriter, fingerprint: BatchFingerprint): Unit =
+    writer
+      .writeLong(fingerprint.baseOffset)
+      .writeLong(fingerprint.lastOffset)
+      .writeInt(fingerprint.size)
+      .writeLong(fingerprint.digestHigh)
+      .writeLong(fingerprint.digestLow): Unit
+
   private def copyCommittedLog(
       topic: String,
       partition: Int,
@@ -285,27 +368,29 @@ final class ReplicationManager(
       log: cascade.storage.PartitionLog,
       timeoutMillis: Int
   ): Unit =
-    val startOffset = log.logStartOffset
+    val leaderStart = log.logStartOffset
     val targetHighWatermark = log.highWatermark
-    val resetPayload = ByteWriter()
-      .writeString(topic)
-      .writeInt(partition)
-      .writeInt(config.nodeId)
-      .writeInt(leaderEpoch)
-      .writeLong(startOffset)
-      .result()
-    val reset =
-      try peerClient.call(follower, InternalApi.ReplicaReset, resetPayload, timeoutMillis)
-      catch case _: Throwable =>
-        // Reset is idempotent, so retry once after PeerClient discards a stale pre-restart socket.
-        peerClient.call(follower, InternalApi.ReplicaReset, resetPayload, timeoutMillis)
-    val resetError = reset.readShort()
-    reset.ensureFullyRead()
-    if resetError != Errors.None then throw IllegalStateException(s"replica reset returned error $resetError")
+    val followerState = readRecoveryState(topic, partition, leaderEpoch, follower, timeoutMillis)
+    if followerState.errorCode != Errors.None then
+      throw IllegalStateException(s"replica recovery state returned error ${followerState.errorCode}")
+    val commonOffset = findCommonOffset(
+      topic,
+      partition,
+      leaderEpoch,
+      follower,
+      log,
+      leaderStart,
+      targetHighWatermark,
+      followerState,
+      timeoutMillis
+    )
+    if commonOffset < followerState.logStart then
+      resetFollower(topic, partition, leaderEpoch, follower, leaderStart, timeoutMillis)
+    else truncateFollower(topic, partition, leaderEpoch, follower, commonOffset, timeoutMillis)
 
-    var nextOffset = startOffset
+    var nextOffset = commonOffset
     while nextOffset < targetHighWatermark do
-      val records = log.fetch(nextOffset, RecoveryChunkBytes, targetHighWatermark, _ => true).records
+      val records = log.fetch(nextOffset, config.replicaRecoveryChunkBytes, targetHighWatermark, _ => true).records
       if records.isEmpty then
         throw IllegalStateException(s"leader returned no records before high watermark $targetHighWatermark")
       val append = peerClient.call(
@@ -343,6 +428,147 @@ final class ReplicationManager(
     val commitError = commit.readShort()
     commit.ensureFullyRead()
     if commitError != Errors.None then throw IllegalStateException(s"replica commit returned error $commitError")
+
+  private def readRecoveryState(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      timeoutMillis: Int
+  ): ReplicaRecoveryState =
+    val payload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .result()
+    val response = callRecoveryPeer(follower, InternalApi.ReplicaRecoveryState, payload, timeoutMillis)
+    val state = ReplicaRecoveryState(response.readShort(), response.readLong(), response.readLong(), response.readLong())
+    response.ensureFullyRead()
+    state
+
+  private def findCommonOffset(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      log: cascade.storage.PartitionLog,
+      leaderStart: Long,
+      targetHighWatermark: Long,
+      followerState: ReplicaRecoveryState,
+      timeoutMillis: Int
+  ): Long =
+    val overlapStart = math.max(leaderStart, followerState.logStart)
+    val overlapEnd = math.min(targetHighWatermark, followerState.logEnd)
+    if overlapEnd <= overlapStart then leaderStart
+    else
+      var low = overlapStart
+      var high = overlapEnd
+      var common = leaderStart
+      while low < high do
+        val midpoint = low + (high - low - 1L) / 2L
+        val leaderProbe = log.recoveryProbe(midpoint, overlapEnd)
+        leaderProbe match
+          case None => high = midpoint
+          case Some(expected) =>
+            val actual = probeFollower(
+              topic,
+              partition,
+              leaderEpoch,
+              follower,
+              expected.baseOffset,
+              overlapEnd,
+              timeoutMillis
+            )
+            if actual.errorCode != Errors.None then
+              throw IllegalStateException(s"replica recovery probe returned error ${actual.errorCode}")
+            if actual.fingerprint.contains(expected) then
+              common = Math.addExact(expected.lastOffset, 1L)
+              low = common
+            else high = expected.baseOffset
+      common
+
+  private def probeFollower(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      offsetInclusive: Long,
+      endOffsetExclusive: Long,
+      timeoutMillis: Int
+  ): ReplicaRecoveryProbe =
+    val payload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .writeLong(offsetInclusive)
+      .writeLong(endOffsetExclusive)
+      .result()
+    val response = callRecoveryPeer(follower, InternalApi.ReplicaRecoveryProbe, payload, timeoutMillis)
+    val error = response.readShort()
+    val fingerprint = Option.when(response.readBoolean()) {
+      BatchFingerprint(
+        response.readLong(),
+        response.readLong(),
+        response.readInt(),
+        response.readLong(),
+        response.readLong()
+      )
+    }
+    response.ensureFullyRead()
+    ReplicaRecoveryProbe(error, fingerprint)
+
+  private def truncateFollower(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      offsetExclusive: Long,
+      timeoutMillis: Int
+  ): Unit =
+    val payload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .writeLong(offsetExclusive)
+      .result()
+    val response = callRecoveryPeer(follower, InternalApi.ReplicaTruncate, payload, timeoutMillis)
+    val error = response.readShort()
+    response.ensureFullyRead()
+    if error != Errors.None then throw IllegalStateException(s"replica truncate returned error $error")
+
+  private def resetFollower(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      startOffset: Long,
+      timeoutMillis: Int
+  ): Unit =
+    val payload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .writeLong(startOffset)
+      .result()
+    val response = callRecoveryPeer(follower, InternalApi.ReplicaReset, payload, timeoutMillis)
+    val error = response.readShort()
+    response.ensureFullyRead()
+    if error != Errors.None then throw IllegalStateException(s"replica reset returned error $error")
+
+  private def callRecoveryPeer(
+      follower: ClusterNode,
+      apiKey: Short,
+      payload: Array[Byte],
+      timeoutMillis: Int
+  ): ByteCursor =
+    try peerClient.call(follower, apiKey, payload, timeoutMillis)
+    catch case _: Throwable =>
+      // Recovery operations are idempotent and PeerClient may still own a pre-restart socket.
+      peerClient.call(follower, apiKey, payload, timeoutMillis)
 
   private def nodeById(id: Int): Option[ClusterNode] = cluster.clusterNodes.find(_.id == id)
 
