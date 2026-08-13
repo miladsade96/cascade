@@ -568,6 +568,87 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("reassignment survives controller loss and moves live data without loss") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-reassignment-failover-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 2,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 500,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 600,
+        replicaRecoveryChunkBytes = 4096
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.take(2).foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        val firstController = awaitController(admin)
+        assert(Set(1, 2).contains(firstController))
+        admin.createTopics(java.util.List.of(new NewTopic("moving-events", 1, 2.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, "moving-events", 0, Set(1, 2))
+
+        val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrapServers))
+        try
+          (0 until 64).foreach { index =>
+            val metadata = producer.send(
+              ProducerRecord[Array[Byte], Array[Byte]](
+                "moving-events",
+                0,
+                null,
+                s"before-move-$index".getBytes(StandardCharsets.UTF_8)
+              )
+            ).get(15, TimeUnit.SECONDS)
+            assertEquals(metadata.offset(), index.toLong)
+          }
+        finally producer.close(Duration.ofSeconds(5))
+
+        val topicPartition = TopicPartition("moving-events", 0)
+        admin.alterPartitionReassignments(
+          Map(
+            topicPartition -> Optional.of(NewPartitionReassignment(java.util.List.of(Integer.valueOf(2), Integer.valueOf(3))))
+          ).asJava
+        ).all().get(20, TimeUnit.SECONDS)
+        awaitReassignment(admin, topicPartition)
+
+        brokers(firstController - 1).close()
+        brokers(2).start()
+        val nextController = awaitController(admin, excludedId = Some(firstController))
+        assertNotEquals(nextController, firstController)
+        awaitNoReassignment(admin, topicPartition)
+        awaitReplicaMembership(admin, topicPartition, Set(2, 3), Set(2, 3))
+
+        produceValue(bootstrapServers, "moving-events", 0, "after-move", expectedOffset = 64L)
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers))
+        try
+          consumer.assign(java.util.List.of(topicPartition))
+          consumer.seekToBeginning(java.util.List.of(topicPartition))
+          assertEquals(
+            pollValues(consumer, expected = 65),
+            (0 until 64).map(index => s"before-move-$index").toVector :+ "after-move"
+          )
+        finally consumer.close()
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
   test("Kafka transactions expose committed records, hide aborted records, and recover after restart") {
     val directory = Files.createTempDirectory("cascade-transactions-e2e")
     try
