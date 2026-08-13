@@ -22,6 +22,7 @@ final case class BrokerConfig(
     minInSyncReplicas: Int = 1,
     peerTimeoutMillis: Int = 3000,
     replicaRecoveryTimeoutMillis: Int = 300000,
+    replicaRecoveryChunkBytes: Int = 8 * 1024 * 1024,
     controllerHeartbeatMillis: Int = 250,
     controllerElectionTimeoutMillis: Int = 1500,
     autoCreateTopics: Boolean = true
@@ -35,6 +36,10 @@ final case class BrokerConfig(
   require(minInSyncReplicas > 0, "minimum in-sync replicas must be positive")
   require(peerTimeoutMillis > 0, "peer timeout must be positive")
   require(replicaRecoveryTimeoutMillis > 0, "replica recovery timeout must be positive")
+  require(
+    replicaRecoveryChunkBytes > 0 && replicaRecoveryChunkBytes <= maxRequestBytes,
+    "replica recovery chunk size must be positive and no larger than the request limit"
+  )
   require(controllerHeartbeatMillis > 0, "controller heartbeat interval must be positive")
   require(
     controllerElectionTimeoutMillis.toLong >= controllerHeartbeatMillis.toLong * 3L,
@@ -77,6 +82,8 @@ object BrokerConfig:
       case "--peer-timeout-ms" :: value :: tail => loop(tail, config.copy(peerTimeoutMillis = value.toInt))
       case "--replica-recovery-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(replicaRecoveryTimeoutMillis = value.toInt))
+      case "--replica-recovery-chunk-bytes" :: value :: tail =>
+        loop(tail, config.copy(replicaRecoveryChunkBytes = value.toInt))
       case "--controller-heartbeat-ms" :: value :: tail =>
         loop(tail, config.copy(controllerHeartbeatMillis = value.toInt))
       case "--controller-election-timeout-ms" :: value :: tail =>

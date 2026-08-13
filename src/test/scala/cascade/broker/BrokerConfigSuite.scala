@@ -44,6 +44,8 @@ final class BrokerConfigSuite extends FunSuite:
         "1500",
         "--replica-recovery-timeout-ms",
         "120000",
+        "--replica-recovery-chunk-bytes",
+        "4194304",
         "--controller-heartbeat-ms",
         "200",
         "--controller-election-timeout-ms",
@@ -57,6 +59,7 @@ final class BrokerConfigSuite extends FunSuite:
     assertEquals(config.minInSyncReplicas, 2)
     assertEquals(config.peerTimeoutMillis, 1500)
     assertEquals(config.replicaRecoveryTimeoutMillis, 120000)
+    assertEquals(config.replicaRecoveryChunkBytes, 4_194_304)
     assertEquals(config.controllerHeartbeatMillis, 200)
     assertEquals(config.controllerElectionTimeoutMillis, 1000)
   }
