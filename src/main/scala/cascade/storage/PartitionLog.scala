@@ -6,13 +6,26 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.nio.file.{Files, Path}
+import java.security.MessageDigest
 import scala.collection.mutable.{ArrayBuffer, ArrayDeque, HashMap}
 import scala.jdk.CollectionConverters.*
 
 final case class AppendResult(baseOffset: Long, lastOffset: Long)
 final case class FetchResult(highWatermark: Long, lastStableOffset: Long, logStartOffset: Long, records: Array[Byte])
+final case class BatchFingerprint(
+    baseOffset: Long,
+    lastOffset: Long,
+    size: Int,
+    digestHigh: Long,
+    digestLow: Long
+)
 
-private final case class BatchIndex(metadata: RecordBatchMetadata, position: Long, size: Int):
+private final class BatchIndex(
+    val metadata: RecordBatchMetadata,
+    val position: Long,
+    val size: Int
+):
+  var prefixDigest: Option[(Long, Long)] = None
   def baseOffset: Long = metadata.baseOffset
   def lastOffset: Long = metadata.lastOffset
 private final case class FlushTarget(segment: LogSegment, bytes: Long, dirtySinceNanos: Long)
@@ -55,6 +68,7 @@ final class PartitionLog(
 
   private val flushIntervalNanos = Math.multiplyExact(flushIntervalMillis, 1_000_000L)
   private val producerHistoryLimit = 5
+  private val highWatermarkCheckpoint = HighWatermarkCheckpoint(directory.resolve("high-watermark.checkpoint"))
 
   private val segments = ArrayBuffer.empty[LogSegment]
   private val recentProducerBatches = HashMap.empty[Long, ArrayDeque[RecordBatchMetadata]]
@@ -64,7 +78,12 @@ final class PartitionLog(
     .flatMap(_.index.lastOption)
     .map(entry => Math.addExact(entry.lastOffset, 1L))
     .getOrElse(0L)
-  private var committedOffset: Long = nextOffset
+  private var committedOffset: Long = highWatermarkCheckpoint.offset match
+    case Some(offset) => math.max(logStartOffset, math.min(offset, nextOffset))
+    case None if highWatermarkCheckpoint.existed => logStartOffset
+    case None => nextOffset // Upgrade compatibility for logs created before checkpoints existed.
+  if highWatermarkCheckpoint.offset.forall(_ != committedOffset) then highWatermarkCheckpoint.persist(committedOffset)
+  private var durableOffset: Long = nextOffset
   private var unflushedBytes = 0L
   private var inFlightFlushBytes = 0L
   private var flushInProgress = false
@@ -89,6 +108,83 @@ final class PartitionLog(
     appendInternal(recordSet, commitImmediately = false)
   }
 
+  /** Returns bounded immutable batch identities used to find a replica's common prefix. */
+  def recoverySummary(startOffset: Long, endOffsetExclusive: Long, maxEntries: Int): Vector[BatchFingerprint] =
+    synchronized {
+      if maxEntries <= 0 then throw ProtocolException("recovery summary entry limit must be positive")
+      if startOffset < logStartOffset || endOffsetExclusive < startOffset || endOffsetExclusive > nextOffset then
+        throw ProtocolException(
+          s"invalid recovery summary range [$startOffset,$endOffsetExclusive); " +
+            s"log-start=$logStartOffset, log-end=$nextOffset"
+        )
+      val entries = segments.iterator.flatMap(_.index.iterator).filter { entry =>
+        entry.baseOffset >= startOffset && entry.lastOffset < endOffsetExclusive
+      }.take(maxEntries)
+      entries.map(entry => batchFingerprint(entry)).toVector
+    }
+
+  def recoveryProbe(offsetInclusive: Long, endOffsetExclusive: Long): Option[BatchFingerprint] = synchronized {
+    if offsetInclusive < logStartOffset || endOffsetExclusive < logStartOffset || endOffsetExclusive > nextOffset then
+      throw ProtocolException(
+        s"invalid recovery probe offset=$offsetInclusive, end=$endOffsetExclusive; " +
+          s"log-start=$logStartOffset, log-end=$nextOffset"
+      )
+    segments.iterator
+      .flatMap(_.index.iterator)
+      .filter(entry => entry.baseOffset <= offsetInclusive && entry.lastOffset < endOffsetExclusive)
+      .reduceOption((_, right) => right)
+      .map(batchFingerprint)
+  }
+
+  def recoveryFingerprint(baseOffset: Long): Option[BatchFingerprint] = synchronized {
+    segments.iterator
+      .flatMap(_.index.iterator)
+      .find(_.baseOffset == baseOffset)
+      .map(batchFingerprint)
+  }
+
+  /** Truncates only the divergent suffix while preserving the verified common prefix. */
+  def truncateReplicaTo(offsetExclusive: Long): Unit = synchronized {
+    val start = logStartOffset
+    val boundary = offsetExclusive == start || offsetExclusive == nextOffset || segments.iterator
+      .flatMap(_.index.iterator)
+      .exists(entry => Math.addExact(entry.lastOffset, 1L) == offsetExclusive)
+    if offsetExclusive < start || offsetExclusive > nextOffset || !boundary then
+      throw ProtocolException(
+        s"replica truncation offset $offsetExclusive is not a batch boundary in [$start,$nextOffset]"
+      )
+    if offsetExclusive == nextOffset then
+      if committedOffset > offsetExclusive then
+        committedOffset = offsetExclusive
+        checkpointDurableWatermark()
+    else if offsetExclusive == start then resetReplica(start)
+    else
+      awaitBackgroundFlush()
+      flushDirtySegments()
+      val cutIndex = segments.indexWhere(_.index.exists(_.baseOffset >= offsetExclusive))
+      if cutIndex < 0 then throw ProtocolException(s"missing replica suffix at $offsetExclusive")
+      val cutSegment = segments(cutIndex)
+      val retained = cutSegment.index.takeWhile(_.lastOffset < offsetExclusive)
+      val cutPosition = retained.lastOption.map(entry => entry.position + entry.size.toLong).getOrElse(0L)
+      cutSegment.channel.truncate(cutPosition)
+      cutSegment.channel.force(true)
+      cutSegment.index.remove(retained.size, cutSegment.index.size - retained.size)
+      segments.drop(cutIndex + 1).foreach { segment =>
+        segment.close()
+        Files.deleteIfExists(segment.path): Unit
+      }
+      segments.remove(cutIndex + 1, segments.size - cutIndex - 1)
+      recentProducerBatches.clear()
+      segments.iterator.flatMap(_.index.iterator).foreach(entry => indexProducerBatch(entry.metadata))
+      nextOffset = offsetExclusive
+      committedOffset = math.min(committedOffset, offsetExclusive)
+      durableOffset = offsetExclusive
+      unflushedBytes = 0L
+      inFlightFlushBytes = 0L
+      rolloverFlushRequested = false
+      checkpointDurableWatermark()
+  }
+
   /**
    * Drops a replica's local copy before an authoritative leader streams a new committed prefix.
    * This is only safe while the replica is outside the ISR and the partition is fenced by the
@@ -103,11 +199,13 @@ final class PartitionLog(
     recentProducerBatches.clear()
     nextOffset = startOffset
     committedOffset = startOffset
+    durableOffset = startOffset
     unflushedBytes = 0L
     inFlightFlushBytes = 0L
     flushInProgress = false
     rolloverFlushRequested = false
     segments += openSegment(startOffset)
+    highWatermarkCheckpoint.persist(startOffset)
     ()
   }
 
@@ -116,7 +214,9 @@ final class PartitionLog(
       throw ProtocolException(
         s"invalid commit watermark $offsetExclusive; current=$committedOffset, log-end=$nextOffset"
       )
-    committedOffset = offsetExclusive
+    if offsetExclusive != committedOffset then
+      committedOffset = offsetExclusive
+      checkpointDurableWatermark()
   }
 
   private def appendInternal(recordSet: Array[Byte], commitImmediately: Boolean): AppendResult =
@@ -139,7 +239,9 @@ final class PartitionLog(
         case FlushPolicy.Sync => flushDirtySegments()
         case FlushPolicy.Periodic =>
           scheduleFlush = rolloverFlushRequested || unflushedBytes >= maxUnflushedBytes
-      if commitImmediately then committedOffset = nextOffset
+      if commitImmediately && committedOffset != nextOffset then
+        committedOffset = nextOffset
+        checkpointDurableWatermark()
       AppendResult(firstOffset, nextOffset - 1)
     }
     if scheduleFlush then requestFlush()
@@ -151,11 +253,11 @@ final class PartitionLog(
     }
     if flushPolicy == FlushPolicy.Periodic && !flushInProgress && unflushedBytes > 0L &&
         (rolloverFlushRequested || unflushedBytes >= maxUnflushedBytes || ageExceeded)
-    then beginBackgroundFlush()
-    else Vector.empty
+    then (beginBackgroundFlush(), nextOffset)
+    else (Vector.empty, durableOffset)
   } match
-    case targets if targets.nonEmpty =>
-      forceInBackground(targets)
+    case (targets, durableThrough) if targets.nonEmpty =>
+      forceInBackground(targets, durableThrough)
       true
     case _ => false
 
@@ -217,7 +319,9 @@ final class PartitionLog(
   override def close(): Unit = synchronized {
     awaitBackgroundFlush()
     flushDirtySegments()
+    highWatermarkCheckpoint.persist(committedOffset)
     segments.foreach(_.close())
+    highWatermarkCheckpoint.close()
   }
 
   private def writableSegment(batchSize: Int, batchBaseOffset: Long): LogSegment =
@@ -284,6 +388,34 @@ final class PartitionLog(
     segment.unflushedBytes = Math.addExact(segment.unflushedBytes, bytes.toLong)
     unflushedBytes = Math.addExact(unflushedBytes, bytes.toLong)
 
+  private def batchFingerprint(entry: BatchIndex): BatchFingerprint =
+    ensureFingerprint(entry)
+    val (high, low) = entry.prefixDigest.getOrElse(throw ProtocolException("missing recovery fingerprint"))
+    BatchFingerprint(entry.baseOffset, entry.lastOffset, entry.size, high, low)
+
+  private def ensureFingerprint(target: BatchIndex): Unit =
+    var previousHigh = 0L
+    var previousLow = 0L
+    val iterator = segments.iterator.flatMap { segment => segment.index.iterator.map(segment -> _) }
+    var found = false
+    while iterator.hasNext && !found do
+      val (segment, entry) = iterator.next()
+      entry.prefixDigest match
+        case Some((high, low)) =>
+          previousHigh = high
+          previousLow = low
+        case None =>
+          val bytes = new Array[Byte](entry.size)
+          readFully(segment.channel, ByteBuffer.wrap(bytes), entry.position)
+          val digest = MessageDigest.getInstance("SHA-256")
+          digest.update(ByteBuffer.allocate(16).putLong(previousHigh).putLong(previousLow).array())
+          val values = ByteBuffer.wrap(digest.digest(bytes))
+          previousHigh = values.getLong()
+          previousLow = values.getLong()
+          entry.prefixDigest = Some((previousHigh, previousLow))
+      found = entry eq target
+    if !found then throw ProtocolException(s"missing batch ${target.baseOffset} for recovery fingerprint")
+
   private def indexProducerBatch(metadata: RecordBatchMetadata): Unit =
     if metadata.producerId >= 0L then
       val history = recentProducerBatches.getOrElseUpdate(metadata.producerId, ArrayDeque.empty)
@@ -305,7 +437,7 @@ final class PartitionLog(
     }
     targets
 
-  private def forceInBackground(targets: Vector[FlushTarget]): Unit =
+  private def forceInBackground(targets: Vector[FlushTarget], durableThrough: Long): Unit =
     var index = 0
     try
       while index < targets.length do
@@ -320,6 +452,10 @@ final class PartitionLog(
           forceNanos += elapsed
         }
         index += 1
+      synchronized {
+        durableOffset = math.max(durableOffset, durableThrough)
+        checkpointDurableWatermark()
+      }
     catch
       case error: Throwable =>
         synchronized {
@@ -346,6 +482,11 @@ final class PartitionLog(
 
   private def flushDirtySegments(): Unit =
     segments.foreach(flushSegment)
+    durableOffset = nextOffset
+    checkpointDurableWatermark()
+
+  private def checkpointDurableWatermark(): Unit =
+    highWatermarkCheckpoint.persist(math.min(committedOffset, durableOffset))
 
   private def flushSegment(segment: LogSegment): Unit =
     if segment.unflushedBytes > 0L then
