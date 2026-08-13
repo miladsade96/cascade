@@ -13,7 +13,7 @@ The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client
 So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, and quorum controller election.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics and a static-membership three-node cluster with controller failover. Returning replicas can recover and safely rejoin the ISR, but coordinator-state replication, persisted high-watermark recovery, incremental replica transfer, and the other production gates below are still missing.
+> Cascade isn't a production Kafka replacement yet. I've implemented and tested the single-node delivery semantics and a static-membership three-node cluster with controller failover. Returning replicas now recover incrementally and safely rejoin the ISR, but coordinator-state replication, reassignment, dynamic membership, and the other production gates below are still missing.
 
 ## Performance I measured
 
@@ -38,7 +38,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Delivery guarantees | Producer IDs, epoch fencing, bounded duplicate detection, sequence recovery, transactions, timeouts, transactional offsets, and `read_committed` |
 | Durable state | CRC32C-protected metadata, consumer-offset, and delivery-state journals with forced commits and corrupt/partial-tail recovery |
 | Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
-| Static-membership cluster | Durable quorum controller election, broker fencing, RF=3 assignment, synchronous ISR replication, committed high watermarks, leader promotion, divergent-tail replacement, and safe replica re-admission |
+| Static-membership cluster | Durable quorum controller election, broker fencing, RF=3 assignment, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -110,13 +110,15 @@ If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic
 - Parallel synchronous leader-to-follower append.
 - `min.insync.replicas` admission for `acks=all`.
 - Leader-only Fetch/ListOffsets and committed high-watermark visibility.
+- Double-buffered, checksum-protected high-watermark checkpoints that never recover beyond the validated log end.
 - Failure detection, ISR shrink, and promotion of a surviving replica with a new leader epoch.
-- Full committed-prefix recovery for a returning replica, including replacement of a divergent local tail.
+- Chained SHA-256 prefix probes that find a returning replica's last verified common batch boundary.
+- Bounded, configurable suffix transfer that preserves the shared prefix and replaces only a divergent or missing tail.
 - Partition fencing during recovery so Produce cannot race the copy or ISR admission.
 - ISR re-admission only after catch-up succeeds and the new metadata image reaches quorum.
 - Real Kafka-client end-to-end verification across partition-leader loss, controller loss, stale-term rejection, metadata creation after election, and broker restart/rejoin.
 
-Broker membership is still static, but the controller is elected from that configured quorum. Recovery currently copies the complete committed log instead of using an incremental snapshot or segment transfer, so it favors correctness over recovery bandwidth. Group, offset, producer, and transaction coordinator state is still local to one broker, so those services don't have production failover yet.
+Broker membership is still static, but the controller is elected from that configured quorum. Recovery is incremental at Kafka batch boundaries and remains partition-fenced until ISR admission commits. Group, offset, producer, and transaction coordinator state is still local to one broker, so those services don't have production failover yet.
 
 ## Run Cascade
 
@@ -300,9 +302,9 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current `sbt test` suite passes **46/46 tests** in three layers:
+The current `sbt test` suite passes **54/54 tests** in three layers:
 
-- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, replica reset, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, and durable controller term/vote recovery.
+- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, and durable controller term/vote recovery.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, and idempotent state recovery after broker restart.
 - Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart, RF=3 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, transactions, commit/abort isolation, active last stable offsets, and transactional consumer offsets.
 
@@ -312,7 +314,7 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Availability and replication | Persisted high-watermark recovery, incremental replica transfer, reassignment, and dynamic quorum membership |
+| 1 | Availability and replication | Partition reassignment, dynamic quorum membership, and automated crash/power-loss qualification |
 | 2 | Coordinator failover | Replicated classic-group, consumer-offset, producer, and transaction coordinator state across brokers |
 | 3 | Storage lifecycle | Time/size retention, log compaction, offset compaction/expiry, timestamp and transaction indexes, disk-pressure handling, and safe deletion |
 | 4 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
@@ -326,7 +328,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## What is still missing
 
 - Broker and voter membership is statically configured; online membership changes and joint-consensus reconfiguration are not implemented.
-- Replica recovery currently recopies the full committed prefix and pauses Produce for that partition; incremental segment transfer is not implemented yet.
+- Replica recovery transfers bounded record-batch chunks rather than zero-copy segment files; the recovering partition remains fenced during verification and transfer.
 - Group, offset, producer, and transaction coordinator state is not replicated for failover.
 - Retention, compaction, timestamp indexes, quotas, TLS/SASL, ACLs, and operational endpoints are not implemented.
 - Only the classic consumer group protocol is supported.
@@ -354,6 +356,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--min-insync-replicas` | `1` | Minimum ISR required by `acks=all` |
 | `--peer-timeout-ms` | `3000` | Internal metadata and replica RPC timeout |
 | `--replica-recovery-timeout-ms` | `300000` | Maximum controller wait for one replica recovery operation |
+| `--replica-recovery-chunk-bytes` | `8388608` | Maximum record-batch payload requested per incremental recovery transfer |
 | `--controller-heartbeat-ms` | `250` | Elected-controller heartbeat interval |
 | `--controller-election-timeout-ms` | `1500` | Controller lease and minimum election timeout; must be at least three heartbeat intervals |
 | `--no-auto-create` | Off | Disable Metadata/Produce auto-creation |
