@@ -21,7 +21,8 @@ final class RequestHandler(
       if !header.clientId.contains("cascade-peer") then throw ProtocolException("internal API requires a peer client")
       val response = header.apiKey match
         case InternalApi.ReplicaAppend | InternalApi.ReplicaCommit | InternalApi.ReplicaCatchUp |
-            InternalApi.ReplicaReset | InternalApi.ReplicaRecoveryComplete =>
+            InternalApi.ReplicaReset | InternalApi.ReplicaRecoveryComplete | InternalApi.ReplicaRecoveryState |
+            InternalApi.ReplicaRecoveryProbe | InternalApi.ReplicaTruncate =>
           replicationManager.handleInternal(header.apiKey, body)
         case _ => clusterManager.handleInternal(header.apiKey, body)
       return Some(ResponseFrame.encode(header, response))

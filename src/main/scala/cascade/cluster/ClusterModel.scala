@@ -44,5 +44,8 @@ object InternalApi:
   val ReplicaCatchUp: Short = -112
   val ReplicaReset: Short = -113
   val ReplicaRecoveryComplete: Short = -114
+  val ReplicaRecoveryState: Short = -115
+  val ReplicaRecoveryProbe: Short = -116
+  val ReplicaTruncate: Short = -117
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaRecoveryComplete
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaTruncate
