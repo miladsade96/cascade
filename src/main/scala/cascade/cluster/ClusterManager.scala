@@ -458,15 +458,42 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   private def maintainCluster(healthy: Set[Int]): Unit =
     retryPendingRecoveryReleases()
-    nodes.filterNot(_.id == config.nodeId).foreach { node =>
+    nodes.foreach { node =>
+      val nodeHealthy = node.id == config.nodeId || healthy.contains(node.id)
       val misses = synchronized {
-        val value = if healthy.contains(node.id) then 0 else missedHeartbeats.getOrElse(node.id, 0) + 1
+        val value = if nodeHealthy then 0 else missedHeartbeats.getOrElse(node.id, 0) + 1
         missedHeartbeats.update(node.id, value)
         value
       }
-      if healthy.contains(node.id) && nodeNeedsRecovery(node.id) && synchronizeNode(node) then recoverNode(node.id)
-      else if misses >= 3 then removeFailedNode(node.id)
+      if nodeHealthy && nodeNeedsRecovery(node.id) && (node.id == config.nodeId || synchronizeNode(node)) then
+        recoverNode(node.id)
+      else if node.id != config.nodeId && misses >= 3 then removeFailedNode(node.id)
     }
+    finalizeReassignments()
+
+  private def finalizeReassignments(): Unit = metadataMutationLock.synchronized {
+    if !isActiveController then return
+    val changedTopics = current.topics.map { topic =>
+      topic.copy(partitions = topic.partitions.map { partition =>
+        val target = partition.targetReplicas
+        if partition.isReassigning && target.nonEmpty && target.forall(partition.inSyncReplicas.contains) then
+          val inSync = target.filter(partition.inSyncReplicas.contains)
+          val leader = if target.contains(partition.leaderId) then partition.leaderId else inSync.head
+          partition.copy(
+            leaderId = leader,
+            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
+            replicas = target,
+            inSyncReplicas = inSync,
+            addingReplicas = Vector.empty,
+            removingReplicas = Vector.empty
+          )
+        else partition
+      })
+    }
+    if changedTopics != current.topics then
+      val next = ClusterMetadata(Math.addExact(current.version, 1L), changedTopics, currentTerm)
+      if !propose(next) then System.err.println("Cascade could not finalize ready partition reassignments")
+  }
 
   private def createOnController(name: String, partitions: Int, replicationFactor: Int): ClusterCreateResult =
     if !isActiveController then
@@ -566,7 +593,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val adding = target.filterNot(original.contains)
       val removing = original.filterNot(target.contains)
       val targetInSync = target.forall(partition.inSyncReplicas.contains)
-      if adding.isEmpty && targetInSync then
+      if target == partition.replicas && !partition.isReassigning then Right(partition)
+      else if adding.isEmpty && targetInSync then
         val inSync = target.filter(partition.inSyncReplicas.contains)
         val leader = if target.contains(partition.leaderId) then partition.leaderId else inSync.head
         Right(

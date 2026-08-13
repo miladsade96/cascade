@@ -79,32 +79,31 @@ final class ReplicationManager(
   ): Short =
     val key = partitionKey(topic, partition)
     val lock = partitionLocks.computeIfAbsent(key, _ => Object())
-    lock.synchronized {
-      if cluster.isBrokerFenced then Errors.BrokerNotAvailable
-      else cluster.partition(topic, partition) match
-        case None => Errors.UnknownTopicOrPartition
-        case Some(metadata) if metadata.leaderId != config.nodeId => Errors.NotLeaderOrFollower
-        case Some(metadata) if metadata.leaderEpoch != leaderEpoch => Errors.FencedLeaderEpoch
-        case Some(metadata) if !metadata.replicas.contains(followerId) || metadata.inSyncReplicas.contains(followerId) =>
-          Errors.InvalidRequest
-        case Some(_) =>
-          registry.partition(topic, partition) match
-            case None => Errors.UnknownTopicOrPartition
-            case Some(log) =>
-              nodeById(followerId) match
-                case None => Errors.ReplicaNotAvailable
-                case Some(follower) =>
-                  try
+    recoveryAccess(topic, partition, followerId, leaderEpoch) match
+      case denied if denied != Errors.None => denied
+      case _ =>
+        (registry.partition(topic, partition), nodeById(followerId)) match
+          case (None, _) => Errors.UnknownTopicOrPartition
+          case (_, None) => Errors.ReplicaNotAvailable
+          case (Some(log), Some(follower)) =>
+            try
+              // Copy the bulk of the committed log while Produce continues through the existing ISR.
+              copyCommittedLog(topic, partition, leaderEpoch, follower, log, timeoutMillis)
+              lock.synchronized {
+                recoveryAccess(topic, partition, followerId, leaderEpoch) match
+                  case denied if denied != Errors.None => denied
+                  case _ =>
+                    // Fence only the final delta and ISR metadata transition.
                     copyCommittedLog(topic, partition, leaderEpoch, follower, log, timeoutMillis)
                     recoveries.put(key, ReplicaRecoverySession(followerId, leaderEpoch))
                     Errors.None
-                  catch
-                    case error: Throwable =>
-                      System.err.println(
-                        s"Cascade replica recovery failed for $topic-$partition on node $followerId: ${error.getMessage}"
-                      )
-                      Errors.ReplicaNotAvailable
-    }
+              }
+            catch
+              case error: Throwable =>
+                System.err.println(
+                  s"Cascade replica recovery failed for $topic-$partition on node $followerId: ${error.getMessage}"
+                )
+                Errors.ReplicaNotAvailable
 
   /** Releases a recovery fence after ISR admission, or cancels it when metadata commit fails. */
   def completeReplicaRecovery(
@@ -128,6 +127,16 @@ final class ReplicationManager(
           recoveries.remove(key): Unit
           Errors.None
     }
+
+  private def recoveryAccess(topic: String, partition: Int, followerId: Int, leaderEpoch: Int): Short =
+    if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else cluster.partition(topic, partition) match
+      case None => Errors.UnknownTopicOrPartition
+      case Some(metadata) if metadata.leaderId != config.nodeId => Errors.NotLeaderOrFollower
+      case Some(metadata) if metadata.leaderEpoch != leaderEpoch => Errors.FencedLeaderEpoch
+      case Some(metadata) if !metadata.replicas.contains(followerId) || metadata.inSyncReplicas.contains(followerId) =>
+        Errors.InvalidRequest
+      case Some(_) => Errors.None
 
   def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.ReplicaAppend => replicaAppend(cursor)
