@@ -42,6 +42,8 @@ final class RequestHandler(
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.CreateTopics => createTopics(body)
+      case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
+      case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
       case ApiKey.InitProducerId => initProducerId(body)
       case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(body)
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
@@ -343,6 +345,71 @@ final class RequestHandler(
     writer.writeArray(results) { case (name, error, message) =>
       writer.writeString(name).writeShort(error).writeNullableString(message): Unit
     }
+    Some(writer.result())
+
+  private def alterPartitionReassignments(cursor: ByteCursor): Option[Array[Byte]] =
+    cursor.readInt() // timeout_ms; the metadata quorum bounds the operation.
+    val requests = cursor.readCompactArray {
+      val topic = cursor.readCompactString()
+      val partitions = cursor.readCompactArray {
+        val partition = cursor.readInt()
+        val replicas = cursor.readCompactNullableArray(cursor.readInt())
+        cursor.skipTaggedFields()
+        PartitionReassignmentRequest(topic, partition, replicas)
+      }
+      cursor.skipTaggedFields()
+      partitions
+    }.flatten
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val result = clusterManager.alterPartitionReassignments(requests)
+    val writer = ByteWriter()
+      .writeInt(0)
+      .writeShort(result.errorCode)
+      .writeCompactNullableString(result.message)
+    writer.writeCompactArray(result.partitions.groupBy(_.topic).toVector.sortBy(_._1)) { case (topic, partitions) =>
+      writer.writeCompactString(topic)
+      writer.writeCompactArray(partitions.sortBy(_.partition)) { partition =>
+        writer
+          .writeInt(partition.partition)
+          .writeShort(partition.errorCode)
+          .writeCompactNullableString(partition.message)
+          .writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def listPartitionReassignments(cursor: ByteCursor): Option[Array[Byte]] =
+    cursor.readInt() // timeout_ms
+    val requested = cursor.readCompactNullableArray {
+      val topic = cursor.readCompactString()
+      val partitions = cursor.readCompactArray(cursor.readInt())
+      cursor.skipTaggedFields()
+      partitions.map(topic -> _)
+    }.map(_.flatten.toSet)
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val result = clusterManager.listPartitionReassignments(requested)
+    val writer = ByteWriter()
+      .writeInt(0)
+      .writeShort(result.errorCode)
+      .writeCompactNullableString(result.message)
+    writer.writeCompactArray(result.partitions.groupBy(_.topic).toVector.sortBy(_._1)) { case (topic, partitions) =>
+      writer.writeCompactString(topic)
+      writer.writeCompactArray(partitions.sortBy(_.partition)) { partition =>
+        writer.writeInt(partition.partition)
+        writer.writeCompactArray(partition.replicas)(writer.writeInt)
+        writer.writeCompactArray(partition.addingReplicas)(writer.writeInt)
+        writer.writeCompactArray(partition.removingReplicas)(writer.writeInt)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    writer.writeEmptyTaggedFields()
     Some(writer.result())
 
   private def produce(cursor: ByteCursor): Option[Array[Byte]] =
