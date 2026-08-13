@@ -18,8 +18,21 @@ final case class PartitionMetadata(
     leaderId: Int,
     leaderEpoch: Int,
     replicas: Vector[Int],
-    inSyncReplicas: Vector[Int]
-)
+    inSyncReplicas: Vector[Int],
+    addingReplicas: Vector[Int] = Vector.empty,
+    removingReplicas: Vector[Int] = Vector.empty
+):
+  require(addingReplicas.distinct == addingReplicas, "adding replicas must be unique")
+  require(removingReplicas.distinct == removingReplicas, "removing replicas must be unique")
+  require(addingReplicas.forall(replicas.contains), "adding replicas must be part of the replica set")
+  require(removingReplicas.forall(replicas.contains), "removing replicas must be part of the replica set")
+  require(!addingReplicas.exists(removingReplicas.contains), "adding and removing replicas must be disjoint")
+
+  def isReassigning: Boolean = addingReplicas.nonEmpty || removingReplicas.nonEmpty
+
+  def targetReplicas: Vector[Int] = replicas.filterNot(removingReplicas.contains)
+
+  def originalReplicas: Vector[Int] = replicas.filterNot(addingReplicas.contains)
 
 final case class TopicMetadata(name: String, partitions: Vector[PartitionMetadata])
 
