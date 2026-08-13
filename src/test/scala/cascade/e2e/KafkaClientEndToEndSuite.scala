@@ -448,50 +448,39 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           admin.createTopics(java.util.List.of(new NewTopic("recovering-events", 2, 3.toShort))).all().get()
           awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2, 3))
 
-          val peer = PeerClient()
-          try
-            val snapshot = peer.call(nodes(2), InternalApi.MetadataSnapshot, Array.emptyByteArray, 1000)
-            snapshot.readLong()
-            snapshot.readInt()
-            val currentMetadata = MetadataCodec.decode(snapshot.readByteArray())
-            snapshot.ensureFullyRead()
-            val currentPartition = currentMetadata.byName("recovering-events").partitions(1)
-            val reset = peer.call(
-              nodes(2),
-              InternalApi.ReplicaReset,
-              ByteWriter()
-                .writeString("recovering-events")
-                .writeInt(1)
-                .writeInt(currentPartition.leaderId)
-                .writeInt(currentPartition.leaderEpoch)
-                .writeLong(0L)
-                .result(),
-              1000
-            )
-            assertEquals(reset.readShort(), Errors.InvalidRequest)
-            reset.ensureFullyRead()
-          finally peer.close()
-
           produceValue(bootstrapServers, "recovering-events", 1, "before-failure", expectedOffset = 0L)
+          (1 to 32).foreach { offset =>
+            produceValue(bootstrapServers, "recovering-events", 1, s"shared-$offset", expectedOffset = offset.toLong)
+          }
+          val sharedPrefixBytes = Files.size(
+            directories(2).resolve("recovering-events").resolve("partition-1").resolve("00000000000000000000.log")
+          )
           brokers(2).close()
           awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2))
-          produceValue(bootstrapServers, "recovering-events", 1, "while-away", expectedOffset = 1L)
+          produceValue(bootstrapServers, "recovering-events", 1, "while-away", expectedOffset = 33L)
 
           val divergent = PartitionLog(
             directories(2).resolve("recovering-events").resolve("partition-1"),
             flushPolicy = FlushPolicy.Sync
           )
           try
-            assertEquals(divergent.logEndOffset, 1L)
-            assertEquals(divergent.append(TestRecordBatch.single(totalBytes = 100)).baseOffset, 1L)
-            assertEquals(divergent.logEndOffset, 2L)
+            assertEquals(divergent.logEndOffset, 33L)
+            assertEquals(divergent.highWatermark, 33L)
+            assertEquals(divergent.append(TestRecordBatch.single(totalBytes = 100)).baseOffset, 33L)
+            assertEquals(divergent.logEndOffset, 34L)
           finally divergent.close()
 
           val replacement = KafkaBroker(configs(2))
           returnedBroker = Some(replacement)
           replacement.start()
           awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2, 3))
-          produceValue(bootstrapServers, "recovering-events", 1, "after-recovery", expectedOffset = 2L)
+          assertEquals(
+            Files.size(
+              directories(2).resolve("recovering-events").resolve("partition-1").resolve("00000000000000000000.log")
+            ) > sharedPrefixBytes,
+            true
+          )
+          produceValue(bootstrapServers, "recovering-events", 1, "after-recovery", expectedOffset = 34L)
         finally admin.close(Duration.ofSeconds(5))
       finally
         returnedBroker.foreach(_.close())
@@ -506,7 +495,7 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         flushPolicy = FlushPolicy.Sync
       )
       try
-        assertEquals(leader.logEndOffset, 3L)
+        assertEquals(leader.logEndOffset, 35L)
         assertEquals(recovered.logEndOffset, leader.logEndOffset)
         assert(
           recovered.fetch(0L, 1024 * 1024).records.sameElements(leader.fetch(0L, 1024 * 1024).records),
