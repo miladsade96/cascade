@@ -5,6 +5,7 @@ import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CreateTopicResult, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
 import scala.collection.mutable
 
 final case class ClusterCreateResult(errorCode: Short, message: Option[String])
@@ -86,6 +87,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
   private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
+  private val recoveringNodes = ConcurrentHashMap.newKeySet[Int]()
   private val monitor: Option[ScheduledExecutorService] = Option.when(enabled) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-cluster-monitor").factory())
   }
@@ -466,10 +468,25 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         value
       }
       if nodeHealthy && nodeNeedsRecovery(node.id) && (node.id == config.nodeId || synchronizeNode(node)) then
-        recoverNode(node.id)
+        scheduleNodeRecovery(node.id)
       else if node.id != config.nodeId && misses >= 3 then removeFailedNode(node.id)
     }
     finalizeReassignments()
+
+  private def scheduleNodeRecovery(nodeId: Int): Unit =
+    if recoveringNodes.add(nodeId) then
+      try
+        peerExecutor.submit(new Runnable:
+          override def run(): Unit =
+            try recoverNode(nodeId)
+            catch case error: Throwable =>
+              System.err.println(s"Cascade replica recovery worker failed for node $nodeId: ${error.getMessage}")
+            finally recoveringNodes.remove(nodeId): Unit
+        ): Unit
+      catch
+        case error: Throwable =>
+          recoveringNodes.remove(nodeId): Unit
+          throw error
 
   private def finalizeReassignments(): Unit = metadataMutationLock.synchronized {
     if !isActiveController then return
