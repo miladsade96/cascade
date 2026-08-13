@@ -8,6 +8,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
 
 final case class ClusterCreateResult(errorCode: Short, message: Option[String])
+final case class PartitionReassignmentRequest(topic: String, partition: Int, replicas: Option[Vector[Int]])
+final case class PartitionReassignmentResult(topic: String, partition: Int, errorCode: Short, message: Option[String])
+final case class AlterReassignmentsResult(
+    errorCode: Short,
+    message: Option[String],
+    partitions: Vector[PartitionReassignmentResult]
+)
+final case class OngoingPartitionReassignment(
+    topic: String,
+    partition: Int,
+    replicas: Vector[Int],
+    addingReplicas: Vector[Int],
+    removingReplicas: Vector[Int]
+)
+final case class ListReassignmentsResult(
+    errorCode: Short,
+    message: Option[String],
+    partitions: Vector[OngoingPartitionReassignment]
+)
 
 private enum ControllerRole:
   case Follower, Candidate, Leader
@@ -147,6 +166,43 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           metadataMutationLock.synchronized(createOnController(name, partitions, replicationFactor))
         case Some(controller) => forwardCreateTopic(controller, name, partitions, replicationFactor)
         case None => ClusterCreateResult(Errors.CoordinatorNotAvailable, Some("controller election is in progress"))
+
+  def alterPartitionReassignments(
+      requests: Vector[PartitionReassignmentRequest]
+  ): AlterReassignmentsResult = metadataMutationLock.synchronized {
+    if !enabled then
+      AlterReassignmentsResult(
+        Errors.InvalidRequest,
+        Some("partition reassignment requires cluster mode"),
+        Vector.empty
+      )
+    else if !isActiveController then
+      AlterReassignmentsResult(Errors.NotController, Some("request must be sent to the active controller"), Vector.empty)
+    else alterReassignmentsOnController(requests)
+  }
+
+  def listPartitionReassignments(
+      requested: Option[Set[(String, Int)]]
+  ): ListReassignmentsResult = synchronized {
+    if !enabled then ListReassignmentsResult(Errors.None, None, Vector.empty)
+    else if !isActiveController then
+      ListReassignmentsResult(Errors.NotController, Some("request must be sent to the active controller"), Vector.empty)
+    else
+      val partitions = current.topics.flatMap { topic =>
+        topic.partitions.collect {
+          case partition
+              if partition.isReassigning && requested.forall(_.contains((topic.name, partition.partition))) =>
+            OngoingPartitionReassignment(
+              topic.name,
+              partition.partition,
+              partition.replicas,
+              partition.addingReplicas,
+              partition.removingReplicas
+            )
+        }
+      }
+      ListReassignmentsResult(Errors.None, None, partitions)
+  }
 
   def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.Ping =>
@@ -429,6 +485,111 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         )
         if propose(next) then ClusterCreateResult(Errors.None, None)
         else ClusterCreateResult(Errors.CoordinatorNotAvailable, Some("metadata quorum is unavailable"))
+
+  private def alterReassignmentsOnController(
+      requests: Vector[PartitionReassignmentRequest]
+  ): AlterReassignmentsResult =
+    val duplicateKeys = requests.groupBy(request => (request.topic, request.partition)).collect {
+      case (key, duplicates) if duplicates.size > 1 => key
+    }.toSet
+    val replacements = mutable.HashMap.empty[(String, Int), PartitionMetadata]
+    val results = requests.map { request =>
+      val key = (request.topic, request.partition)
+      if duplicateKeys.contains(key) then
+        PartitionReassignmentResult(
+          request.topic,
+          request.partition,
+          Errors.InvalidRequest,
+          Some("partition appears more than once in the request")
+        )
+      else
+        current.byName.get(request.topic).flatMap(_.partitions.lift(request.partition)) match
+          case None =>
+            PartitionReassignmentResult(
+              request.topic,
+              request.partition,
+              Errors.UnknownTopicOrPartition,
+              Some("topic or partition does not exist")
+            )
+          case Some(partition) =>
+            reassignmentReplacement(partition, request.replicas) match
+              case Left((error, message)) =>
+                PartitionReassignmentResult(request.topic, request.partition, error, Some(message))
+              case Right(replacement) =>
+                if replacement != partition then replacements.update(key, replacement)
+                PartitionReassignmentResult(request.topic, request.partition, Errors.None, None)
+    }
+    if replacements.isEmpty then AlterReassignmentsResult(Errors.None, None, results)
+    else
+      val topics = current.topics.map { topic =>
+        topic.copy(partitions = topic.partitions.map { partition =>
+          replacements.getOrElse((topic.name, partition.partition), partition)
+        })
+      }
+      val committed = propose(ClusterMetadata(Math.addExact(current.version, 1L), topics, currentTerm))
+      if committed then AlterReassignmentsResult(Errors.None, None, results)
+      else
+        AlterReassignmentsResult(
+          Errors.RequestTimedOut,
+          Some("metadata quorum did not commit the reassignment"),
+          Vector.empty
+        )
+
+  private def reassignmentReplacement(
+      partition: PartitionMetadata,
+      requestedReplicas: Option[Vector[Int]]
+  ): Either[(Short, String), PartitionMetadata] = requestedReplicas match
+    case None =>
+      if !partition.isReassigning then
+        Left(Errors.NoReassignmentInProgress -> "partition has no reassignment to cancel")
+      else
+        val original = partition.originalReplicas
+        val inSync = original.filter(partition.inSyncReplicas.contains)
+        val leader = if original.contains(partition.leaderId) then partition.leaderId else inSync.headOption.getOrElse(-1)
+        Right(
+          partition.copy(
+            leaderId = leader,
+            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
+            replicas = original,
+            inSyncReplicas = inSync,
+            addingReplicas = Vector.empty,
+            removingReplicas = Vector.empty
+          )
+        )
+    case Some(target) if target.isEmpty || target.distinct != target || !target.forall(nodeById.contains) =>
+      Left(
+        Errors.InvalidReplicaAssignment ->
+          "replica assignment must be non-empty, unique, and contain only configured broker IDs"
+      )
+    case Some(target) =>
+      val original = if partition.isReassigning then partition.originalReplicas else partition.replicas
+      val adding = target.filterNot(original.contains)
+      val removing = original.filterNot(target.contains)
+      val targetInSync = target.forall(partition.inSyncReplicas.contains)
+      if adding.isEmpty && targetInSync then
+        val inSync = target.filter(partition.inSyncReplicas.contains)
+        val leader = if target.contains(partition.leaderId) then partition.leaderId else inSync.head
+        Right(
+          partition.copy(
+            leaderId = leader,
+            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
+            replicas = target,
+            inSyncReplicas = inSync,
+            addingReplicas = Vector.empty,
+            removingReplicas = Vector.empty
+          )
+        )
+      else
+        val intermediate = (target ++ removing).distinct
+        Right(
+          partition.copy(
+            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
+            replicas = intermediate,
+            inSyncReplicas = intermediate.filter(partition.inSyncReplicas.contains),
+            addingReplicas = adding,
+            removingReplicas = removing
+          )
+        )
 
   private def forwardCreateTopic(
       controller: ClusterNode,
