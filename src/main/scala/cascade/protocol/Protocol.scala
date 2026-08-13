@@ -19,6 +19,8 @@ object ApiKey:
   val AddOffsetsToTxn: Short = 25
   val EndTxn: Short = 26
   val TxnOffsetCommit: Short = 28
+  val AlterPartitionReassignments: Short = 45
+  val ListPartitionReassignments: Short = 46
 
 object Errors:
   val None: Short = 0
@@ -58,6 +60,9 @@ object Errors:
   val MemberIdRequired: Short = 79
   val FencedLeaderEpoch: Short = 74
   val ProducerFenced: Short = 90
+  val InvalidReplicaAssignment: Short = 39
+  val ReassignmentInProgress: Short = 60
+  val NoReassignmentInProgress: Short = 85
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
@@ -80,7 +85,9 @@ object Compatibility:
     ApiVersion(ApiKey.AddPartitionsToTxn, 1, 1),
     ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
     ApiVersion(ApiKey.EndTxn, 1, 1),
-    ApiVersion(ApiKey.TxnOffsetCommit, 2, 2)
+    ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
+    ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
+    ApiVersion(ApiKey.ListPartitionReassignments, 0, 0)
   )
 
   private val byKey = supported.map(version => version.apiKey -> version).toMap
@@ -89,10 +96,13 @@ object Compatibility:
     byKey.get(apiKey).exists(range => version >= range.minVersion && version <= range.maxVersion)
 
   def isFlexibleRequest(apiKey: Short, version: Short): Boolean =
-    apiKey == ApiKey.ApiVersions && version >= 3
+    (apiKey == ApiKey.ApiVersions && version >= 3) ||
+      apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments
 
   // ApiVersions deliberately retains response header v0 even for flexible body versions.
-  def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean = false
+  // The reassignment APIs use the flexible response header v1.
+  def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
+    apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments
 
 final case class RequestHeader(
     apiKey: Short,

@@ -117,6 +117,14 @@ final class ByteCursor(private val bytes: Array[Byte]):
     validateCollectionLength(length)
     Vector.fill(length)(readElement)
 
+  def readCompactNullableArray[A](readElement: => A): Option[Vector[A]] =
+    val encodedLength = readUnsignedVarInt()
+    if encodedLength == 0 then None
+    else
+      val length = encodedLength - 1
+      validateCollectionLength(length)
+      Some(Vector.fill(length)(readElement))
+
   def skipTaggedFields(): Unit =
     val fieldCount = readUnsignedVarInt()
     var previousTag = -1
@@ -239,6 +247,10 @@ final class ByteWriter(initialCapacity: Int = 256):
     writeUnsignedVarInt(values.size + 1)
     values.foreach(writeElement)
     this
+
+  def writeCompactNullableArray[A](values: Option[Iterable[A]])(writeElement: A => Unit): this.type = values match
+    case None => writeUnsignedVarInt(0)
+    case Some(items) => writeCompactArray(items)(writeElement)
 
   def writeEmptyTaggedFields(): this.type = writeUnsignedVarInt(0)
 

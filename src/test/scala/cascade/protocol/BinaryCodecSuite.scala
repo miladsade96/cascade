@@ -30,6 +30,16 @@ final class BinaryCodecSuite extends FunSuite:
     cursor.ensureFullyRead()
   }
 
+  test("round-trips nullable compact arrays used by reassignment APIs") {
+    val writer = ByteWriter()
+    writer.writeCompactNullableArray(Some(Vector(1, 3, 5)))(value => writer.writeInt(value): Unit)
+    writer.writeCompactNullableArray[Int](None)(_ => ())
+    val cursor = ByteCursor(writer.result())
+    assertEquals(cursor.readCompactNullableArray(cursor.readInt()), Some(Vector(1, 3, 5)))
+    assertEquals(cursor.readCompactNullableArray(cursor.readInt()), None)
+    cursor.ensureFullyRead()
+  }
+
   test("rejects truncated input before accessing outside the frame") {
     val cursor = ByteCursor(Array[Byte](0, 0, 0))
     intercept[ProtocolException](cursor.readInt())
