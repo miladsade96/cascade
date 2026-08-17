@@ -28,6 +28,7 @@ final case class ListReassignmentsResult(
     message: Option[String],
     partitions: Vector[OngoingPartitionReassignment]
 )
+final case class MembershipChangeResult(errorCode: Short, message: Option[String])
 
 private enum ControllerRole:
   case Follower, Candidate, Leader
@@ -207,12 +208,41 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       ListReassignmentsResult(Errors.None, None, partitions)
   }
 
+  def addVoter(voter: QuorumVoter): MembershipChangeResult =
+    if !enabled then MembershipChangeResult(Errors.InvalidRequest, Some("voter changes require cluster mode"))
+    else
+      controllerNode match
+        case Some(controller) if controller.id == config.nodeId =>
+          metadataMutationLock.synchronized(addVoterOnController(voter))
+        case Some(controller) => forwardAddVoter(controller, voter)
+        case None => MembershipChangeResult(Errors.NotController, Some("controller election is in progress"))
+
+  def removeVoter(nodeId: Int, directoryId: VoterDirectoryId): MembershipChangeResult =
+    if !enabled then MembershipChangeResult(Errors.InvalidRequest, Some("voter changes require cluster mode"))
+    else
+      controllerNode match
+        case Some(controller) if controller.id == config.nodeId =>
+          metadataMutationLock.synchronized(removeVoterOnController(nodeId, directoryId))
+        case Some(controller) => forwardRemoveVoter(controller, nodeId, directoryId)
+        case None => MembershipChangeResult(Errors.NotController, Some("controller election is in progress"))
+
   def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.Ping =>
       cursor.ensureFullyRead()
       ByteWriter().writeShort(Errors.None).result()
     case InternalApi.ControllerVote => controllerVote(cursor)
     case InternalApi.ControllerHeartbeat => controllerHeartbeat(cursor)
+    case InternalApi.AddVoter =>
+      val voter = readVoter(cursor)
+      cursor.ensureFullyRead()
+      val result = metadataMutationLock.synchronized(addVoterOnController(voter))
+      ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
+    case InternalApi.RemoveVoter =>
+      val nodeId = cursor.readInt()
+      val directoryId = VoterDirectoryId(cursor.readLong(), cursor.readLong())
+      cursor.ensureFullyRead()
+      val result = metadataMutationLock.synchronized(removeVoterOnController(nodeId, directoryId))
+      ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataSnapshot => metadataSnapshot(cursor)
@@ -226,6 +256,115 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         else ClusterCreateResult(Errors.NotController, Some("metadata mutation must be sent to the elected controller"))
       ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
     case _ => throw IllegalArgumentException(s"unsupported metadata API: $apiKey")
+
+  private def addVoterOnController(voter: QuorumVoter): MembershipChangeResult =
+    if !isActiveController then
+      MembershipChangeResult(Errors.NotController, Some("request must be sent to the active controller"))
+    else
+      val membership = effectiveMembership
+      if membership.isJoint then
+        MembershipChangeResult(Errors.ReassignmentInProgress, Some("another voter change is in progress"))
+      else if membership.contains(voter.id) then
+        MembershipChangeResult(Errors.DuplicateVoter, Some(s"voter ${voter.id} is already in the quorum"))
+      else if membership.voters.exists(existing => existing.node.host == voter.node.host && existing.node.port == voter.node.port) then
+        MembershipChangeResult(Errors.InvalidRequest, Some("voter endpoint is already registered"))
+      else if !synchronizeNode(voter.node) then
+        MembershipChangeResult(Errors.RequestTimedOut, Some("new voter did not synchronize the committed metadata image"))
+      else
+        val target = (membership.currentVoters :+ voter).sortBy(_.id)
+        val joint = membership.beginTransition(target)
+        val entered = propose(
+          ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint))
+        )
+        if !entered then MembershipChangeResult(Errors.RequestTimedOut, Some("metadata quorum did not commit joint membership"))
+        else
+          val stable = joint.stabilize
+          val completed = propose(
+            ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(stable))
+          )
+          if completed then MembershipChangeResult(Errors.None, None)
+          else MembershipChangeResult(Errors.RequestTimedOut, Some("joint membership committed; stabilization will resume"))
+
+  private def removeVoterOnController(nodeId: Int, directoryId: VoterDirectoryId): MembershipChangeResult =
+    if !isActiveController then
+      MembershipChangeResult(Errors.NotController, Some("request must be sent to the active controller"))
+    else
+      val membership = effectiveMembership
+      if membership.isJoint then
+        MembershipChangeResult(Errors.ReassignmentInProgress, Some("another voter change is in progress"))
+      else
+        membership.currentVoters.find(_.id == nodeId) match
+          case None => MembershipChangeResult(Errors.VoterNotFound, Some(s"voter $nodeId is not in the quorum"))
+          case Some(voter) if voter.directoryId != directoryId =>
+            MembershipChangeResult(Errors.InvalidVoterKey, Some(s"directory ID does not match voter $nodeId"))
+          case Some(_) if membership.currentVoters.size == 1 =>
+            MembershipChangeResult(Errors.InvalidRequest, Some("the last voter cannot be removed"))
+          case Some(_) if current.topics.exists(_.partitions.exists(_.replicas.contains(nodeId))) =>
+            MembershipChangeResult(
+              Errors.InvalidReplicaAssignment,
+              Some(s"voter $nodeId still hosts partition replicas; reassign them before removal")
+            )
+          case Some(_) =>
+            val target = membership.currentVoters.filterNot(_.id == nodeId)
+            val joint = membership.beginTransition(target)
+            val entered = propose(
+              ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint))
+            )
+            if !entered then MembershipChangeResult(Errors.RequestTimedOut, Some("metadata quorum did not commit joint membership"))
+            else
+              val completed = propose(
+                ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint.stabilize))
+              )
+              if completed then
+                if nodeId == config.nodeId then synchronized(stepDownLocked(currentTerm, None))
+                MembershipChangeResult(Errors.None, None)
+              else MembershipChangeResult(Errors.RequestTimedOut, Some("joint membership committed; stabilization will resume"))
+
+  private def forwardAddVoter(controller: ClusterNode, voter: QuorumVoter): MembershipChangeResult =
+    forwardMembershipChange(
+      controller,
+      InternalApi.AddVoter,
+      writeVoter(ByteWriter(), voter).result()
+    )
+
+  private def forwardRemoveVoter(
+      controller: ClusterNode,
+      nodeId: Int,
+      directoryId: VoterDirectoryId
+  ): MembershipChangeResult =
+    forwardMembershipChange(
+      controller,
+      InternalApi.RemoveVoter,
+      ByteWriter()
+        .writeInt(nodeId)
+        .writeLong(directoryId.mostSignificantBits)
+        .writeLong(directoryId.leastSignificantBits)
+        .result()
+    )
+
+  private def forwardMembershipChange(
+      controller: ClusterNode,
+      apiKey: Short,
+      payload: Array[Byte]
+  ): MembershipChangeResult =
+    try
+      val response = peerClient.call(controller, apiKey, payload, config.peerTimeoutMillis)
+      val result = MembershipChangeResult(response.readShort(), response.readNullableString())
+      response.ensureFullyRead()
+      result
+    catch case error: Throwable => MembershipChangeResult(Errors.NotController, Some(error.getMessage))
+
+  private def writeVoter(writer: ByteWriter, voter: QuorumVoter): ByteWriter =
+    writer
+      .writeInt(voter.id)
+      .writeString(voter.node.host)
+      .writeInt(voter.node.port)
+      .writeLong(voter.directoryId.mostSignificantBits)
+      .writeLong(voter.directoryId.leastSignificantBits)
+
+  private def readVoter(cursor: ByteCursor): QuorumVoter =
+    val node = ClusterNode(cursor.readInt(), cursor.readString(), cursor.readInt())
+    QuorumVoter(node, VoterDirectoryId(cursor.readLong(), cursor.readLong()))
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then

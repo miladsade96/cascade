@@ -63,6 +63,10 @@ object Errors:
   val InvalidReplicaAssignment: Short = 39
   val ReassignmentInProgress: Short = 60
   val NoReassignmentInProgress: Short = 85
+  val InconsistentClusterId: Short = 104
+  val InvalidVoterKey: Short = 125
+  val DuplicateVoter: Short = 126
+  val VoterNotFound: Short = 127
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
