@@ -39,6 +39,8 @@ final class BrokerIntegrationSuite extends FunSuite:
           api
         }
         assert(apis.exists(_.apiKey == ApiKey.Produce))
+        assert(apis.exists(api => api.apiKey == ApiKey.AddRaftVoter && api.maxVersion == 1))
+        assert(apis.exists(api => api.apiKey == ApiKey.RemoveRaftVoter && api.maxVersion == 0))
         versions.readInt()
         versions.skipTaggedFields()
         versions.ensureFullyRead()
@@ -119,6 +121,48 @@ final class BrokerIntegrationSuite extends FunSuite:
         fetched.readLong()
         fetched.readInt()
         assertEquals(fetched.readNullableBytes().map(_.length), Some(batch.length))
+      finally socket.close()
+    }
+  }
+
+  test("decodes Kafka flexible voter administration requests and responses") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        val add = requestHeader(ApiKey.AddRaftVoter, 1, 41, flexible = true)
+          .writeCompactNullableString(Some("cascade-cluster"))
+          .writeInt(5000)
+          .writeInt(2)
+          .writeUuid(10L, 20L)
+        add.writeCompactArray(Vector(("CONTROLLER", "127.0.0.1", 9093))) { case (name, host, port) =>
+          add.writeCompactString(name).writeCompactString(host).writeShort(port).writeEmptyTaggedFields(): Unit
+        }
+        add.writeBoolean(true).writeEmptyTaggedFields()
+
+        val added = request(output, input, add.result())
+        assertEquals(added.readInt(), 41)
+        added.skipTaggedFields()
+        assertEquals(added.readInt(), 0)
+        assertEquals(added.readShort(), Errors.InvalidRequest)
+        assert(added.readCompactNullableString().exists(_.contains("cluster mode")))
+        added.skipTaggedFields()
+        added.ensureFullyRead()
+
+        val remove = requestHeader(ApiKey.RemoveRaftVoter, 0, 42, flexible = true)
+          .writeCompactNullableString(Some("wrong-cluster"))
+          .writeInt(1)
+          .writeUuid(10L, 20L)
+          .writeEmptyTaggedFields()
+        val removed = request(output, input, remove.result())
+        assertEquals(removed.readInt(), 42)
+        removed.skipTaggedFields()
+        assertEquals(removed.readInt(), 0)
+        assertEquals(removed.readShort(), Errors.InconsistentClusterId)
+        assert(removed.readCompactNullableString().nonEmpty)
+        removed.skipTaggedFields()
+        removed.ensureFullyRead()
       finally socket.close()
     }
   }

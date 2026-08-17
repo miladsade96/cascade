@@ -44,6 +44,8 @@ final class RequestHandler(
       case ApiKey.CreateTopics => createTopics(body)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
+      case ApiKey.AddRaftVoter => addRaftVoter(header.apiVersion, body)
+      case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
       case ApiKey.InitProducerId => initProducerId(body)
       case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(body)
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
@@ -411,6 +413,61 @@ final class RequestHandler(
     }
     writer.writeEmptyTaggedFields()
     Some(writer.result())
+
+  private def addRaftVoter(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    final case class Listener(name: String, host: String, port: Int)
+    val clusterId = cursor.readCompactNullableString()
+    val timeoutMillis = cursor.readInt()
+    val voterId = cursor.readInt()
+    val (directoryHigh, directoryLow) = cursor.readUuid()
+    val listeners = cursor.readCompactArray {
+      val listener = Listener(cursor.readCompactString(), cursor.readCompactString(), cursor.readUnsignedShort())
+      cursor.skipTaggedFields()
+      listener
+    }
+    if version >= 1 then cursor.readBoolean(): Unit // Cascade always waits for the stable configuration.
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val directoryId = VoterDirectoryId(directoryHigh, directoryLow)
+    val result =
+      if clusterId.exists(_ != "cascade-cluster") then
+        MembershipChangeResult(Errors.InconsistentClusterId, Some("cluster ID does not match cascade-cluster"))
+      else if timeoutMillis <= 0 || voterId < 0 || directoryId.isZero then
+        MembershipChangeResult(Errors.InvalidVoterKey, Some("voter ID, directory ID, or timeout is invalid"))
+      else if listeners.isEmpty || listeners.map(_.name).distinct.size != listeners.size then
+        MembershipChangeResult(Errors.InvalidRequest, Some("at least one uniquely named listener is required"))
+      else
+        val listener = listeners.find(_.name == "CONTROLLER").getOrElse(listeners.head)
+        if listener.host.isEmpty || listener.port <= 0 then
+          MembershipChangeResult(Errors.InvalidRequest, Some("voter listener endpoint is invalid"))
+        else
+          clusterManager.addVoter(
+            QuorumVoter(ClusterNode(voterId, listener.host, listener.port), directoryId)
+          )
+    Some(membershipChangeResponse(result))
+
+  private def removeRaftVoter(cursor: ByteCursor): Option[Array[Byte]] =
+    val clusterId = cursor.readCompactNullableString()
+    val voterId = cursor.readInt()
+    val (directoryHigh, directoryLow) = cursor.readUuid()
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val result =
+      if clusterId.exists(_ != "cascade-cluster") then
+        MembershipChangeResult(Errors.InconsistentClusterId, Some("cluster ID does not match cascade-cluster"))
+      else if voterId < 0 then MembershipChangeResult(Errors.InvalidVoterKey, Some("voter ID is invalid"))
+      else clusterManager.removeVoter(voterId, VoterDirectoryId(directoryHigh, directoryLow))
+    Some(membershipChangeResponse(result))
+
+  private def membershipChangeResponse(result: MembershipChangeResult): Array[Byte] =
+    ByteWriter()
+      .writeInt(0)
+      .writeShort(result.errorCode)
+      .writeCompactNullableString(result.message)
+      .writeEmptyTaggedFields()
+      .result()
 
   private def produce(cursor: ByteCursor): Option[Array[Byte]] =
     val transactionalId = cursor.readNullableString()
