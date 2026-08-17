@@ -204,6 +204,17 @@ final class ReplicationManager(
             }: Unit
 
           if acknowledgements == -1 && !allInSyncReplicasAcknowledged then
+            rollbackUncommittedAppend(
+              topic,
+              partition,
+              metadata.leaderEpoch,
+              appended.baseOffset,
+              followers,
+              log,
+              math.min(timeoutMillis, config.peerTimeoutMillis)
+            )
+
+          if acknowledgements == -1 && !allInSyncReplicasAcknowledged then
             ReplicatedAppendResult(Errors.NotEnoughReplicasAfterAppend, appended.baseOffset)
           else ReplicatedAppendResult(Errors.None, appended.baseOffset)
 
@@ -341,7 +352,7 @@ final class ReplicationManager(
     val leaderEpoch = cursor.readInt()
     val offsetExclusive = cursor.readLong()
     cursor.ensureFullyRead()
-    val error = replicaRecoveryAccess(topic, partition, leaderId, leaderEpoch) match
+    val error = replicaTruncationAccess(topic, partition, leaderId, leaderEpoch) match
       case denied if denied != Errors.None => denied
       case _ =>
         registry.partition(topic, partition) match
@@ -352,6 +363,16 @@ final class ReplicationManager(
               Errors.None
             catch case _: Throwable => Errors.InvalidRequest
     ByteWriter().writeShort(error).result()
+
+  private def replicaTruncationAccess(topic: String, partition: Int, leaderId: Int, leaderEpoch: Int): Short =
+    if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else cluster.partition(topic, partition) match
+      case None => Errors.UnknownTopicOrPartition
+      case Some(metadata) if metadata.leaderId != leaderId || metadata.leaderEpoch != leaderEpoch =>
+        Errors.FencedLeaderEpoch
+      case Some(metadata) if metadata.leaderId == config.nodeId || !metadata.replicas.contains(config.nodeId) =>
+        Errors.InvalidRequest
+      case Some(_) => Errors.None
 
   private def replicaRecoveryAccess(topic: String, partition: Int, leaderId: Int, leaderEpoch: Int): Short =
     if cluster.isBrokerFenced then Errors.BrokerNotAvailable
@@ -370,6 +391,30 @@ final class ReplicationManager(
       .writeInt(fingerprint.size)
       .writeLong(fingerprint.digestHigh)
       .writeLong(fingerprint.digestLow): Unit
+
+  private def rollbackUncommittedAppend(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      baseOffset: Long,
+      followers: Vector[ClusterNode],
+      log: cascade.storage.PartitionLog,
+      timeoutMillis: Int
+  ): Unit =
+    val payload = ByteWriter()
+      .writeString(topic)
+      .writeInt(partition)
+      .writeInt(config.nodeId)
+      .writeInt(leaderEpoch)
+      .writeLong(baseOffset)
+      .result()
+    invokePeers(followers, timeoutMillis) { follower =>
+      val response = peerClient.call(follower, InternalApi.ReplicaTruncate, payload, timeoutMillis)
+      val accepted = response.readShort() == Errors.None
+      response.ensureFullyRead()
+      accepted
+    }: Unit
+    log.truncateReplicaTo(baseOffset)
 
   private def copyCommittedLog(
       topic: String,

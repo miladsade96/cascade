@@ -225,7 +225,16 @@ final class KafkaClientEndToEndSuite extends FunSuite:
 
       val firstProducer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrapServers))
       try
-        val metadata = firstProducer.send(
+        val followerPath = firstProducer.send(
+          ProducerRecord[Array[Byte], Array[Byte]](
+            "replicated-events",
+            0,
+            null,
+            "before-follower-loss".getBytes(StandardCharsets.UTF_8)
+          )
+        ).get(15, TimeUnit.SECONDS)
+        assertEquals(followerPath.offset(), 0L)
+        val leaderPath = firstProducer.send(
           ProducerRecord[Array[Byte], Array[Byte]](
             "replicated-events",
             1,
@@ -233,15 +242,19 @@ final class KafkaClientEndToEndSuite extends FunSuite:
             "before-failover".getBytes(StandardCharsets.UTF_8)
           )
         ).get(15, TimeUnit.SECONDS)
-        assertEquals(metadata.offset(), 0L)
-      finally firstProducer.close(Duration.ofSeconds(5))
+        assertEquals(leaderPath.offset(), 0L)
 
-      brokers(1).close()
-      Thread.sleep(2500L)
-
-      val secondProducer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrapServers))
-      try
-        val metadata = secondProducer.send(
+        brokers(1).close()
+        val retried = firstProducer.send(
+          ProducerRecord[Array[Byte], Array[Byte]](
+            "replicated-events",
+            0,
+            null,
+            "after-follower-loss".getBytes(StandardCharsets.UTF_8)
+          )
+        ).get(15, TimeUnit.SECONDS)
+        assertEquals(retried.offset(), 1L)
+        val promoted = firstProducer.send(
           ProducerRecord[Array[Byte], Array[Byte]](
             "replicated-events",
             1,
@@ -249,14 +262,21 @@ final class KafkaClientEndToEndSuite extends FunSuite:
             "after-failover".getBytes(StandardCharsets.UTF_8)
           )
         ).get(15, TimeUnit.SECONDS)
-        assertEquals(metadata.offset(), 1L)
-      finally secondProducer.close(Duration.ofSeconds(5))
+        assertEquals(promoted.offset(), 1L)
+      finally firstProducer.close(Duration.ofSeconds(5))
 
       val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers))
       try
-        val partition = TopicPartition("replicated-events", 1)
-        consumer.assign(java.util.List.of(partition))
-        consumer.seekToBeginning(java.util.List.of(partition))
+        val followerPartition = TopicPartition("replicated-events", 0)
+        consumer.assign(java.util.List.of(followerPartition))
+        consumer.seekToBeginning(java.util.List.of(followerPartition))
+        assertEquals(
+          pollValues(consumer, expected = 2),
+          Vector("before-follower-loss", "after-follower-loss")
+        )
+        val leaderPartition = TopicPartition("replicated-events", 1)
+        consumer.assign(java.util.List.of(leaderPartition))
+        consumer.seekToBeginning(java.util.List.of(leaderPartition))
         assertEquals(pollValues(consumer, expected = 2), Vector("before-failover", "after-failover"))
       finally consumer.close()
     finally

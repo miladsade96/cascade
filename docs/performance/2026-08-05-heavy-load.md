@@ -121,6 +121,8 @@ After adding the cluster path, I ran the single-node one-million-record test aga
 
 After adding durable online partition reassignment, I ran the same one-million-record regression again. It consumed exactly **1,000,000 / 1,000,000** records at **540,738 produced records/s** and **283,351 consumed records/s**. The short-run consume result varied from the earlier cached calibration, but correctness and the production hot path remained healthy; reassignment recovery work is inactive when no move is running.
 
+After adding dynamic voter membership and rollback for failed uncommitted `acks=all` attempts, I repeated the one-million-record regression on 2026-08-17. It consumed exactly **1,000,000 / 1,000,000** records at **367,202 produced records/s** and **250,135 consumed records/s**. Produce elapsed time was 2.723 seconds, consume elapsed time was 3.998 seconds, maximum acknowledgement latency was 1,265.882 ms, and peak heap was 1,311.1 MiB. The producer phase used 7.43 CPU cores in the shared JVM, so I record this as a correctness/regression pass rather than a new capacity result.
+
 ## My conclusion
 
 I fixed the bad flush behavior, the exact record checks pass, and sustained write performance improved a lot. On this development machine, explicit periodic persistence now tops out around 178 MiB/s.
