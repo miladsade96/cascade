@@ -126,6 +126,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def controllerTerm: Long = currentTerm
 
+  def metadataVersion: Long = current.version
+
+  def quorumMembership: QuorumMembership = effectiveMembership
+
   def isActiveController: Boolean =
     !enabled || synchronized {
       role == ControllerRole.Leader && electedControllerId == config.nodeId && controllerReady && hasQuorumLeaseLocked()
@@ -625,6 +629,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     healthy.toSet
 
   private def maintainCluster(healthy: Set[Int]): Unit =
+    finalizeMembershipChange()
     retryPendingRecoveryReleases()
     clusterNodes.foreach { node =>
       val nodeHealthy = node.id == config.nodeId || healthy.contains(node.id)
@@ -638,6 +643,18 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       else if node.id != config.nodeId && misses >= 3 then removeFailedNode(node.id)
     }
     finalizeReassignments()
+
+  private def finalizeMembershipChange(): Unit = metadataMutationLock.synchronized {
+    if !isActiveController then return
+    val membership = effectiveMembership
+    if membership.isJoint then
+      val removingLocalController = !membership.targetVoters.exists(_.id == config.nodeId)
+      val stable = membership.stabilize
+      val completed = propose(
+        ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(stable))
+      )
+      if completed && removingLocalController then synchronized(stepDownLocked(currentTerm, None))
+  }
 
   private def scheduleNodeRecovery(nodeId: Int): Unit =
     if recoveringNodes.add(nodeId) then
