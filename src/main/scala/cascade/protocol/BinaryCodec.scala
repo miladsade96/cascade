@@ -31,6 +31,8 @@ final class ByteCursor(private val bytes: Array[Byte]):
     position += 2
     value
 
+  def readUnsignedShort(): Int = readShort() & 0xffff
+
   def readInt(): Int =
     requireBytes(4)
     val value =
@@ -46,6 +48,8 @@ final class ByteCursor(private val bytes: Array[Byte]):
     val high = readInt().toLong & 0xffffffffL
     val low = readInt().toLong & 0xffffffffL
     (high << 32) | low
+
+  def readUuid(): (Long, Long) = (readLong(), readLong())
 
   def readUnsignedVarInt(): Int =
     var value = 0
@@ -187,6 +191,10 @@ final class ByteWriter(initialCapacity: Int = 256):
   def writeLong(value: Long): this.type =
     writeInt((value >>> 32).toInt)
     writeInt(value.toInt)
+
+  def writeUuid(mostSignificantBits: Long, leastSignificantBits: Long): this.type =
+    writeLong(mostSignificantBits)
+    writeLong(leastSignificantBits)
 
   def writeUnsignedVarInt(value: Int): this.type =
     if value < 0 then throw IllegalArgumentException("unsigned varint cannot be negative")

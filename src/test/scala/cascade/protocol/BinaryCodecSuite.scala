@@ -67,3 +67,15 @@ final class BinaryCodecSuite extends FunSuite:
     assertEquals(header.clientId, Some("client-v2"))
     assertEquals(body.readCompactString(), "software")
   }
+
+  test("round-trips unsigned ports and Kafka UUIDs") {
+    val bytes = ByteWriter()
+      .writeShort(65535)
+      .writeUuid(0x1020304050607080L, 0x0102030405060708L)
+      .result()
+    val cursor = ByteCursor(bytes)
+
+    assertEquals(cursor.readUnsignedShort(), 65535)
+    assertEquals(cursor.readUuid(), (0x1020304050607080L, 0x0102030405060708L))
+    cursor.ensureFullyRead()
+  }

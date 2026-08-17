@@ -21,6 +21,9 @@ object ApiKey:
   val TxnOffsetCommit: Short = 28
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
+  val DescribeQuorum: Short = 55
+  val AddRaftVoter: Short = 80
+  val RemoveRaftVoter: Short = 81
 
 object Errors:
   val None: Short = 0
@@ -91,7 +94,10 @@ object Compatibility:
     ApiVersion(ApiKey.EndTxn, 1, 1),
     ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
-    ApiVersion(ApiKey.ListPartitionReassignments, 0, 0)
+    ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
+    ApiVersion(ApiKey.DescribeQuorum, 0, 2),
+    ApiVersion(ApiKey.AddRaftVoter, 0, 1),
+    ApiVersion(ApiKey.RemoveRaftVoter, 0, 0)
   )
 
   private val byKey = supported.map(version => version.apiKey -> version).toMap
@@ -101,12 +107,14 @@ object Compatibility:
 
   def isFlexibleRequest(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.ApiVersions && version >= 3) ||
-      apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments
+      apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
+      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
   // ApiVersions deliberately retains response header v0 even for flexible body versions.
-  // The reassignment APIs use the flexible response header v1.
+  // All other flexible APIs use response header v1.
   def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
-    apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments
+    apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
+      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
 final case class RequestHeader(
     apiKey: Short,
