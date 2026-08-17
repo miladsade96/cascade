@@ -46,7 +46,6 @@ final case class BrokerConfig(
     "controller election timeout must be at least three heartbeat intervals"
   )
   require(clusterNodes.map(_.id).distinct.size == clusterNodes.size, "cluster node IDs must be unique")
-  require(clusterNodes.isEmpty || clusterNodes.exists(_.id == nodeId), "cluster nodes must contain this node ID")
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == controllerId), "cluster nodes must contain the controller ID")
   require(
     clusterNodes.isEmpty || defaultReplicationFactor <= clusterNodes.size,

@@ -35,9 +35,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     if running.get() then throw IllegalStateException("broker is already running")
     server.setReuseAddress(true)
     server.bind(InetSocketAddress(config.bindHost, config.port))
-    val localNode = config.clusterNodes.find(_.id == config.nodeId).getOrElse {
-      ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
-    }
+    val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
     val peers = PeerClient()
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)

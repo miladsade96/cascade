@@ -63,3 +63,20 @@ final class BrokerConfigSuite extends FunSuite:
     assertEquals(config.controllerHeartbeatMillis, 200)
     assertEquals(config.controllerElectionTimeoutMillis, 1000)
   }
+
+  test("allows a new observer to discover a quorum before it becomes a voter") {
+    val config = BrokerConfig(
+      nodeId = 4,
+      advertisedHost = "node-d",
+      clusterNodes = Vector(
+        cascade.cluster.ClusterNode(1, "node-a", 9092),
+        cascade.cluster.ClusterNode(2, "node-b", 9092),
+        cascade.cluster.ClusterNode(3, "node-c", 9092)
+      ),
+      controllerId = 1,
+      defaultReplicationFactor = 3
+    )
+
+    assertEquals(config.nodeId, 4)
+    assert(!config.clusterNodes.exists(_.id == config.nodeId))
+  }
