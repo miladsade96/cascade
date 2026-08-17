@@ -44,6 +44,7 @@ final class RequestHandler(
       case ApiKey.CreateTopics => createTopics(body)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
+      case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
       case ApiKey.AddRaftVoter => addRaftVoter(header.apiVersion, body)
       case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
       case ApiKey.InitProducerId => initProducerId(body)
@@ -446,6 +447,72 @@ final class RequestHandler(
             QuorumVoter(ClusterNode(voterId, listener.host, listener.port), directoryId)
           )
     Some(membershipChangeResponse(result))
+
+  private def describeQuorum(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    val requested = cursor.readCompactArray {
+      val topic = cursor.readCompactString()
+      val partitions = cursor.readCompactArray {
+        val partition = cursor.readInt()
+        cursor.skipTaggedFields()
+        partition
+      }
+      cursor.skipTaggedFields()
+      topic -> partitions
+    }
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val membership = clusterManager.quorumMembership
+    val voters = membership.voters
+    val writer = ByteWriter().writeShort(Errors.None)
+    if version >= 2 then writer.writeCompactNullableString(None)
+    writer.writeCompactArray(requested) { case (topic, partitions) =>
+      writer.writeCompactString(topic)
+      writer.writeCompactArray(partitions) { partition =>
+        val valid = topic == "__cluster_metadata" && partition == 0
+        writer.writeInt(partition)
+        writer.writeShort(if valid then Errors.None else Errors.UnknownTopicOrPartition)
+        if version >= 2 then
+          writer.writeCompactNullableString(Option.when(!valid)("Cascade only exposes __cluster_metadata-0"))
+        writer.writeInt(if valid then clusterManager.controllerId else -1)
+        writer.writeInt(if valid then math.min(Int.MaxValue.toLong, clusterManager.controllerTerm).toInt else 0)
+        writer.writeLong(if valid then clusterManager.metadataVersion else -1L)
+        writeReplicaStates(writer, voters, version, valid)
+        writer.writeCompactArray(Vector.empty[QuorumVoter])(_ => ())
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    if version >= 2 then
+      writer.writeCompactArray(voters) { voter =>
+        writer.writeInt(voter.id)
+        writer.writeCompactArray(Vector(voter.node)) { node =>
+          writer.writeCompactString("CONTROLLER")
+          writer.writeCompactString(node.host)
+          writer.writeShort(node.port)
+          writer.writeEmptyTaggedFields(): Unit
+        }
+        writer.writeEmptyTaggedFields(): Unit
+      }
+    writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def writeReplicaStates(
+      writer: ByteWriter,
+      voters: Vector[QuorumVoter],
+      version: Short,
+      valid: Boolean
+  ): Unit =
+    writer.writeCompactArray(voters) { voter =>
+      writer.writeInt(voter.id)
+      if version >= 2 then
+        writer.writeUuid(voter.directoryId.mostSignificantBits, voter.directoryId.leastSignificantBits)
+      writer.writeLong(if valid && voter.id == clusterManager.controllerId then clusterManager.metadataVersion else -1L)
+      if version >= 1 then
+        writer.writeLong(-1L)
+        writer.writeLong(if valid && voter.id == clusterManager.controllerId then System.currentTimeMillis() else -1L)
+      writer.writeEmptyTaggedFields(): Unit
+    }: Unit
 
   private def removeRaftVoter(cursor: ByteCursor): Option[Array[Byte]] =
     val clusterId = cursor.readCompactNullableString()

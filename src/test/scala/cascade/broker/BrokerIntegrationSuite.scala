@@ -5,7 +5,11 @@ import cascade.protocol.*
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
 import java.net.Socket
 import java.nio.file.Files
+import java.time.Duration
+import java.util.Properties
+import java.util.concurrent.TimeUnit
 import munit.FunSuite
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import scala.jdk.CollectionConverters.*
 
 final class BrokerIntegrationSuite extends FunSuite:
@@ -164,6 +168,21 @@ final class BrokerIntegrationSuite extends FunSuite:
         removed.skipTaggedFields()
         removed.ensureFullyRead()
       finally socket.close()
+    }
+  }
+
+  test("Kafka Admin describes Cascade's metadata quorum") {
+    withBroker { broker =>
+      val properties = Properties()
+      properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+      val admin = Admin.create(properties)
+      try
+        val quorum = admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS)
+        assertEquals(quorum.leaderId(), 1)
+        assertEquals(quorum.voters().asScala.map(_.replicaId()).toVector, Vector(1))
+        assertEquals(quorum.observers().size(), 0)
+        assertEquals(quorum.nodes().get(1).endpoints().asScala.head.host(), "127.0.0.1")
+      finally admin.close(Duration.ofSeconds(5))
     }
   }
 
