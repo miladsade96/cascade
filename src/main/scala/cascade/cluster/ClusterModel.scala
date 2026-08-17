@@ -1,5 +1,8 @@
 package cascade.cluster
 
+import java.nio.charset.StandardCharsets
+import java.util.UUID
+
 final case class ClusterNode(id: Int, host: String, port: Int):
   require(id >= 0, "cluster node ID must be non-negative")
   require(host.nonEmpty, "cluster node host must not be empty")
@@ -12,6 +15,65 @@ object ClusterNode:
     if at <= 0 || colon <= at + 1 || colon == value.length - 1 then
       throw IllegalArgumentException(s"invalid cluster node '$value'; expected id@host:port")
     ClusterNode(value.substring(0, at).toInt, value.substring(at + 1, colon), value.substring(colon + 1).toInt)
+
+final case class VoterDirectoryId(mostSignificantBits: Long, leastSignificantBits: Long):
+  def isZero: Boolean = mostSignificantBits == 0L && leastSignificantBits == 0L
+
+  override def toString: String = UUID(mostSignificantBits, leastSignificantBits).toString
+
+object VoterDirectoryId:
+  val Zero: VoterDirectoryId = VoterDirectoryId(0L, 0L)
+
+  def bootstrap(nodeId: Int): VoterDirectoryId =
+    val uuid = UUID.nameUUIDFromBytes(s"cascade-voter-$nodeId".getBytes(StandardCharsets.UTF_8))
+    VoterDirectoryId(uuid.getMostSignificantBits, uuid.getLeastSignificantBits)
+
+final case class QuorumVoter(node: ClusterNode, directoryId: VoterDirectoryId):
+  require(!directoryId.isZero, "voter directory ID must not be zero")
+
+  def id: Int = node.id
+
+object QuorumVoter:
+  def bootstrap(node: ClusterNode): QuorumVoter = QuorumVoter(node, VoterDirectoryId.bootstrap(node.id))
+
+final case class QuorumMembership(currentVoters: Vector[QuorumVoter], nextVoters: Vector[QuorumVoter] = Vector.empty):
+  require(currentVoters.nonEmpty, "current voter set must not be empty")
+  require(currentVoters.map(_.id).distinct.size == currentVoters.size, "current voter IDs must be unique")
+  require(nextVoters.map(_.id).distinct.size == nextVoters.size, "next voter IDs must be unique")
+  require(
+    nextVoters.isEmpty || currentVoters.map(_.id).toSet != nextVoters.map(_.id).toSet,
+    "joint voter sets must differ"
+  )
+
+  def isJoint: Boolean = nextVoters.nonEmpty
+
+  def voters: Vector[QuorumVoter] =
+    (currentVoters ++ nextVoters).groupBy(_.id).valuesIterator.map(_.last).toVector.sortBy(_.id)
+
+  def voterIds: Set[Int] = voters.map(_.id).toSet
+
+  def targetVoters: Vector[QuorumVoter] = if isJoint then nextVoters else currentVoters
+
+  def contains(nodeId: Int): Boolean = voterIds.contains(nodeId)
+
+  def hasQuorum(acknowledgedNodeIds: Set[Int]): Boolean =
+    hasMajority(currentVoters, acknowledgedNodeIds) &&
+      (!isJoint || hasMajority(nextVoters, acknowledgedNodeIds))
+
+  def beginTransition(target: Vector[QuorumVoter]): QuorumMembership =
+    require(!isJoint, "a voter transition is already in progress")
+    QuorumMembership(currentVoters, target.sortBy(_.id))
+
+  def stabilize: QuorumMembership =
+    require(isJoint, "the voter membership is already stable")
+    QuorumMembership(nextVoters.sortBy(_.id))
+
+  private def hasMajority(voters: Vector[QuorumVoter], acknowledgedNodeIds: Set[Int]): Boolean =
+    voters.count(voter => acknowledgedNodeIds.contains(voter.id)) >= voters.size / 2 + 1
+
+object QuorumMembership:
+  def bootstrap(nodes: Vector[ClusterNode]): QuorumMembership =
+    QuorumMembership(nodes.sortBy(_.id).map(QuorumVoter.bootstrap))
 
 final case class PartitionMetadata(
     partition: Int,
@@ -36,7 +98,12 @@ final case class PartitionMetadata(
 
 final case class TopicMetadata(name: String, partitions: Vector[PartitionMetadata])
 
-final case class ClusterMetadata(version: Long, topics: Vector[TopicMetadata], controllerTerm: Long = 0L):
+final case class ClusterMetadata(
+    version: Long,
+    topics: Vector[TopicMetadata],
+    controllerTerm: Long = 0L,
+    membership: Option[QuorumMembership] = None
+):
   require(version >= 0L, "metadata version must be non-negative")
   require(controllerTerm >= 0L, "metadata controller term must be non-negative")
   lazy val byName: Map[String, TopicMetadata] = topics.map(topic => topic.name -> topic).toMap
