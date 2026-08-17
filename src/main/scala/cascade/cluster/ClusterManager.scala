@@ -50,13 +50,14 @@ private final case class ReplicaRecoveryTarget(
     followerId: Int
 )
 
-/** Static-membership metadata quorum with persisted controller election and broker fencing. */
+/** Durable metadata quorum with persisted controller election, broker fencing, and dynamic membership. */
 final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localNode: ClusterNode, peerClient: PeerClient)
     extends AutoCloseable:
   private val enabled = config.clusterNodes.nonEmpty
-  private val nodes = if enabled then config.clusterNodes.sortBy(_.id) else Vector(localNode)
-  private val nodeById = nodes.map(node => node.id -> node).toMap
-  private val quorumSize = nodes.size / 2 + 1
+  private val bootstrapNodes = if enabled then config.clusterNodes.sortBy(_.id) else Vector(localNode)
+  private val bootstrapMembership = Option.when(enabled)(QuorumMembership.bootstrap(bootstrapNodes))
+  private val bootstrapNodeById = bootstrapNodes.map(node => node.id -> node).toMap
+  private val bootstrapQuorumSize = bootstrapNodes.size / 2 + 1
   private val closed = AtomicBoolean(false)
   private val metadataMutationLock = Object()
   private val peerExecutor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
@@ -116,9 +117,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def isEnabled: Boolean = enabled
 
-  def clusterNodes: Vector[ClusterNode] = nodes
+  def clusterNodes: Vector[ClusterNode] =
+    if enabled then effectiveMembership.currentVoters.map(_.node).sortBy(_.id) else Vector(localNode)
 
-  def controllerNode: Option[ClusterNode] = Option.when(electedControllerId >= 0)(nodeById(electedControllerId))
+  def controllerNode: Option[ClusterNode] = knownNode(electedControllerId)
 
   def controllerId: Int = electedControllerId
 
@@ -150,7 +152,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def validateTopic(name: String, partitions: Int, replicationFactor: Int): ClusterCreateResult = synchronized {
     if !registry.validateTopicName(name) then ClusterCreateResult(Errors.InvalidTopic, Some("invalid topic name"))
     else if partitions <= 0 then ClusterCreateResult(Errors.InvalidPartitions, Some("partition count must be positive"))
-    else if replicationFactor <= 0 || replicationFactor > nodes.size then
+    else if replicationFactor <= 0 || replicationFactor > clusterNodes.size then
       ClusterCreateResult(Errors.InvalidReplicationFactor, Some("replication factor exceeds the configured cluster"))
     else if (if enabled then current.byName.contains(name) else registry.partitions(name).nonEmpty) then
       ClusterCreateResult(Errors.TopicAlreadyExists, Some(s"Topic '$name' already exists"))
@@ -245,7 +247,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       if now >= nextHeartbeatNanos then
         nextHeartbeatNanos = now + config.controllerHeartbeatMillis.toLong * 1_000_000L
         val healthy = sendHeartbeats()
-        val quorumHealthy = healthy.size + 1 >= quorumSize
+        val quorumHealthy = healthy.size + 1 >= bootstrapQuorumSize
         if quorumHealthy then
           synchronized { lastQuorumContactNanos = System.nanoTime() }
           if isActiveController then maintainCluster(healthy)
@@ -267,7 +269,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         Some((term, metadataPosition))
     }
     election.foreach { case (term, position) =>
-      val responses = callPeers(nodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
+      val responses = callPeers(bootstrapNodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
         val response = peerClient.call(
           node,
           InternalApi.ControllerVote,
@@ -288,7 +290,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         if responseTerm > currentTerm then synchronized(stepDownLocked(responseTerm, None))
       }
       val votes = 1 + responses.count { case (_, (responseTerm, granted)) => responseTerm == term && granted }
-      if votes >= quorumSize then becomeLeader(term)
+      if votes >= bootstrapQuorumSize then becomeLeader(term)
     }
 
   private def becomeLeader(term: Long): Unit =
@@ -329,7 +331,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     val candidatePosition = MetadataPosition(cursor.readLong(), cursor.readLong())
     cursor.ensureFullyRead()
     val granted = synchronized {
-      if !nodeById.contains(candidateId) || term < currentTerm then false
+      if !bootstrapNodeById.contains(candidateId) || term < currentTerm then false
       else
         if term > currentTerm then stepDownLocked(term, None)
         val canVote = votedFor.isEmpty || votedFor.contains(candidateId)
@@ -407,7 +409,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       .result()
 
   private def acceptLeaderLocked(term: Long, leaderId: Int): Boolean =
-    if !nodeById.contains(leaderId) || term < currentTerm then false
+    if !bootstrapNodeById.contains(leaderId) || term < currentTerm then false
     else
       if term > currentTerm then stepDownLocked(term, Some(leaderId))
       role = ControllerRole.Follower
@@ -420,7 +422,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private def sendHeartbeats(): Set[Int] =
     val term = currentTerm
     val leaderPosition = metadataPosition
-    val responses = callPeers(nodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
+    val responses = callPeers(bootstrapNodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
       val response = peerClient.call(
         node,
         InternalApi.ControllerHeartbeat,
@@ -460,7 +462,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   private def maintainCluster(healthy: Set[Int]): Unit =
     retryPendingRecoveryReleases()
-    nodes.foreach { node =>
+    clusterNodes.foreach { node =>
       val nodeHealthy = node.id == config.nodeId || healthy.contains(node.id)
       val misses = synchronized {
         val value = if nodeHealthy then 0 else missedHeartbeats.getOrElse(node.id, 0) + 1
@@ -519,7 +521,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case error if error.errorCode != Errors.None => error
       case _ =>
         val assignments = Vector.tabulate(partitions) { partition =>
-          val replicas = Vector.tabulate(replicationFactor)(offset => nodes((partition + offset) % nodes.size).id)
+          val brokers = clusterNodes
+          val replicas = Vector.tabulate(replicationFactor)(offset => brokers((partition + offset) % brokers.size).id)
           PartitionMetadata(partition, replicas.head, 0, replicas, replicas)
         }
         val next = ClusterMetadata(
@@ -600,7 +603,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
             removingReplicas = Vector.empty
           )
         )
-    case Some(target) if target.isEmpty || target.distinct != target || !target.forall(nodeById.contains) =>
+    case Some(target) if target.isEmpty || target.distinct != target || !target.forall(activeNodeIds.contains) =>
       Left(
         Errors.InvalidReplicaAssignment ->
           "replica assignment must be non-empty, unique, and contain only configured broker IDs"
@@ -665,20 +668,21 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case CreateTopicResult.InvalidName => ClusterCreateResult(Errors.InvalidTopic, Some("invalid topic name"))
 
   private def propose(next: ClusterMetadata): Boolean =
+    val candidate = next.copy(membership = next.membership.orElse(current.membership).orElse(bootstrapMembership))
     val leadership = synchronized {
       Option.when(
-        role == ControllerRole.Leader && electedControllerId == config.nodeId && next.controllerTerm == currentTerm &&
-          next.version == current.version + 1L
+        role == ControllerRole.Leader && electedControllerId == config.nodeId && candidate.controllerTerm == currentTerm &&
+          candidate.version == current.version + 1L
       )(currentTerm)
     }
     leadership.exists { term =>
       val preparePayload = ByteWriter()
         .writeLong(term)
         .writeInt(config.nodeId)
-        .writeLong(next.version)
-        .writeLong(next.controllerTerm)
+        .writeLong(candidate.version)
+        .writeLong(candidate.controllerTerm)
         .result()
-      val prepared = callPeers(nodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
+      val prepared = callPeers(bootstrapNodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
         val response = peerClient.call(node, InternalApi.MetadataPrepare, preparePayload, config.peerTimeoutMillis)
         val responseTerm = response.readLong()
         val accepted = response.readShort() == Errors.None
@@ -691,12 +695,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val preparedPeers = prepared.collect {
         case (node, (responseTerm, true)) if responseTerm == term => node
       }
-      if preparedPeers.size + 1 < quorumSize || currentTerm != term || role != ControllerRole.Leader then false
+      if preparedPeers.size + 1 < bootstrapQuorumSize || currentTerm != term || role != ControllerRole.Leader then false
       else
         val commitPayload = ByteWriter()
           .writeLong(term)
           .writeInt(config.nodeId)
-          .writeByteArray(MetadataCodec.encode(next))
+          .writeByteArray(MetadataCodec.encode(candidate))
           .result()
         val committed = callPeers(preparedPeers, config.peerTimeoutMillis) { node =>
           val response = peerClient.call(node, InternalApi.MetadataCommit, commitPayload, config.peerTimeoutMillis)
@@ -711,11 +715,11 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         val committedPeers = committed.count {
           case (_, (responseTerm, accepted)) => responseTerm == term && accepted
         }
-        if committedPeers + 1 >= quorumSize && synchronized {
+        if committedPeers + 1 >= bootstrapQuorumSize && synchronized {
             role == ControllerRole.Leader && currentTerm == term
           }
         then
-          commitLocal(next)
+          commitLocal(candidate)
           synchronized { lastQuorumContactNanos = System.nanoTime() }
           true
         else false
@@ -886,7 +890,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           )
         case None => Errors.ReplicaNotAvailable
     else
-      nodeById.get(target.leaderId) match
+      knownNode(target.leaderId) match
         case None => Errors.ReplicaNotAvailable
         case Some(leader) =>
           try
@@ -919,7 +923,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         ) == Errors.None
       )
     else
-      nodeById.get(target.leaderId).exists { leader =>
+      knownNode(target.leaderId).exists { leader =>
         if admitted then synchronizeNode(leader): Unit
         try
           val response = peerClient.call(
@@ -948,7 +952,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private def stepDownLocked(term: Long, leaderId: Option[Int]): Unit =
     if term > currentTerm then persistControllerStateLocked(ControllerState(term, None))
     role = ControllerRole.Follower
-    electedControllerId = leaderId.filter(nodeById.contains).getOrElse(-1)
+    electedControllerId = leaderId.filter(bootstrapNodeById.contains).getOrElse(-1)
     controllerReady = false
     lastControllerContactNanos = Option.when(electedControllerId >= 0)(System.nanoTime()).getOrElse(0L)
     resetElectionDeadlineLocked(System.nanoTime(), initial = false)
@@ -958,7 +962,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     val delayMillis =
       if initial && config.nodeId == config.controllerId then config.controllerHeartbeatMillis.toLong * 2L
       else if initial then
-        val rank = nodes.indexWhere(_.id == config.nodeId).max(0)
+        val rank = bootstrapNodes.indexWhere(_.id == config.nodeId).max(0)
         base + rank.toLong * config.controllerHeartbeatMillis.toLong
       else
         val jitterRange = math.max(1L, base / 2L)
@@ -972,6 +976,14 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     contactNanos == 0L || nowNanos - contactNanos >= config.controllerElectionTimeoutMillis.toLong * 1_000_000L
 
   private def metadataPosition: MetadataPosition = MetadataPosition(current.controllerTerm, current.version)
+
+  private def effectiveMembership: QuorumMembership =
+    current.membership.orElse(bootstrapMembership).getOrElse(QuorumMembership.bootstrap(Vector(localNode)))
+
+  private def activeNodeIds: Set[Int] = effectiveMembership.currentVoters.map(_.id).toSet
+
+  private def knownNode(nodeId: Int): Option[ClusterNode] =
+    effectiveMembership.voters.find(_.id == nodeId).map(_.node).orElse(bootstrapNodeById.get(nodeId))
 
   private def callPeers[A](
       targets: Vector[ClusterNode],
