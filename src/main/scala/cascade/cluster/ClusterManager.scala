@@ -254,7 +254,25 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           if isActiveController then maintainCluster(healthy)
         else if synchronized(leaseExpired(lastQuorumContactNanos, System.nanoTime())) then
           synchronized(stepDownLocked(currentTerm, None))
-    else if now >= electionDeadlineNanos then startElection()
+    else if now >= electionDeadlineNanos then
+      if effectiveMembership.contains(config.nodeId) then startElection()
+      else discoverQuorum()
+
+  private def discoverQuorum(): Unit =
+    val targets = (effectiveMembership.voters.map(_.node) ++ bootstrapNodes)
+      .groupBy(_.id)
+      .valuesIterator
+      .map(_.last)
+      .filterNot(_.id == config.nodeId)
+      .toVector
+      .sortBy(_.id)
+    val discovered = targets.exists(synchronizeFrom)
+    synchronized {
+      if !discovered then
+        electedControllerId = -1
+        controllerReady = false
+      resetElectionDeadlineLocked(System.nanoTime(), initial = false)
+    }
 
   private def startElection(): Unit =
     val election = synchronized {
