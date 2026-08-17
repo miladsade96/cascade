@@ -98,6 +98,36 @@ final class MetadataStoreSuite extends FunSuite:
     )
   }
 
+  test("stable and joint voter membership round-trip with endpoints and directory IDs") {
+    val initial = QuorumMembership.bootstrap(
+      Vector(ClusterNode(1, "node-1", 9092), ClusterNode(2, "node-2", 9093), ClusterNode(3, "node-3", 9094))
+    )
+    val added = QuorumVoter(ClusterNode(4, "node-4", 9095), VoterDirectoryId(11L, 12L))
+    val metadata = ClusterMetadata(
+      12L,
+      Vector.empty,
+      controllerTerm = 7L,
+      membership = Some(initial.beginTransition(initial.currentVoters :+ added))
+    )
+
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata)), metadata)
+    assertEquals(
+      MetadataCodec.decode(MetadataCodec.encode(metadata.copy(membership = Some(metadata.membership.get.stabilize)))),
+      metadata.copy(membership = Some(metadata.membership.get.stabilize))
+    )
+  }
+
+  test("version three metadata images default membership to the configured bootstrap state") {
+    val legacy = ByteWriter()
+      .writeShort(3)
+      .writeLong(10L)
+      .writeLong(8L)
+      .writeArray(Vector.empty[TopicMetadata])(_ => ())
+      .result()
+
+    assertEquals(MetadataCodec.decode(legacy), ClusterMetadata(10L, Vector.empty, 8L, membership = None))
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)

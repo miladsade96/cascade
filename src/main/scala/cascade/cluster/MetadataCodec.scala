@@ -3,7 +3,7 @@ package cascade.cluster
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 
 object MetadataCodec:
-  private val FormatVersion: Short = 3
+  private val FormatVersion: Short = 4
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     val writer = ByteWriter()
@@ -19,6 +19,11 @@ object MetadataCodec:
         writer.writeArray(partition.addingReplicas)(writer.writeInt)
         writer.writeArray(partition.removingReplicas)(writer.writeInt): Unit
       }
+    }
+    writer.writeBoolean(metadata.membership.nonEmpty)
+    metadata.membership.foreach { membership =>
+      writeVoters(writer, membership.currentVoters)
+      writeVoters(writer, membership.nextVoters)
     }
     writer.result()
 
@@ -51,5 +56,27 @@ object MetadataCodec:
       }
       TopicMetadata(name, partitions)
     }
+    val membership =
+      if format >= 4 && cursor.readBoolean() then
+        Some(QuorumMembership(readVoters(cursor), readVoters(cursor)))
+      else None
     cursor.ensureFullyRead()
-    ClusterMetadata(version, topics, controllerTerm)
+    ClusterMetadata(version, topics, controllerTerm, membership)
+
+  private def writeVoters(writer: ByteWriter, voters: Vector[QuorumVoter]): Unit =
+    writer.writeArray(voters) { voter =>
+      writer.writeInt(voter.id)
+      writer.writeString(voter.node.host)
+      writer.writeInt(voter.node.port)
+      writer.writeLong(voter.directoryId.mostSignificantBits)
+      writer.writeLong(voter.directoryId.leastSignificantBits): Unit
+    }: Unit
+
+  private def readVoters(cursor: ByteCursor): Vector[QuorumVoter] =
+    cursor.readArray {
+      val id = cursor.readInt()
+      val host = cursor.readString()
+      val port = cursor.readInt()
+      val directoryId = VoterDirectoryId(cursor.readLong(), cursor.readLong())
+      QuorumVoter(ClusterNode(id, host, port), directoryId)
+    }
