@@ -2,7 +2,7 @@ package cascade.e2e
 
 import cascade.TestRecordBatch
 import cascade.broker.{BrokerConfig, KafkaBroker}
-import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient}
+import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient, VoterDirectoryId}
 import cascade.protocol.{ByteWriter, Errors}
 import cascade.storage.{FlushPolicy, PartitionLog}
 import java.nio.charset.StandardCharsets
@@ -463,6 +463,86 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         produceValue(bootstrapServers, "four-way-events", 0, "after-admission", expectedOffset = 0L)
       finally admin.close(Duration.ofSeconds(5))
     finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
+  test("Kafka Admin drains and removes the active controller without losing availability") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-remove-voter-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 3,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 1000,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 700
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    var restarted: Option[KafkaBroker] = None
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        val removedController = awaitController(admin)
+        val remaining = Set(1, 2, 3) - removedController
+        val directoryId = VoterDirectoryId.bootstrap(removedController)
+        val kafkaDirectoryId = Uuid(directoryId.mostSignificantBits, directoryId.leastSignificantBits)
+        val topicPartition = TopicPartition("remove-voter-events", 0)
+        admin.createTopics(java.util.List.of(NewTopic(topicPartition.topic(), 1, 3.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, topicPartition.topic(), 0, Set(1, 2, 3))
+        produceValue(bootstrapServers, topicPartition.topic(), 0, "before-removal", expectedOffset = 0L)
+
+        val stillAssigned = intercept[java.util.concurrent.ExecutionException] {
+          admin.removeRaftVoter(removedController, kafkaDirectoryId).all().get(20, TimeUnit.SECONDS)
+        }
+        assert(stillAssigned.getCause.isInstanceOf[InvalidReplicaAssignmentException])
+
+        admin.alterPartitionReassignments(
+          Map(
+            topicPartition -> Optional.of(
+              NewPartitionReassignment(remaining.toVector.sorted.map(Integer.valueOf).asJava)
+            )
+          ).asJava
+        ).all().get(20, TimeUnit.SECONDS)
+        awaitNoReassignment(admin, topicPartition)
+        awaitReplicaMembership(admin, topicPartition, remaining, remaining)
+
+        admin.removeRaftVoter(removedController, kafkaDirectoryId).all().get(20, TimeUnit.SECONDS)
+        awaitQuorumVoters(admin, remaining)
+        val nextController = awaitController(admin, excludedId = Some(removedController))
+        assert(remaining.contains(nextController))
+        produceValue(bootstrapServers, topicPartition.topic(), 0, "after-removal", expectedOffset = 1L)
+
+        brokers(removedController - 1).close()
+        val replacement = KafkaBroker(configs(removedController - 1))
+        restarted = Some(replacement)
+        replacement.start()
+        awaitQuorumVoters(admin, remaining)
+        assertEquals(awaitController(admin), nextController)
+
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers))
+        try
+          consumer.assign(java.util.List.of(topicPartition))
+          consumer.seekToBeginning(java.util.List.of(topicPartition))
+          assertEquals(pollValues(consumer, expected = 2), Vector("before-removal", "after-removal"))
+        finally consumer.close()
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      restarted.foreach(_.close())
       brokers.foreach(_.close())
       directories.foreach(deleteTree)
   }
