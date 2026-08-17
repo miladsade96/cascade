@@ -57,7 +57,6 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val bootstrapNodes = if enabled then config.clusterNodes.sortBy(_.id) else Vector(localNode)
   private val bootstrapMembership = Option.when(enabled)(QuorumMembership.bootstrap(bootstrapNodes))
   private val bootstrapNodeById = bootstrapNodes.map(node => node.id -> node).toMap
-  private val bootstrapQuorumSize = bootstrapNodes.size / 2 + 1
   private val closed = AtomicBoolean(false)
   private val metadataMutationLock = Object()
   private val peerExecutor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
@@ -684,13 +683,17 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       )(currentTerm)
     }
     leadership.exists { term =>
+      val quorum =
+        val committed = effectiveMembership
+        if committed.isJoint then committed
+        else candidate.membership.filter(_.isJoint).getOrElse(committed)
       val preparePayload = ByteWriter()
         .writeLong(term)
         .writeInt(config.nodeId)
         .writeLong(candidate.version)
         .writeLong(candidate.controllerTerm)
         .result()
-      val prepared = callPeers(bootstrapNodes.filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
+      val prepared = callPeers(quorum.voters.map(_.node).filterNot(_.id == config.nodeId), config.peerTimeoutMillis) { node =>
         val response = peerClient.call(node, InternalApi.MetadataPrepare, preparePayload, config.peerTimeoutMillis)
         val responseTerm = response.readLong()
         val accepted = response.readShort() == Errors.None
@@ -703,7 +706,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val preparedPeers = prepared.collect {
         case (node, (responseTerm, true)) if responseTerm == term => node
       }
-      if preparedPeers.size + 1 < bootstrapQuorumSize || currentTerm != term || role != ControllerRole.Leader then false
+      val preparedNodeIds = preparedPeers.map(_.id).toSet ++ Option.when(quorum.contains(config.nodeId))(config.nodeId)
+      if !quorum.hasQuorum(preparedNodeIds) || currentTerm != term || role != ControllerRole.Leader then false
       else
         val commitPayload = ByteWriter()
           .writeLong(term)
@@ -720,10 +724,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         committed.foreach { case (_, (responseTerm, _)) =>
           if responseTerm > term then synchronized(stepDownLocked(responseTerm, None))
         }
-        val committedPeers = committed.count {
-          case (_, (responseTerm, accepted)) => responseTerm == term && accepted
-        }
-        if committedPeers + 1 >= bootstrapQuorumSize && synchronized {
+        val committedNodeIds = committed.collect {
+          case (node, (responseTerm, true)) if responseTerm == term => node.id
+        }.toSet ++ Option.when(quorum.contains(config.nodeId))(config.nodeId)
+        if quorum.hasQuorum(committedNodeIds) && synchronized {
             role == ControllerRole.Leader && currentTerm == term
           }
         then
