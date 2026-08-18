@@ -39,6 +39,37 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("a classic group and its offsets continue from an installed snapshot") {
+    val directory = Files.createTempDirectory("cascade-group-snapshot-test")
+    val source = GroupCoordinator(directory.resolve("source-offsets.log"), scheduleExpiration = false)
+    val target = GroupCoordinator(directory.resolve("target-offsets.log"), scheduleExpiration = false)
+    try
+      val pending = source.join(command("", Array[Byte](1, 2)))
+      val joined = source.join(command(pending.memberId, Array[Byte](1, 2)))
+      val assignment = Array[Byte](7, 8, 9)
+      assertEquals(
+        source.sync("workers", joined.generationId, joined.memberId, Vector(joined.memberId -> assignment)).errorCode,
+        Errors.None
+      )
+      val key = GroupOffsetKey("workers", "events", 0)
+      val offset = CommittedOffset(88L, 2, Some("failover"), 1234L)
+      assertEquals(
+        source.commitOffsets("workers", joined.generationId, joined.memberId, Vector(OffsetCommitValue(key, offset))),
+        Errors.None
+      )
+
+      target.installSnapshot(source.snapshotBytes.toVector)
+      assertEquals(target.heartbeat("workers", joined.generationId, joined.memberId), Errors.None)
+      val restoredSync = target.sync("workers", joined.generationId, joined.memberId, Vector.empty)
+      assertEquals(restoredSync.errorCode, Errors.None)
+      assertEquals(restoredSync.assignment.toVector, assignment.toVector)
+      assertEquals(target.fetchOffset(key), Some(offset))
+    finally
+      source.close()
+      target.close()
+      deleteTree(directory)
+  }
+
   private def command(memberId: String, metadata: Array[Byte]): JoinGroupCommand =
     JoinGroupCommand(
       groupId = "workers",
