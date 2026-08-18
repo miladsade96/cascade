@@ -59,6 +59,30 @@ final class DeliveryStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("a quorum image can replace tentative memory without changing the local journal") {
+    val directory = Files.createTempDirectory("cascade-delivery-snapshot")
+    val path = directory.resolve("delivery.log")
+    val durable = DeliveryImage.Empty.copy(version = 1L, nextProducerId = 3L)
+    val tentative = durable.copy(version = 2L, nextProducerId = 4L)
+    try
+      val store = DeliveryStore(path)
+      try
+        store.commit(durable)
+        val journalSize = Files.size(path)
+        store.commit(tentative, durable = false)
+        assertEquals(store.image, tentative)
+        assertEquals(Files.size(path), journalSize)
+        store.install(durable)
+        assertEquals(store.image, durable)
+        assertEquals(Files.size(path), journalSize)
+      finally store.close()
+
+      val recovered = DeliveryStore(path)
+      try assertEquals(recovered.image, durable)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def sampleImage(version: Long, offsetsApplied: Boolean): DeliveryImage =
     val range = TransactionRange("events", 0, 10L, 19L)
     val offset = PendingOffset("workers", "events", 0, 20L, 3, Some("checkpoint"))

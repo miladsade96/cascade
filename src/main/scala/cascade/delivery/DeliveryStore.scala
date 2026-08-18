@@ -23,21 +23,28 @@ final class DeliveryStore(path: Path) extends AutoCloseable:
 
   def image: DeliveryImage = synchronized(current)
 
-  def commit(next: DeliveryImage): Unit = synchronized {
+  def commit(next: DeliveryImage, durable: Boolean = true): Unit = synchronized {
     ensureOpen()
     if next.version > current.version then
-      val payload = DeliveryCodec.encode(next)
-      val checksum = CRC32C()
-      checksum.update(payload, 0, payload.length)
-      val frame = ByteWriter(payload.length + 8)
-        .writeInt(payload.length)
-        .writeBytes(payload)
-        .writeInt(checksum.getValue.toInt)
-        .result()
-      writeFully(ByteBuffer.wrap(frame), appendPosition)
-      channel.force(false)
-      appendPosition += frame.length
+      if durable then
+        val payload = DeliveryCodec.encode(next)
+        val checksum = CRC32C()
+        checksum.update(payload, 0, payload.length)
+        val frame = ByteWriter(payload.length + 8)
+          .writeInt(payload.length)
+          .writeBytes(payload)
+          .writeInt(checksum.getValue.toInt)
+          .result()
+        writeFully(ByteBuffer.wrap(frame), appendPosition)
+        channel.force(false)
+        appendPosition += frame.length
       current = next
+  }
+
+  /** Replaces a tentative local view with the authoritative quorum image. */
+  def install(image: DeliveryImage): Unit = synchronized {
+    ensureOpen()
+    current = image
   }
 
   override def close(): Unit = synchronized {
