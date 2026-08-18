@@ -303,6 +303,71 @@ final class DeliveryCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("a transactional append is not acknowledged when its range misses the coordinator quorum") {
+    val directory = Files.createTempDirectory("cascade-delivery-range-quorum")
+    val stateLock = Object()
+    val registry = TopicRegistry(directory.resolve("data"), 1024 * 1024, FlushPolicy.Sync)
+    val groups = GroupCoordinator(directory.resolve("offsets.log"), stateLock, durableLocal = false, scheduleExpiration = false)
+    val delivery = DeliveryCoordinator(
+      directory.resolve("delivery.log"),
+      registry,
+      groups,
+      stateLock,
+      durableLocal = false,
+      scheduleExpiration = false
+    )
+    var reject = false
+    var committedGroup = groups.snapshotBytes.toVector
+    var committedDelivery = delivery.snapshotBytes.toVector
+    val checkpoint: CoordinatorCheckpoint = () =>
+      if reject then
+        groups.installSnapshot(committedGroup)
+        delivery.installSnapshot(committedDelivery)
+        false
+      else
+        committedGroup = groups.snapshotBytes.toVector
+        committedDelivery = delivery.snapshotBytes.toVector
+        true
+    groups.attachCheckpoint(checkpoint)
+    delivery.attachCheckpoint(checkpoint)
+    try
+      registry.getOrCreate("events")
+      val producer = delivery.initProducerId(Some("range-quorum"), 30_000)
+      assertEquals(
+        delivery.addPartitions(
+          "range-quorum",
+          producer.producerId,
+          producer.producerEpoch,
+          Vector(TopicPartition("events", 0))
+        ),
+        Errors.None
+      )
+      reject = true
+      val appended = delivery.append(
+        Some("range-quorum"),
+        "events",
+        0,
+        TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true),
+        -1,
+        30_000,
+        new ReplicatedAppender:
+          override def append(
+              topic: String,
+              partition: Int,
+              records: Array[Byte],
+              acknowledgements: Short,
+              timeoutMillis: Int
+          ): ReplicatedAppendResult = ReplicatedAppendResult(Errors.None, 0L)
+      )
+      assertEquals(appended.errorCode, Errors.CoordinatorNotAvailable)
+      assertEquals(delivery.image.activeTransactions.head.ranges, Vector.empty)
+    finally
+      delivery.close()
+      groups.close()
+      registry.close()
+      deleteTree(directory)
+  }
+
   private def withCoordinator(directory: java.nio.file.Path)(
       test: (DeliveryCoordinator, GroupCoordinator, TopicRegistry) => Unit
   ): Unit =

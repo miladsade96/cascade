@@ -257,18 +257,31 @@ final class DeliveryCoordinator(
           }
         }
         validation match
+          case Left(result) if result.errorCode == Errors.None && transactionalId.nonEmpty =>
+            val committed = stateLock.synchronized {
+              recordTransactionalRange(
+                transactionalId.get,
+                topicPartition,
+                result.baseOffset,
+                Math.addExact(result.baseOffset, span)
+              )
+            }
+            if committed then result else DeliveryAppendResult(Errors.CoordinatorNotAvailable, -1L)
           case Left(result) => result
           case Right(reservation) =>
             try
               val appended = replication.append(topic, partition, records, acknowledgements, timeoutMillis)
+              var coordinatorCommitted = true
               reservation.foreach { reserved =>
                 if appended.baseOffset < 0L then rollbackTransactionalAppend(reserved)
                 else if appended.baseOffset != reserved.firstOffset then
                   throw ProtocolException(
                     s"transactional append offset changed after reservation: reserved=${reserved.firstOffset}, appended=${appended.baseOffset}"
                   )
+                else coordinatorCommitted = commitTransactionalAppend()
               }
-              fromReplication(appended)
+              if coordinatorCommitted then fromReplication(appended)
+              else DeliveryAppendResult(Errors.CoordinatorNotAvailable, -1L)
             finally reservation.foreach(value => finishTransactionalAppend(value.transactionalId))
     }
 
@@ -399,6 +412,36 @@ final class DeliveryCoordinator(
       replaceActiveInMemory(active.copy(ranges = restored))
     }
   }
+
+  private def commitTransactionalAppend(): Boolean = stateLock.synchronized {
+    current = current.copy(version = Math.addExact(current.version, 1L))
+    checkpoint.commit()
+  }
+
+  private def recordTransactionalRange(
+      transactionalId: String,
+      topicPartition: TopicPartition,
+      firstOffset: Long,
+      lastOffset: Long
+  ): Boolean =
+    current.activeByTransactionalId.get(transactionalId) match
+      case None => false
+      case Some(active) =>
+        val previous = active.ranges.find(range =>
+          range.topic == topicPartition.topic && range.partition == topicPartition.partition
+        )
+        val updated = previous.fold(TransactionRange(topicPartition.topic, topicPartition.partition, firstOffset, lastOffset)) {
+          range => range.copy(firstOffset = math.min(range.firstOffset, firstOffset), lastOffset = math.max(range.lastOffset, lastOffset))
+        }
+        val next = active.copy(
+          ranges = active.ranges.filterNot(range =>
+            range.topic == topicPartition.topic && range.partition == topicPartition.partition
+          ) :+ updated
+        )
+        if next == active then true
+        else
+          replaceActiveInMemory(next)
+          commitTransactionalAppend()
 
   private def finishTransactionalAppend(transactionalId: String): Unit = stateLock.synchronized {
     val remaining = inFlightTransactionalAppends.getOrElse(transactionalId, 0) - 1
