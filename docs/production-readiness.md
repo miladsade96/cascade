@@ -19,7 +19,9 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 - Kafka-compatible `AlterPartitionReassignments` v0 and `ListPartitionReassignments` v0 Admin APIs.
 - Kafka-compatible `DescribeQuorum` v0-v2, `AddRaftVoter` v0-v1, and `RemoveRaftVoter` v0 Admin APIs.
 - Observer synchronization, joint-consensus admission/removal, interrupted-transition resume, partition-drain validation, and active-controller handoff.
-- Real Kafka 4.3.1 client tests for Admin, Producer, explicit Consumer, subscribed consumers, rebalancing, committed-offset recovery, broker restart, three/four-node replication, partition-leader shutdown, controller loss, stale-term rejection, post-election metadata changes, reassignment cancellation, reassignment through controller loss, voter admission, and active-controller removal/restart.
+- A versioned quorum image for classic-group membership and assignments, committed offsets, producer fencing, active transaction ranges, outcomes, and transactional offsets.
+- Stale coordinator-image rejection, rollback on quorum loss, controller-only expiry, and atomic transaction/outcome offset checkpoints.
+- Real Kafka 4.3.1 client tests for Admin, Producer, explicit Consumer, subscribed consumers, rebalancing, committed-offset recovery, broker restart, three/four-node replication, partition-leader shutdown, controller/coordinator loss, stale-term rejection, post-election metadata changes, reassignment cancellation, reassignment through controller loss, voter admission, active-controller removal/restart, and an open transaction completed after failover.
 - Exact-count load tests at one million and ten million records with latency, CPU, GC, heap, storage, and flush metrics.
 
 ## What I still need before a production release
@@ -28,13 +30,13 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 | --- | --- | --- |
 | Availability | At least three brokers, replicated partitions, ISR tracking, leader election, and verified recovery from broker, process, and disk loss | Graceful partition-leader and controller failover, persisted high-watermark recovery, incremental replica re-admission, and online reassignment pass; crash/power-loss qualification remains |
 | Metadata | Durable quorum controller, fencing, leader epochs, reassignment, and cluster membership changes | Durable election, leases, fencing, metadata images, leader epochs, resumable reassignment, and joint-consensus membership changes work; rolling-version and exhaustive failure qualification remain |
-| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Implemented and acceptance-tested in single-node mode; coordinator-state replication and failover still block cluster deployment |
+| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Implemented in single-node and clustered modes; Kafka-client open-transaction, fencing, visibility, and transactional-offset failover tests pass, while crash/power-loss qualification and coordinator scale tests remain |
 | Storage lifecycle | Time and size retention, log and offset compaction, timestamp and transaction indexes, disk-pressure handling, and safe deletion | Not implemented |
 | Security | TLS, SASL mechanisms, authorization and ACLs, audit events, and secret rotation | Not implemented |
 | Resource isolation | Client and user quotas, request and connection limits, bounded queues, overload shedding, and multi-tenant tests | Only frame bounds are implemented |
 | Operations | Metrics, health and readiness endpoints, structured logs, admin API coverage, backup and restore, and capacity alerts | Not implemented |
 | Compatibility | Supported-version contract, malformed-frame and fuzz tests, multiple client languages, and a rolling upgrade and downgrade matrix | Java-client coverage is partial |
-| Consumer groups | New consumer protocol, static-member fencing, administrative group APIs, offset retention and compaction, and coordinator failover | Classic groups are routed to the elected controller, but coordinator state is not replicated |
+| Consumer groups | New consumer protocol, static-member fencing, administrative group APIs, offset retention and compaction, and coordinator failover | Classic group generations, members, assignments, and offsets survive elected-coordinator loss; the new protocol, static fencing, admin APIs, retention, compaction, and scale qualification remain |
 | Qualification | Multi-day soak tests, crash, kill, and power-failure simulation, network partitions, disk-full and corruption tests, and repeatable dedicated-host benchmarks | Short correctness/load runs and a controlled replica restart/rejoin test are complete |
 
 ## When I will call it production ready
@@ -43,4 +45,4 @@ I won't describe a release as a Kafka replacement until every blocking row above
 
 When I publish a performance result, I'll include the hardware, durability policy, workload, client configuration, and exact delivery count. When I claim compatibility, I'll list the API keys and versions instead of just saying "Kafka compatible."
 
-My next milestone is replicated group, offset, producer, and transaction coordinator state so controller failover preserves those services. I also need automated crash, power-loss, and network-partition qualification during both phases of a voter change.
+My next milestone is automated crash, kill, power-loss, and network-partition qualification during ordinary coordinator writes and both phases of a voter change. After that I need retention/compaction and a sharded coordinator design so the current full-image path does not become a high-cardinality bottleneck.

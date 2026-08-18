@@ -123,6 +123,8 @@ After adding durable online partition reassignment, I ran the same one-million-r
 
 After adding dynamic voter membership and rollback for failed uncommitted `acks=all` attempts, I repeated the one-million-record regression on 2026-08-17. It consumed exactly **1,000,000 / 1,000,000** records at **367,202 produced records/s** and **250,135 consumed records/s**. Produce elapsed time was 2.723 seconds, consume elapsed time was 3.998 seconds, maximum acknowledgement latency was 1,265.882 ms, and peak heap was 1,311.1 MiB. The producer phase used 7.43 CPU cores in the shared JVM, so I record this as a correctness/regression pass rather than a new capacity result.
 
+After adding quorum-replicated classic-group, offset, producer, and transaction state, I ran a clean **83/83** test suite and repeated the same one-million-record regression on 2026-08-18. It consumed exactly **1,000,000 / 1,000,000** records at **510,714 produced records/s** (**498.7 MiB/s**) and **263,637 consumed records/s** (**257.5 MiB/s**). Produce elapsed time was 1.958 seconds, consume elapsed time was 3.793 seconds, maximum acknowledgement latency was 536.512 ms, and peak heap was 1,335.7 MiB. The run forced 586.5 MiB in eight operations and left 399.7 MiB for the clean-shutdown force. Because the coordinator path is idle in this assigned-consumer harness, I use this as a hot-path regression and exactness check, not as a coordinator-capacity benchmark.
+
 ## My conclusion
 
 I fixed the bad flush behavior, the exact record checks pass, and sustained write performance improved a lot. On this development machine, explicit periodic persistence now tops out around 178 MiB/s.
