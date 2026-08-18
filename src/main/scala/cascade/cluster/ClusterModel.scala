@@ -98,11 +98,25 @@ final case class PartitionMetadata(
 
 final case class TopicMetadata(name: String, partitions: Vector[PartitionMetadata])
 
+/** One quorum-committed image for every coordinator service hosted by the elected controller. */
+final case class CoordinatorMetadata(
+    version: Long,
+    ownerTerm: Long,
+    groupState: Vector[Byte],
+    deliveryState: Vector[Byte]
+):
+  require(version >= 0L, "coordinator version must be non-negative")
+  require(ownerTerm >= 0L, "coordinator owner term must be non-negative")
+
+object CoordinatorMetadata:
+  val Empty: CoordinatorMetadata = CoordinatorMetadata(0L, 0L, Vector.empty, Vector.empty)
+
 final case class ClusterMetadata(
     version: Long,
     topics: Vector[TopicMetadata],
     controllerTerm: Long = 0L,
-    membership: Option[QuorumMembership] = None
+    membership: Option[QuorumMembership] = None,
+    coordinator: CoordinatorMetadata = CoordinatorMetadata.Empty
 ):
   require(version >= 0L, "metadata version must be non-negative")
   require(controllerTerm >= 0L, "metadata controller term must be non-negative")
