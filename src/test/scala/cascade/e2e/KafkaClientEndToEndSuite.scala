@@ -374,6 +374,81 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("a classic consumer group keeps its committed position through coordinator failover") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-group-failover-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 3,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 800,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 600
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      val consumer = KafkaConsumer[Array[Byte], Array[Byte]](
+        groupConsumerProperties(bootstrapServers, "failover-workers")
+      )
+      try
+        admin.createTopics(java.util.List.of(new NewTopic("group-failover-events", 1, 3.toShort)))
+          .all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, "group-failover-events", 0, Set(1, 2, 3))
+        (0 until 10).foreach { index =>
+          produceValue(bootstrapServers, "group-failover-events", 0, s"before-$index", expectedOffset = index.toLong)
+        }
+
+        consumer.subscribe(java.util.List.of("group-failover-events"))
+        assertEquals(pollValues(consumer, expected = 10), (0 until 10).map(index => s"before-$index").toVector)
+        consumer.commitSync()
+
+        val firstController = awaitController(admin)
+        brokers(firstController - 1).close()
+        val nextController = awaitController(admin, excludedId = Some(firstController))
+        assertNotEquals(nextController, firstController)
+        awaitInSyncReplicas(admin, "group-failover-events", 0, Set(1, 2, 3) - firstController)
+
+        (0 until 5).foreach { index =>
+          produceValue(
+            bootstrapServers,
+            "group-failover-events",
+            0,
+            s"after-$index",
+            expectedOffset = 10L + index
+          )
+        }
+        assertEquals(pollValues(consumer, expected = 5), (0 until 5).map(index => s"after-$index").toVector)
+        consumer.commitSync()
+
+        val verifier = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(bootstrapServers, "failover-workers")
+        )
+        try
+          val partition = TopicPartition("group-failover-events", 0)
+          assertEquals(Option(verifier.committed(java.util.Set.of(partition)).get(partition)).map(_.offset()), Some(15L))
+        finally verifier.close()
+      finally
+        consumer.close()
+        admin.close(Duration.ofSeconds(5))
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
   test("an isolated controller loses its quorum lease and fences replica writes") {
     val ports = freePorts(3)
     val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
