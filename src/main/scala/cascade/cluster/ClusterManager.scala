@@ -85,6 +85,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var electionDeadlineNanos = Long.MaxValue
   @volatile private var nextHeartbeatNanos = 0L
   @volatile private var replicationManager: ReplicationManager | Null = null
+  @volatile private var coordinatorInstaller: (CoordinatorMetadata => Unit) | Null = null
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
   private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
@@ -100,6 +101,14 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     if replicationManager != null then throw IllegalStateException("replication manager is already attached")
     replicationManager = manager
   }
+
+  def attachCoordinatorInstaller(installer: CoordinatorMetadata => Unit): Unit =
+    val initial = synchronized {
+      if coordinatorInstaller != null then throw IllegalStateException("coordinator installer is already attached")
+      coordinatorInstaller = installer
+      current.coordinator
+    }
+    installer(initial)
 
   def start(): Unit =
     if enabled && replicationManager == null then throw IllegalStateException("replication manager is not attached")
@@ -129,6 +138,24 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def metadataVersion: Long = current.version
 
   def quorumMembership: QuorumMembership = effectiveMembership
+
+  def coordinatorMetadata: CoordinatorMetadata = current.coordinator
+
+  /** Commits one complete coordinator image, forwarding to the active controller when necessary. */
+  def commitCoordinatorState(
+      expectedVersion: Long,
+      groupState: Vector[Byte],
+      deliveryState: Vector[Byte]
+  ): Boolean =
+    if !enabled then true
+    else
+      controllerNode match
+        case Some(controller) if controller.id == config.nodeId =>
+          metadataMutationLock.synchronized {
+            commitCoordinatorOnController(expectedVersion, groupState, deliveryState) == Errors.None
+          }
+        case Some(controller) => forwardCoordinatorCommit(controller, expectedVersion, groupState, deliveryState)
+        case None             => false
 
   def isActiveController: Boolean =
     !enabled || synchronized {
@@ -247,6 +274,15 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       cursor.ensureFullyRead()
       val result = metadataMutationLock.synchronized(removeVoterOnController(nodeId, directoryId))
       ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
+    case InternalApi.CoordinatorCommit =>
+      val expectedVersion = cursor.readLong()
+      val groupState = cursor.readByteArray().toVector
+      val deliveryState = cursor.readByteArray().toVector
+      cursor.ensureFullyRead()
+      val error = metadataMutationLock.synchronized {
+        commitCoordinatorOnController(expectedVersion, groupState, deliveryState)
+      }
+      ByteWriter().writeShort(error).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataSnapshot => metadataSnapshot(cursor)
@@ -849,7 +885,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case CreateTopicResult.InvalidName => ClusterCreateResult(Errors.InvalidTopic, Some("invalid topic name"))
 
   private def propose(next: ClusterMetadata): Boolean =
-    val candidate = next.copy(membership = next.membership.orElse(current.membership).orElse(bootstrapMembership))
+    val coordinator =
+      if next.coordinator.version >= current.coordinator.version then next.coordinator else current.coordinator
+    val candidate = next.copy(
+      membership = next.membership.orElse(current.membership).orElse(bootstrapMembership),
+      coordinator = coordinator
+    )
     val leadership = synchronized {
       Option.when(
         role == ControllerRole.Leader && electedControllerId == config.nodeId && candidate.controllerTerm == currentTerm &&
@@ -915,7 +956,51 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     metadataStore.foreach(_.commit(metadata))
     current = metadata
     applyMetadata(metadata)
+    Option(coordinatorInstaller).foreach(_(metadata.coordinator))
   }
+
+  private def commitCoordinatorOnController(
+      expectedVersion: Long,
+      groupState: Vector[Byte],
+      deliveryState: Vector[Byte]
+  ): Short =
+    if !isActiveController then Errors.NotController
+    else if current.coordinator.version != expectedVersion then Errors.CoordinatorLoadInProgress
+    else
+      val nextCoordinator = CoordinatorMetadata(
+        Math.addExact(expectedVersion, 1L),
+        currentTerm,
+        groupState,
+        deliveryState
+      )
+      val next = current.copy(
+        version = Math.addExact(current.version, 1L),
+        controllerTerm = currentTerm,
+        coordinator = nextCoordinator
+      )
+      if propose(next) then Errors.None else Errors.RequestTimedOut
+
+  private def forwardCoordinatorCommit(
+      controller: ClusterNode,
+      expectedVersion: Long,
+      groupState: Vector[Byte],
+      deliveryState: Vector[Byte]
+  ): Boolean =
+    try
+      val response = peerClient.call(
+        controller,
+        InternalApi.CoordinatorCommit,
+        ByteWriter()
+          .writeLong(expectedVersion)
+          .writeByteArray(groupState.toArray)
+          .writeByteArray(deliveryState.toArray)
+          .result(),
+        config.peerTimeoutMillis
+      )
+      val accepted = response.readShort() == Errors.None
+      response.ensureFullyRead()
+      accepted && synchronizeFrom(controller)
+    catch case _: Throwable => false
 
   private def applyMetadata(metadata: ClusterMetadata): Unit =
     metadata.topics.foreach { topic =>

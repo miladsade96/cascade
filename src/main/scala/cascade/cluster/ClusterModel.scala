@@ -135,6 +135,7 @@ object InternalApi:
   val ControllerHeartbeat: Short = -106
   val AddVoter: Short = -107
   val RemoveVoter: Short = -108
+  val CoordinatorCommit: Short = -109
   val ReplicaAppend: Short = -110
   val ReplicaCommit: Short = -111
   val ReplicaCatchUp: Short = -112
