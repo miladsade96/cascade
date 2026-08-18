@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, ReplicationManager}
+import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
@@ -22,12 +23,20 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     config.flushIntervalMillis,
     config.flushBytes
   )
-  private val groupCoordinator = GroupCoordinator(config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"))
+  private val coordinatorLock = Object()
+  private val clustered = config.clusterNodes.nonEmpty
+  private val groupCoordinator = GroupCoordinator(
+    config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"),
+    coordinatorLock,
+    durableLocal = !clustered,
+    scheduleExpiration = !clustered
+  )
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null
   @volatile private var clusterManager: ClusterManager | Null = null
   @volatile private var replicationManager: ReplicationManager | Null = null
   @volatile private var deliveryCoordinator: DeliveryCoordinator | Null = null
+  @volatile private var coordinatorStateMachine: CoordinatorStateMachine | Null = null
   @volatile private var peerClient: PeerClient | Null = null
 
   def start(): Unit = synchronized {
@@ -40,11 +49,20 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
     cluster.attachReplicationManager(replication)
-    val delivery = DeliveryCoordinator(config.dataDirectory.resolve(".cascade").resolve("delivery-state.log"), registry, groupCoordinator)
+    val delivery = DeliveryCoordinator(
+      config.dataDirectory.resolve(".cascade").resolve("delivery-state.log"),
+      registry,
+      groupCoordinator,
+      coordinatorLock,
+      durableLocal = !clustered,
+      scheduleExpiration = !clustered
+    )
+    val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery, coordinatorLock))
     peerClient = peers
     clusterManager = cluster
     replicationManager = replication
     deliveryCoordinator = delivery
+    coordinatorStateMachine = coordinatorState.orNull
     handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort)
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
@@ -66,6 +84,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
       connections.shutdownNow()
       Option(acceptThread).foreach(_.join(5000))
       connections.awaitTermination(5, TimeUnit.SECONDS)
+      Option(coordinatorStateMachine).foreach(_.close())
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
       Option(peerClient).foreach(_.close())
