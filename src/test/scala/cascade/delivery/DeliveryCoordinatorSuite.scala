@@ -2,6 +2,7 @@ package cascade.delivery
 
 import cascade.TestRecordBatch
 import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
+import cascade.coordinator.CoordinatorCheckpoint
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
 import cascade.protocol.Errors
 import cascade.storage.{FlushPolicy, TopicPartition, TopicRegistry}
@@ -243,6 +244,61 @@ final class DeliveryCoordinatorSuite extends FunSuite:
       target.close()
       sourceGroups.close()
       targetGroups.close()
+      registry.close()
+      deleteTree(directory)
+  }
+
+  test("cluster mode commits a transaction outcome and its consumer offsets in one checkpoint") {
+    val directory = Files.createTempDirectory("cascade-delivery-atomic-image")
+    val stateLock = Object()
+    val registry = TopicRegistry(directory.resolve("data"), 1024 * 1024, FlushPolicy.Sync)
+    val groups = GroupCoordinator(
+      directory.resolve("offsets.log"),
+      stateLock,
+      durableLocal = false,
+      scheduleExpiration = false
+    )
+    val delivery = DeliveryCoordinator(
+      directory.resolve("delivery.log"),
+      registry,
+      groups,
+      stateLock,
+      durableLocal = false,
+      scheduleExpiration = false
+    )
+    var checkpoints = 0
+    val checkpoint: CoordinatorCheckpoint = () =>
+      checkpoints += 1
+      true
+    groups.attachCheckpoint(checkpoint)
+    delivery.attachCheckpoint(checkpoint)
+    try
+      registry.getOrCreate("events")
+      val producer = delivery.initProducerId(Some("atomic"), 30_000)
+      assertEquals(
+        delivery.addPartitions("atomic", producer.producerId, producer.producerEpoch, Vector(TopicPartition("events", 0))),
+        Errors.None
+      )
+      assertEquals(delivery.addOffsets("atomic", producer.producerId, producer.producerEpoch, "workers"), Errors.None)
+      assertEquals(
+        delivery.stageOffsets(
+          "atomic",
+          producer.producerId,
+          producer.producerEpoch,
+          "workers",
+          Vector(PendingOffset("workers", "events", 0, 44L, 2, Some("atomic")))
+        ),
+        Errors.None
+      )
+      val beforeEnd = checkpoints
+
+      assertEquals(delivery.endTransaction("atomic", producer.producerId, producer.producerEpoch, committed = true), Errors.None)
+      assertEquals(checkpoints - beforeEnd, 1)
+      assertEquals(groups.fetchOffset(GroupOffsetKey("workers", "events", 0)).map(_.offset), Some(44L))
+      assert(delivery.image.completedTransactions.last.offsetsApplied)
+    finally
+      delivery.close()
+      groups.close()
       registry.close()
       deleteTree(directory)
   }

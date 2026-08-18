@@ -228,6 +228,12 @@ final class GroupCoordinator(
 
   def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = offsets.all(groupId)
 
+  /** Stages offsets inside a caller-owned combined coordinator checkpoint. */
+  private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
+    offsets.commit(values, durableLocal)
+    stateVersion = Math.addExact(stateVersion, 1L)
+  }
+
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
       expirationExecutor.foreach { executor =>

@@ -189,12 +189,14 @@ final class DeliveryCoordinator(
     activeFor(transactionalId, producerId, producerEpoch) match
       case Left(error) => error
       case Right(active) =>
+        val useAtomicSnapshot = !durableLocal && committed && active.pendingOffsets.nonEmpty
+        if useAtomicSnapshot then groups.stageReplicatedOffsets(offsetValues(active.pendingOffsets))
         val completed = CompletedTransaction(
           transactionalId,
           producerId,
           producerEpoch,
           committed,
-          offsetsApplied = !committed || active.pendingOffsets.isEmpty,
+          offsetsApplied = !committed || active.pendingOffsets.isEmpty || useAtomicSnapshot,
           active.ranges,
           if committed then active.pendingOffsets else Vector.empty
         )
@@ -206,7 +208,7 @@ final class DeliveryCoordinator(
           )
         )
         if !transitionCommitted then return Errors.CoordinatorNotAvailable
-        if committed && completed.pendingOffsets.nonEmpty then
+        if committed && completed.pendingOffsets.nonEmpty && !useAtomicSnapshot then
           applyOffsets(completed.pendingOffsets)
           if !markOffsetsApplied(completed) then return Errors.CoordinatorNotAvailable
         Errors.None
@@ -476,19 +478,22 @@ final class DeliveryCoordinator(
       ): Unit
 
   private def applyOffsets(values: Vector[PendingOffset]): Unit =
-    val now = System.currentTimeMillis()
-    values.groupBy(_.groupId).foreach { case (groupId, offsets) =>
+    offsetValues(values).groupBy(_.key.groupId).foreach { case (groupId, offsets) =>
       groups.commitOffsets(
         groupId,
         -1,
         "",
-        offsets.map { value =>
-          OffsetCommitValue(
-            GroupOffsetKey(groupId, value.topic, value.partition),
-            CommittedOffset(value.offset, value.leaderEpoch, value.metadata, now)
-          )
-        }
+        offsets
       ): Unit
+    }
+
+  private def offsetValues(values: Vector[PendingOffset]): Vector[OffsetCommitValue] =
+    val now = System.currentTimeMillis()
+    values.map { value =>
+      OffsetCommitValue(
+        GroupOffsetKey(value.groupId, value.topic, value.partition),
+        CommittedOffset(value.offset, value.leaderEpoch, value.metadata, now)
+      )
     }
 
   private def replayCommittedOffsets(): Unit = stateLock.synchronized {
