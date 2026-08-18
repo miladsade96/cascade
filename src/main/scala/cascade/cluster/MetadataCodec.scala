@@ -3,7 +3,7 @@ package cascade.cluster
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 
 object MetadataCodec:
-  private val FormatVersion: Short = 4
+  private val FormatVersion: Short = 5
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     val writer = ByteWriter()
@@ -25,6 +25,10 @@ object MetadataCodec:
       writeVoters(writer, membership.currentVoters)
       writeVoters(writer, membership.nextVoters)
     }
+    writer.writeLong(metadata.coordinator.version)
+    writer.writeLong(metadata.coordinator.ownerTerm)
+    writer.writeByteArray(metadata.coordinator.groupState.toArray)
+    writer.writeByteArray(metadata.coordinator.deliveryState.toArray)
     writer.result()
 
   def decode(bytes: Array[Byte]): ClusterMetadata =
@@ -60,8 +64,17 @@ object MetadataCodec:
       if format >= 4 && cursor.readBoolean() then
         Some(QuorumMembership(readVoters(cursor), readVoters(cursor)))
       else None
+    val coordinator =
+      if format >= 5 then
+        CoordinatorMetadata(
+          cursor.readLong(),
+          cursor.readLong(),
+          cursor.readByteArray().toVector,
+          cursor.readByteArray().toVector
+        )
+      else CoordinatorMetadata.Empty
     cursor.ensureFullyRead()
-    ClusterMetadata(version, topics, controllerTerm, membership)
+    ClusterMetadata(version, topics, controllerTerm, membership, coordinator)
 
   private def writeVoters(writer: ByteWriter, voters: Vector[QuorumVoter]): Unit =
     writer.writeArray(voters) { voter =>

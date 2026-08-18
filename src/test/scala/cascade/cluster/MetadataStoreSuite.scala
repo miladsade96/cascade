@@ -128,6 +128,29 @@ final class MetadataStoreSuite extends FunSuite:
     assertEquals(MetadataCodec.decode(legacy), ClusterMetadata(10L, Vector.empty, 8L, membership = None))
   }
 
+  test("coordinator images round-trip and version four defaults them to empty") {
+    val coordinator = CoordinatorMetadata(
+      version = 17L,
+      ownerTerm = 9L,
+      groupState = Vector[Byte](1, 2, 3),
+      deliveryState = Vector[Byte](4, 5, 6)
+    )
+    val metadata = ClusterMetadata(21L, Vector.empty, 9L, coordinator = coordinator)
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata)), metadata)
+
+    val legacy = ByteWriter()
+      .writeShort(4)
+      .writeLong(20L)
+      .writeLong(8L)
+      .writeArray(Vector.empty[TopicMetadata])(_ => ())
+      .writeBoolean(false)
+      .result()
+    assertEquals(
+      MetadataCodec.decode(legacy),
+      ClusterMetadata(20L, Vector.empty, 8L, membership = None, coordinator = CoordinatorMetadata.Empty)
+    )
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
