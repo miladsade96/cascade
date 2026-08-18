@@ -24,8 +24,9 @@ final class CoordinatorStateMachine(
   expirationExecutor.scheduleWithFixedDelay(
     () =>
       try
-        groups.expireNow()
-        delivery.expireNow()
+        if cluster.isActiveController then
+          groups.expireNow()
+          delivery.expireNow()
       catch case error: Throwable => System.err.println(s"Cascade coordinator expiration failed: ${error.getMessage}"),
     1L,
     1L,

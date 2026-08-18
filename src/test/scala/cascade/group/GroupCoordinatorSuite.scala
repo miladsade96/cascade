@@ -1,5 +1,6 @@
 package cascade.group
 
+import cascade.coordinator.CoordinatorCheckpoint
 import cascade.protocol.Errors
 import java.nio.file.Files
 import munit.FunSuite
@@ -67,6 +68,30 @@ final class GroupCoordinatorSuite extends FunSuite:
     finally
       source.close()
       target.close()
+      deleteTree(directory)
+  }
+
+  test("a failed coordinator checkpoint restores the last acknowledged group image") {
+    val directory = Files.createTempDirectory("cascade-group-checkpoint-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    try
+      val pending = coordinator.join(command("", Array[Byte](1, 2, 3)))
+      val acknowledged = coordinator.snapshotBytes.toVector
+      coordinator.attachCheckpoint(new CoordinatorCheckpoint:
+        override def commit(): Boolean =
+          coordinator.installSnapshot(acknowledged)
+          false
+      )
+
+      val rejected = coordinator.join(command(pending.memberId, Array[Byte](1, 2, 3)))
+      assertEquals(rejected.errorCode, Errors.CoordinatorNotAvailable)
+
+      coordinator.attachCheckpoint(CoordinatorCheckpoint.Local)
+      val retried = coordinator.join(command(pending.memberId, Array[Byte](1, 2, 3)))
+      assertEquals(retried.errorCode, Errors.None)
+      assertEquals(retried.generationId, 1)
+    finally
+      coordinator.close()
       deleteTree(directory)
   }
 

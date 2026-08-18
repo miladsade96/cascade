@@ -365,6 +365,7 @@ final class GroupCoordinator(
 
   private def installImage(image: GroupImage): Unit =
     groups.clear()
+    val installedAtMillis = System.currentTimeMillis()
     image.groups.foreach { stored =>
       val group = ManagedGroup()
       group.phase = stored.status
@@ -381,7 +382,7 @@ final class GroupCoordinator(
           value.rebalanceTimeoutMillis,
           value.protocols.map(protocol => GroupProtocol(protocol.name, protocol.metadata.toArray)),
           value.clientId,
-          value.lastHeartbeatMillis
+          installedAtMillis
         )
         member.assignment = value.assignment.toArray
         group.members.update(member.memberId, member)
