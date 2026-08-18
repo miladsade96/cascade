@@ -449,6 +449,99 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
+  test("an open Kafka transaction commits with its offsets after coordinator failover") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-transaction-failover-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = node.port,
+        advertisedHost = node.host,
+        advertisedPort = Some(node.port),
+        dataDirectory = directory,
+        flushPolicy = FlushPolicy.Sync,
+        nodeId = node.id,
+        clusterNodes = nodes,
+        controllerId = 1,
+        defaultReplicationFactor = 3,
+        minInSyncReplicas = 2,
+        peerTimeoutMillis = 800,
+        controllerHeartbeatMillis = 100,
+        controllerElectionTimeoutMillis = 600
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    val topic = "transaction-failover-events"
+    val groupId = "transaction-failover-workers"
+    val partition = TopicPartition(topic, 0)
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](
+        transactionalProducerProperties(bootstrapServers, "failover-transactional-producer")
+      )
+      try
+        admin.createTopics(java.util.List.of(new NewTopic(topic, 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, topic, 0, Set(1, 2, 3))
+        producer.initTransactions()
+        producer.beginTransaction()
+        producer.send(ProducerRecord(topic, "spans-failover".getBytes(StandardCharsets.UTF_8))).get(15, TimeUnit.SECONDS)
+        producer.sendOffsetsToTransaction(
+          Map(partition -> OffsetAndMetadata(1L)).asJava,
+          classicGroupMetadata(groupId)
+        )
+
+        val firstController = awaitController(admin)
+        brokers(firstController - 1).close()
+        val nextController = awaitController(admin, excludedId = Some(firstController))
+        assertNotEquals(nextController, firstController)
+        awaitInSyncReplicas(admin, topic, 0, Set(1, 2, 3) - firstController)
+        producer.commitTransaction()
+
+        val committedReader = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(bootstrapServers, readCommitted = true)
+        )
+        try
+          committedReader.assign(java.util.List.of(partition))
+          committedReader.seekToBeginning(java.util.List.of(partition))
+          assertEquals(pollValues(committedReader, expected = 1), Vector("spans-failover"))
+        finally committedReader.close()
+
+        val groupReader = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(bootstrapServers, groupId)
+        )
+        try
+          assertEquals(Option(groupReader.committed(java.util.Set.of(partition)).get(partition)).map(_.offset()), Some(1L))
+        finally groupReader.close()
+
+        val successor = KafkaProducer[Array[Byte], Array[Byte]](
+          transactionalProducerProperties(bootstrapServers, "failover-transactional-producer")
+        )
+        try
+          successor.initTransactions()
+          successor.beginTransaction()
+          val appended = successor.send(ProducerRecord(topic, "after-failover".getBytes(StandardCharsets.UTF_8)))
+            .get(15, TimeUnit.SECONDS)
+          assertEquals(appended.offset(), 1L)
+          successor.commitTransaction()
+        finally successor.close(Duration.ofSeconds(5))
+      finally
+        producer.close(Duration.ofSeconds(5))
+        admin.close(Duration.ofSeconds(5))
+
+      val verifier = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers, readCommitted = true))
+      try
+        verifier.assign(java.util.List.of(partition))
+        verifier.seekToBeginning(java.util.List.of(partition))
+        assertEquals(pollValues(verifier, expected = 2), Vector("spans-failover", "after-failover"))
+      finally verifier.close()
+    finally
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
   test("an isolated controller loses its quorum lease and fences replica writes") {
     val ports = freePorts(3)
     val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
