@@ -1,6 +1,7 @@
 package cascade.delivery
 
 import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
+import cascade.coordinator.CoordinatorCheckpoint
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
 import cascade.protocol.{Errors, ProtocolException}
 import cascade.storage.{RecordBatch, RecordBatchMetadata, TopicPartition, TopicRegistry}
@@ -22,24 +23,42 @@ private final case class TransactionReservation(
 final class DeliveryCoordinator(
     statePath: Path,
     registry: TopicRegistry,
-    groups: GroupCoordinator
+    groups: GroupCoordinator,
+    stateLock: Object = Object(),
+    durableLocal: Boolean = true,
+    scheduleExpiration: Boolean = true
 ) extends AutoCloseable:
   private val MaximumTransactionTimeoutMillis = 15 * 60 * 1000
   private val store = DeliveryStore(statePath)
   private val partitionLocks = ConcurrentHashMap[TopicPartition, Object]()
   private val inFlightTransactionalAppends = mutable.HashMap.empty[String, Int]
   private val closed = AtomicBoolean(false)
-  private val expirationExecutor: ScheduledExecutorService =
+  private var checkpoint: CoordinatorCheckpoint = CoordinatorCheckpoint.Local
+  private val expirationExecutor: Option[ScheduledExecutorService] = Option.when(scheduleExpiration) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-transaction-expirer").factory())
+  }
   @volatile private var current = store.image
 
   recoverActiveRanges()
   replayCommittedOffsets()
-  expirationExecutor.scheduleWithFixedDelay(() => expireTransactions(), 1L, 1L, TimeUnit.SECONDS): Unit
+  expirationExecutor.foreach(_.scheduleWithFixedDelay(() => expireNow(), 1L, 1L, TimeUnit.SECONDS): Unit)
 
   def image: DeliveryImage = current
 
-  def initProducerId(transactionalId: Option[String], timeoutMillis: Int): InitProducerIdResult = synchronized {
+  def snapshotBytes: Array[Byte] = stateLock.synchronized(DeliveryCodec.encode(current))
+
+  def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
+    val image = if bytes.isEmpty then DeliveryImage.Empty else DeliveryCodec.decode(bytes.toArray)
+    store.install(image)
+    current = image
+    stateLock.notifyAll()
+  }
+
+  def attachCheckpoint(value: CoordinatorCheckpoint): Unit = stateLock.synchronized {
+    checkpoint = value
+  }
+
+  def initProducerId(transactionalId: Option[String], timeoutMillis: Int): InitProducerIdResult = stateLock.synchronized {
     transactionalId.foreach(awaitTransactionalAppends)
     expireTransactionsLocked(System.currentTimeMillis())
     if transactionalId.exists(_.isEmpty) then
@@ -64,7 +83,7 @@ final class DeliveryCoordinator(
             )
           }
           val replacement = ProducerRegistration(producerId, epoch, transactionalId, timeoutMillis)
-          commit(
+          val committed = commit(
             current.copy(
               version = current.version + 1L,
               nextProducerId = if producerId == current.nextProducerId then current.nextProducerId + 1L else current.nextProducerId,
@@ -73,18 +92,20 @@ final class DeliveryCoordinator(
               completedTransactions = current.completedTransactions ++ completed
             )
           )
-          InitProducerIdResult(Errors.None, producerId, epoch)
+          if committed then InitProducerIdResult(Errors.None, producerId, epoch)
+          else InitProducerIdResult(Errors.CoordinatorNotAvailable, -1L, -1)
         case None =>
           val producerId = current.nextProducerId
           val producer = ProducerRegistration(producerId, 0, transactionalId, timeoutMillis)
-          commit(
+          val committed = commit(
             current.copy(
               version = current.version + 1L,
               nextProducerId = producerId + 1L,
               producers = current.producers :+ producer
             )
           )
-          InitProducerIdResult(Errors.None, producerId, 0)
+          if committed then InitProducerIdResult(Errors.None, producerId, 0)
+          else InitProducerIdResult(Errors.CoordinatorNotAvailable, -1L, -1)
   }
 
   def addPartitions(
@@ -92,7 +113,7 @@ final class DeliveryCoordinator(
       producerId: Long,
       producerEpoch: Short,
       partitions: Vector[TopicPartition]
-  ): Short = synchronized {
+  ): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
     validateProducer(transactionalId, producerId, producerEpoch) match
@@ -117,16 +138,16 @@ final class DeliveryCoordinator(
               )
             )
             val next = active.copy(partitions = (active.partitions ++ partitions).distinct)
-            commit(
+            val committed = commit(
               current.copy(
                 version = current.version + 1L,
                 activeTransactions = current.activeTransactions.filterNot(_.transactionalId == transactionalId) :+ next
               )
             )
-            Errors.None
+            if committed then Errors.None else Errors.CoordinatorNotAvailable
   }
 
-  def addOffsets(transactionalId: String, producerId: Long, producerEpoch: Short, groupId: String): Short = synchronized {
+  def addOffsets(transactionalId: String, producerId: Long, producerEpoch: Short, groupId: String): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
     activeFor(transactionalId, producerId, producerEpoch) match
@@ -134,8 +155,7 @@ final class DeliveryCoordinator(
       case Right(active) if groupId.isEmpty => Errors.InvalidGroupId
       case Right(active) =>
         val next = active.copy(groups = (active.groups :+ groupId).distinct)
-        replaceActive(next)
-        Errors.None
+        if replaceActive(next) then Errors.None else Errors.CoordinatorNotAvailable
   }
 
   def stageOffsets(
@@ -144,7 +164,7 @@ final class DeliveryCoordinator(
       producerEpoch: Short,
       groupId: String,
       offsets: Vector[PendingOffset]
-  ): Short = synchronized {
+  ): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
     activeFor(transactionalId, producerId, producerEpoch) match
@@ -155,8 +175,7 @@ final class DeliveryCoordinator(
         val next = active.copy(
           pendingOffsets = active.pendingOffsets.filterNot(value => keys((value.groupId, value.topic, value.partition))) ++ offsets
         )
-        replaceActive(next)
-        Errors.None
+        if replaceActive(next) then Errors.None else Errors.CoordinatorNotAvailable
   }
 
   def endTransaction(
@@ -164,7 +183,7 @@ final class DeliveryCoordinator(
       producerId: Long,
       producerEpoch: Short,
       committed: Boolean
-  ): Short = synchronized {
+  ): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
     activeFor(transactionalId, producerId, producerEpoch) match
@@ -179,16 +198,17 @@ final class DeliveryCoordinator(
           active.ranges,
           if committed then active.pendingOffsets else Vector.empty
         )
-        commit(
+        val transitionCommitted = commit(
           current.copy(
             version = current.version + 1L,
             activeTransactions = current.activeTransactions.filterNot(_.transactionalId == transactionalId),
             completedTransactions = current.completedTransactions :+ completed
           )
         )
+        if !transitionCommitted then return Errors.CoordinatorNotAvailable
         if committed && completed.pendingOffsets.nonEmpty then
           applyOffsets(completed.pendingOffsets)
-          markOffsetsApplied(completed)
+          if !markOffsetsApplied(completed) then return Errors.CoordinatorNotAvailable
         Errors.None
   }
 
@@ -218,7 +238,7 @@ final class DeliveryCoordinator(
         else fromReplication(replication.append(topic, partition, records, acknowledgements, timeoutMillis))
       else
         val span = batches.last.lastOffset - batches.head.baseOffset
-        val validation = synchronized {
+        val validation = stateLock.synchronized {
           expireTransactionsLocked(System.currentTimeMillis())
           validateBatchSequence(transactionalId, topicPartition, batches, log.get.recentBatches(producerId)).map { _ =>
             transactionalId.map { id =>
@@ -251,7 +271,7 @@ final class DeliveryCoordinator(
     }
 
   def lastStableOffset(topic: String, partition: Int, highWatermark: Long): Long =
-    expireTransactions()
+    expireNow()
     current.activeTransactions.iterator
       .flatMap(_.ranges.iterator)
       .filter(range => range.topic == topic && range.partition == partition)
@@ -278,8 +298,10 @@ final class DeliveryCoordinator(
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
-      expirationExecutor.shutdownNow(): Unit
-      expirationExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
+      expirationExecutor.foreach { executor =>
+        executor.shutdownNow(): Unit
+        executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
+      }
       store.close()
 
   private def validateBatchSequence(
@@ -366,7 +388,7 @@ final class DeliveryCoordinator(
     )
     TransactionReservation(transactionalId, topicPartition, existing, firstOffset)
 
-  private def rollbackTransactionalAppend(reservation: TransactionReservation): Unit = synchronized {
+  private def rollbackTransactionalAppend(reservation: TransactionReservation): Unit = stateLock.synchronized {
     current.activeByTransactionalId.get(reservation.transactionalId).foreach { active =>
       val withoutReservation = active.ranges.filterNot(range =>
         range.topic == reservation.topicPartition.topic && range.partition == reservation.topicPartition.partition
@@ -376,15 +398,15 @@ final class DeliveryCoordinator(
     }
   }
 
-  private def finishTransactionalAppend(transactionalId: String): Unit = synchronized {
+  private def finishTransactionalAppend(transactionalId: String): Unit = stateLock.synchronized {
     val remaining = inFlightTransactionalAppends.getOrElse(transactionalId, 0) - 1
     if remaining <= 0 then inFlightTransactionalAppends.remove(transactionalId): Unit
     else inFlightTransactionalAppends.update(transactionalId, remaining)
-    notifyAll()
+    stateLock.notifyAll()
   }
 
   private def awaitTransactionalAppends(transactionalId: String): Unit =
-    while inFlightTransactionalAppends.getOrElse(transactionalId, 0) > 0 do wait()
+    while inFlightTransactionalAppends.getOrElse(transactionalId, 0) > 0 do stateLock.wait()
 
   private def validateProducer(transactionalId: String, producerId: Long, producerEpoch: Short): Short =
     current.producerById.get(producerId) match
@@ -402,7 +424,7 @@ final class DeliveryCoordinator(
       case error if error != Errors.None => Left(error)
       case _ => current.activeByTransactionalId.get(transactionalId).toRight(Errors.InvalidTxnState)
 
-  private def replaceActive(active: ActiveTransaction): Unit =
+  private def replaceActive(active: ActiveTransaction): Boolean =
     commit(
       current.copy(
         version = current.version + 1L,
@@ -415,14 +437,15 @@ final class DeliveryCoordinator(
       activeTransactions = current.activeTransactions.filterNot(_.transactionalId == active.transactionalId) :+ active
     )
 
-  private def commit(next: DeliveryImage): Unit =
-    store.commit(next)
+  private def commit(next: DeliveryImage): Boolean =
+    store.commit(next, durableLocal)
     current = next
+    checkpoint.commit()
 
   private def fromReplication(result: ReplicatedAppendResult): DeliveryAppendResult =
     DeliveryAppendResult(result.errorCode, result.baseOffset)
 
-  private def expireTransactions(): Unit = synchronized {
+  def expireNow(): Unit = stateLock.synchronized {
     expireTransactionsLocked(System.currentTimeMillis())
   }
 
@@ -450,7 +473,7 @@ final class DeliveryCoordinator(
           activeTransactions = current.activeTransactions.filterNot(value => ids(value.transactionalId)),
           completedTransactions = current.completedTransactions ++ completed
         )
-      )
+      ): Unit
 
   private def applyOffsets(values: Vector[PendingOffset]): Unit =
     val now = System.currentTimeMillis()
@@ -468,7 +491,7 @@ final class DeliveryCoordinator(
       ): Unit
     }
 
-  private def replayCommittedOffsets(): Unit = synchronized {
+  private def replayCommittedOffsets(): Unit = stateLock.synchronized {
     val pending = current.completedTransactions.filter(transaction => transaction.committed && !transaction.offsetsApplied)
     if pending.nonEmpty then
       pending.foreach(transaction => applyOffsets(transaction.pendingOffsets))
@@ -480,10 +503,10 @@ final class DeliveryCoordinator(
             if pendingSet(transaction) then transaction.copy(offsetsApplied = true) else transaction
           }
         )
-      )
+      ): Unit
   }
 
-  private def markOffsetsApplied(completed: CompletedTransaction): Unit =
+  private def markOffsetsApplied(completed: CompletedTransaction): Boolean =
     commit(
       current.copy(
         version = current.version + 1L,
@@ -493,7 +516,7 @@ final class DeliveryCoordinator(
       )
     )
 
-  private def recoverActiveRanges(): Unit = synchronized {
+  private def recoverActiveRanges(): Unit = stateLock.synchronized {
     val covered = current.completedTransactions.flatMap(_.ranges).toSet
     val recovered = current.activeTransactions.map { active =>
       val discovered = active.partitions.flatMap { topicPartition =>
@@ -519,7 +542,7 @@ final class DeliveryCoordinator(
       active.copy(ranges = mergeRanges(active.ranges ++ discovered))
     }
     if recovered != current.activeTransactions then
-      commit(current.copy(version = current.version + 1L, activeTransactions = recovered))
+      commit(current.copy(version = current.version + 1L, activeTransactions = recovered)): Unit
   }
 
   private def mergeRanges(values: Vector[TransactionRange]): Vector[TransactionRange] =

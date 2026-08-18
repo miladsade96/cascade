@@ -201,6 +201,52 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("producer fencing and active transactions continue from an installed snapshot") {
+    val directory = Files.createTempDirectory("cascade-delivery-install")
+    val registry = TopicRegistry(directory.resolve("data"), 1024 * 1024, FlushPolicy.Sync)
+    val sourceGroups = GroupCoordinator(directory.resolve("source-offsets.log"), scheduleExpiration = false)
+    val targetGroups = GroupCoordinator(directory.resolve("target-offsets.log"), scheduleExpiration = false)
+    val source = DeliveryCoordinator(
+      directory.resolve("source-delivery.log"),
+      registry,
+      sourceGroups,
+      scheduleExpiration = false
+    )
+    val target = DeliveryCoordinator(
+      directory.resolve("target-delivery.log"),
+      registry,
+      targetGroups,
+      scheduleExpiration = false
+    )
+    try
+      registry.getOrCreate("events")
+      val producer = source.initProducerId(Some("failover-producer"), 30_000)
+      assertEquals(
+        source.addPartitions(
+          "failover-producer",
+          producer.producerId,
+          producer.producerEpoch,
+          Vector(TopicPartition("events", 0))
+        ),
+        Errors.None
+      )
+
+      target.installSnapshot(source.snapshotBytes.toVector)
+      assertEquals(target.image.activeTransactions.map(_.transactionalId), Vector("failover-producer"))
+      val fenced = target.initProducerId(Some("failover-producer"), 30_000)
+      assertEquals(fenced.producerId, producer.producerId)
+      assertEquals(fenced.producerEpoch, (producer.producerEpoch + 1).toShort)
+      assertEquals(target.image.activeTransactions, Vector.empty)
+      assert(target.image.completedTransactions.lastOption.exists(!_.committed))
+    finally
+      source.close()
+      target.close()
+      sourceGroups.close()
+      targetGroups.close()
+      registry.close()
+      deleteTree(directory)
+  }
+
   private def withCoordinator(directory: java.nio.file.Path)(
       test: (DeliveryCoordinator, GroupCoordinator, TopicRegistry) => Unit
   ): Unit =
