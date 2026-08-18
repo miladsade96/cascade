@@ -28,16 +28,31 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   private var appendPosition = recover()
   private var closed = false
 
-  def commit(values: Vector[OffsetCommitValue]): Unit = synchronized {
+  def commit(values: Vector[OffsetCommitValue], durable: Boolean = true): Unit = synchronized {
     ensureOpen()
     if values.nonEmpty then
-      val frames = values.map(encode)
-      frames.foreach { frame =>
-        writeFully(ByteBuffer.wrap(frame), appendPosition)
-        appendPosition += frame.length
-      }
-      channel.force(false)
+      if durable then
+        val frames = values.map(encode)
+        frames.foreach { frame =>
+          writeFully(ByteBuffer.wrap(frame), appendPosition)
+          appendPosition += frame.length
+        }
+        channel.force(false)
       values.foreach(value => offsets.update(value.key, value.value))
+  }
+
+  def entries: Vector[OffsetCommitValue] = synchronized {
+    offsets.iterator
+      .map { case (key, value) => OffsetCommitValue(key, value) }
+      .toVector
+      .sortBy(value => (value.key.groupId, value.key.topic, value.key.partition))
+  }
+
+  /** Replaces the in-memory view after installing an authoritative quorum snapshot. */
+  def install(values: Vector[OffsetCommitValue]): Unit = synchronized {
+    ensureOpen()
+    offsets.clear()
+    values.foreach(value => offsets.update(value.key, value.value))
   }
 
   def get(key: GroupOffsetKey): Option[CommittedOffset] = synchronized(offsets.get(key))

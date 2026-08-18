@@ -67,6 +67,37 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("quorum snapshots can replace the in-memory offset view without changing the local journal") {
+    val directory = Files.createTempDirectory("cascade-offset-snapshot-test")
+    val path = directory.resolve("offsets.log")
+    val durable = OffsetCommitValue(
+      GroupOffsetKey("workers", "events", 0),
+      CommittedOffset(10L, 1, None, 1000L)
+    )
+    val replicated = OffsetCommitValue(
+      GroupOffsetKey("workers", "events", 1),
+      CommittedOffset(20L, 2, Some("replicated"), 2000L)
+    )
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(durable))
+        val journalSize = Files.size(path)
+        store.commit(Vector(replicated), durable = false)
+        assertEquals(store.entries, Vector(durable, replicated))
+        assertEquals(Files.size(path), journalSize)
+
+        store.install(Vector(replicated))
+        assertEquals(store.entries, Vector(replicated))
+        assertEquals(Files.size(path), journalSize)
+      finally store.close()
+
+      val recovered = OffsetStore(path)
+      try assertEquals(recovered.entries, Vector(durable))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
