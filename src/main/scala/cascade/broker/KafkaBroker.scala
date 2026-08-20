@@ -11,7 +11,10 @@ import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
-final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
+final class KafkaBroker(
+    val config: BrokerConfig,
+    peerTransportFactory: ClusterNode => PeerTransport = _ => PeerClient()
+) extends AutoCloseable:
   private val running = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
   private val server = ServerSocket()
@@ -45,7 +48,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
     server.setReuseAddress(true)
     server.bind(InetSocketAddress(config.bindHost, config.port))
     val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
-    val peers = PeerClient()
+    val peers = peerTransportFactory(localNode)
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
     cluster.attachReplicationManager(replication)
