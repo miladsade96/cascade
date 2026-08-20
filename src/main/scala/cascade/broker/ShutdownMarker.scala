@@ -16,31 +16,40 @@ final class ShutdownMarker(dataDirectory: Path):
   private val internalDirectory = dataDirectory.resolve(".cascade")
   private val markerPath = internalDirectory.resolve("clean-shutdown.marker")
   private val temporaryPath = internalDirectory.resolve("clean-shutdown.marker.tmp")
+  private val runningPath = internalDirectory.resolve("broker-running.marker")
 
   def beginRecovery(): RecoveryMode = synchronized {
     val hadPersistentData = containsPersistentData()
     val markerExists = Files.exists(markerPath)
+    val wasRunning = Files.exists(runningPath)
     val clean = markerExists && Files.readAllBytes(markerPath).sameElements(MarkerBytes)
     Files.deleteIfExists(markerPath): Unit
     Files.deleteIfExists(temporaryPath): Unit
-    if clean then RecoveryMode.Clean
+    Files.createDirectories(internalDirectory): Unit
+    writeForced(runningPath)
+    if wasRunning then RecoveryMode.Unclean
+    else if clean then RecoveryMode.Clean
     else if markerExists || hadPersistentData then RecoveryMode.Unclean
     else RecoveryMode.Fresh
   }
 
   def markClean(): Unit = synchronized {
     Files.createDirectories(internalDirectory): Unit
-    val channel = FileChannel.open(temporaryPath, CREATE, WRITE, TRUNCATE_EXISTING)
+    writeForced(temporaryPath)
+    try Files.move(temporaryPath, markerPath, ATOMIC_MOVE, REPLACE_EXISTING): Unit
+    catch case _: java.nio.file.AtomicMoveNotSupportedException =>
+      Files.move(temporaryPath, markerPath, REPLACE_EXISTING): Unit
+    Files.deleteIfExists(runningPath): Unit
+  }
+
+  private def writeForced(path: Path): Unit =
+    val channel = FileChannel.open(path, CREATE, WRITE, TRUNCATE_EXISTING)
     try
       val buffer = ByteBuffer.wrap(MarkerBytes)
       while buffer.hasRemaining do
         if channel.write(buffer) <= 0 then throw IllegalStateException("clean-shutdown marker made no write progress")
       channel.force(true)
     finally channel.close()
-    try Files.move(temporaryPath, markerPath, ATOMIC_MOVE, REPLACE_EXISTING): Unit
-    catch case _: java.nio.file.AtomicMoveNotSupportedException =>
-      Files.move(temporaryPath, markerPath, REPLACE_EXISTING): Unit
-  }
 
   private def containsPersistentData(): Boolean =
     if !Files.exists(dataDirectory) then false
@@ -48,6 +57,6 @@ final class ShutdownMarker(dataDirectory: Path):
       val paths = Files.walk(dataDirectory)
       try
         paths.iterator().asScala.exists(path =>
-          Files.isRegularFile(path) && path != markerPath && path != temporaryPath && Files.size(path) > 0L
+          Files.isRegularFile(path) && path != markerPath && path != temporaryPath && path != runningPath && Files.size(path) > 0L
         )
       finally paths.close()
