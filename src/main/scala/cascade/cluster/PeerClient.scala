@@ -7,13 +7,16 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.jdk.CollectionConverters.*
 
+trait PeerTransport extends AutoCloseable:
+  def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor
+
 /** Persistent, ordered peer connections; failed sockets are discarded and recreated by the next call. */
-final class PeerClient extends AutoCloseable:
+final class PeerClient extends PeerTransport:
   private val correlations = AtomicInteger(1)
   private val connections = ConcurrentHashMap[ClusterNode, PeerConnection]()
   private val closed = AtomicBoolean(false)
 
-  def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
+  override def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
     if closed.get() then throw IllegalStateException("peer client is closed")
     val connection = connections.computeIfAbsent(node, PeerConnection(_))
     try connection.call(apiKey, payload, timeoutMillis, correlations.getAndIncrement())

@@ -1,6 +1,6 @@
 package cascade.broker
 
-import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, ReplicationManager}
+import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, ReplicationManager}
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
@@ -37,7 +37,7 @@ final class KafkaBroker(val config: BrokerConfig) extends AutoCloseable:
   @volatile private var replicationManager: ReplicationManager | Null = null
   @volatile private var deliveryCoordinator: DeliveryCoordinator | Null = null
   @volatile private var coordinatorStateMachine: CoordinatorStateMachine | Null = null
-  @volatile private var peerClient: PeerClient | Null = null
+  @volatile private var peerClient: PeerTransport | Null = null
 
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")

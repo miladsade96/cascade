@@ -52,7 +52,7 @@ private final case class ReplicaRecoveryTarget(
 )
 
 /** Durable metadata quorum with persisted controller election, broker fencing, and dynamic membership. */
-final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localNode: ClusterNode, peerClient: PeerClient)
+final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localNode: ClusterNode, peerClient: PeerTransport)
     extends AutoCloseable:
   private val enabled = config.clusterNodes.nonEmpty
   private val bootstrapNodes = if enabled then config.clusterNodes.sortBy(_.id) else Vector(localNode)

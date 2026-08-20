@@ -28,7 +28,7 @@ final class ReplicationManager(
     config: BrokerConfig,
     cluster: ClusterManager,
     registry: TopicRegistry,
-    peerClient: PeerClient
+    peerClient: PeerTransport
 )
     extends ReplicatedAppender,
       AutoCloseable:
@@ -623,7 +623,7 @@ final class ReplicationManager(
   ): ByteCursor =
     try peerClient.call(follower, apiKey, payload, timeoutMillis)
     catch case _: Throwable =>
-      // Recovery operations are idempotent and PeerClient may still own a pre-restart socket.
+      // Recovery operations are idempotent and the transport may still own a pre-restart socket.
       peerClient.call(follower, apiKey, payload, timeoutMillis)
 
   private def nodeById(id: Int): Option[ClusterNode] = cluster.clusterNodes.find(_.id == id)
