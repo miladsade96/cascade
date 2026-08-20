@@ -1,5 +1,7 @@
 package cascade.fault
 
+import cascade.cluster.{ClusterNode, PeerTransport}
+import cascade.protocol.ByteCursor
 import java.net.SocketTimeoutException
 import munit.FunSuite
 
@@ -29,4 +31,28 @@ final class NetworkFaultControllerSuite extends FunSuite:
     faults.heal()
     faults.beforeCall(PeerCall(1, 3, -106, Vector.empty))
     faults.beforeCall(PeerCall(4, 2, -106, Vector.empty))
+  }
+
+  test("the injecting transport drops before delegation and delegates after healing") {
+    val faults = NetworkFaultController()
+    val target = ClusterNode(2, "127.0.0.1", 9093)
+    var calls = 0
+    var closed = false
+    val delegate = new PeerTransport:
+      override def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
+        calls += 1
+        ByteCursor(Array.emptyByteArray)
+      override def close(): Unit = closed = true
+    val transport = FaultInjectingPeerTransport(1, faults, delegate)
+
+    faults.block(FaultSelector(1, 2))
+    intercept[SocketTimeoutException](transport.call(target, -106, Array[Byte](1), 100))
+    assertEquals(calls, 0)
+
+    faults.heal()
+    transport.call(target, -106, Array[Byte](2), 100)
+    assertEquals(calls, 1)
+    assertEquals(faults.calls.map(_.payload), Vector(Vector[Byte](1), Vector[Byte](2)))
+    transport.close()
+    assert(closed)
   }
