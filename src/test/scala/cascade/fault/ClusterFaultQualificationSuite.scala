@@ -191,6 +191,42 @@ final class ClusterFaultQualificationSuite extends FunSuite:
     finally cluster.close()
   }
 
+  test("joint consensus rejects metadata writes without both voter majorities") {
+    val cluster = FaultCluster(size = 4, initialVoters = 3)
+    val rejectedTopic = "joint-minority-rejected"
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        val controller = awaitController(admin)
+        val armed = armStabilizationFault(cluster, controller)
+        intercept[Throwable] {
+          admin.addRaftVoter(
+            4,
+            Uuid.randomUuid(),
+            Set(RaftVoterEndpoint("CONTROLLER", cluster.nodes(3).host, cluster.nodes(3).port)).asJava
+          ).all().get(10, TimeUnit.SECONDS)
+        }
+        assert(armed.isArmed)
+        assert(metadataSnapshot(cluster.nodes(controller - 1)).membership.exists(_.isJoint))
+
+        val retainedOldMajority = Set(controller, (Set(1, 2, 3) - controller).head)
+        cluster.faults.partition(retainedOldMajority, Set(1, 2, 3, 4) -- retainedOldMajority)
+        Thread.sleep(1500L)
+        val controllerNode = cluster.nodes(controller - 1)
+        assert(
+          Set(Errors.NotController, Errors.CoordinatorNotAvailable)
+            .contains(createTopicError(controllerNode.host, controllerNode.port, rejectedTopic))
+        )
+        assert(!metadataSnapshot(controllerNode).byName.contains(rejectedTopic))
+
+        cluster.faults.heal()
+        awaitStableMembership(controllerNode, Set(1, 2, 3, 4))
+        awaitTopicCreation(admin, cluster.nodes, rejectedTopic)
+      finally admin.close(Duration.ofSeconds(5))
+    finally cluster.close()
+  }
+
   private def produce(bootstrap: String, topic: String, partition: Int, value: String, expectedOffset: Long): Unit =
     val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrap))
     try
@@ -253,6 +289,40 @@ final class ClusterFaultQualificationSuite extends FunSuite:
       cursor.readInt()
       cursor.readInt()
       val error = cursor.readShort()
+      cursor.ensureFullyRead()
+      error
+    finally socket.close()
+
+  private def createTopicError(host: String, port: Int, topic: String): Short =
+    val socket = Socket(host, port)
+    socket.setSoTimeout(5000)
+    try
+      val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+      val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+      val writer = ByteWriter()
+        .writeShort(ApiKey.CreateTopics)
+        .writeShort(2)
+        .writeInt(78)
+        .writeNullableString(Some("joint-quorum-qualification"))
+      writer.writeArray(Vector(topic)) { name =>
+        writer.writeString(name).writeInt(1).writeShort(3)
+        writer.writeArray(Vector.empty[Unit])(_ => ())
+        writer.writeArray(Vector.empty[Unit])(_ => ()): Unit
+      }
+      writer.writeInt(3000).writeBoolean(false)
+      val payload = writer.result()
+      output.writeInt(payload.length)
+      output.write(payload)
+      output.flush()
+      val response = new Array[Byte](input.readInt())
+      input.readFully(response)
+      val cursor = ByteCursor(response)
+      assertEquals(cursor.readInt(), 78)
+      cursor.readInt()
+      assertEquals(cursor.readInt(), 1)
+      assertEquals(cursor.readString(), topic)
+      val error = cursor.readShort()
+      cursor.readNullableString()
       cursor.ensureFullyRead()
       error
     finally socket.close()
@@ -356,6 +426,24 @@ final class ClusterFaultQualificationSuite extends FunSuite:
       catch case _: Throwable => actual = Set.empty
       if actual != expected then Thread.sleep(100L)
     assertEquals(actual, expected)
+
+  private def awaitTopicCreation(admin: Admin, nodes: Vector[cascade.cluster.ClusterNode], topic: String): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var created = false
+    var lastFailure: Option[Throwable] = None
+    while !created && System.nanoTime() < deadline do
+      try
+        admin.createTopics(java.util.List.of(NewTopic(topic, 1, 3.toShort))).all().get(3, TimeUnit.SECONDS)
+        created = true
+      catch
+        case error: Throwable =>
+          lastFailure = Some(error)
+          created = nodes.exists { node =>
+            try metadataSnapshot(node).byName.contains(topic)
+            catch case _: Throwable => false
+          }
+          if !created then Thread.sleep(100L)
+    assert(created, lastFailure.map(_.toString).getOrElse(s"topic $topic was not created after healing"))
 
   private def adminProperties(bootstrap: String): Properties =
     val values = Properties()
