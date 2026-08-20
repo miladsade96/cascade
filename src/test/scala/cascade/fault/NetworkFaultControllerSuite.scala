@@ -56,3 +56,24 @@ final class NetworkFaultControllerSuite extends FunSuite:
     transport.close()
     assert(closed)
   }
+
+  test("an armed fault starts dropping only after a deterministic trigger count") {
+    val faults = NetworkFaultController()
+    val armed = ArmedFault(
+      triggerMatches = 2,
+      trigger = call => call.apiKey == -102,
+      drop = call => call.apiKey == -101
+    )
+    faults.arm(armed)
+
+    faults.beforeCall(PeerCall(1, 2, -102, Vector.empty))
+    faults.beforeCall(PeerCall(1, 3, -101, Vector.empty))
+    assert(!armed.isArmed)
+    faults.beforeCall(PeerCall(1, 3, -102, Vector.empty))
+    assert(armed.isArmed)
+    intercept[SocketTimeoutException](faults.beforeCall(PeerCall(1, 2, -101, Vector.empty)))
+    faults.beforeCall(PeerCall(1, 2, -106, Vector.empty))
+
+    faults.heal()
+    faults.beforeCall(PeerCall(1, 2, -101, Vector.empty))
+  }
