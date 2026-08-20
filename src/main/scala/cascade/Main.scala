@@ -9,5 +9,7 @@ object Main:
     val broker = KafkaBroker(config)
     broker.start()
     Runtime.getRuntime.addShutdownHook(Thread(() => broker.close(), "cascade-shutdown"))
-    println(s"Cascade broker listening on ${broker.bootstrapServers}; data=${config.dataDirectory.toAbsolutePath}")
+    println(
+      s"Cascade broker listening on ${broker.bootstrapServers}; data=${config.dataDirectory.toAbsolutePath}; recovery=${broker.recoveryMode}"
+    )
     CountDownLatch(1).await()

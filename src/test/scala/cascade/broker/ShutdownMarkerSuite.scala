@@ -31,6 +31,20 @@ final class ShutdownMarkerSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("KafkaBroker publishes clean restart state after its full close path") {
+    val directory = Files.createTempDirectory("cascade-broker-clean-restart")
+    try
+      val first = KafkaBroker(BrokerConfig(bindHost = "127.0.0.1", port = 0, dataDirectory = directory))
+      assertEquals(first.recoveryMode, RecoveryMode.Fresh)
+      first.start()
+      first.close()
+
+      val second = KafkaBroker(BrokerConfig(bindHost = "127.0.0.1", port = 0, dataDirectory = directory))
+      try assertEquals(second.recoveryMode, RecoveryMode.Clean)
+      finally second.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)

@@ -17,6 +17,8 @@ final class KafkaBroker(
 ) extends AutoCloseable:
   private val running = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
+  private val shutdownMarker = ShutdownMarker(config.dataDirectory)
+  val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
   private val server = ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val registry = TopicRegistry(
@@ -94,6 +96,7 @@ final class KafkaBroker(
       Option(deliveryCoordinator).foreach(_.close())
       groupCoordinator.close()
       registry.close()
+      shutdownMarker.markClean()
   }
 
   private def acceptLoop(): Unit =
