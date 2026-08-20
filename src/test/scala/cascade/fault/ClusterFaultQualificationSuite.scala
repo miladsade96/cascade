@@ -1,12 +1,15 @@
 package cascade.fault
 
+import cascade.protocol.{ApiKey, ByteCursor, ByteWriter, Errors}
+import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
+import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 import munit.FunSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
-import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
@@ -50,6 +53,65 @@ final class ClusterFaultQualificationSuite extends FunSuite:
     finally cluster.close()
   }
 
+  test("an isolated coordinator cannot acknowledge offsets that the majority never committed") {
+    val cluster = FaultCluster(3)
+    val topic = "coordinator-partition-events"
+    val groupId = "partitioned-workers"
+    val topicPartition = TopicPartition(topic, 0)
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic(topic, 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, topic, 0, Set(1, 2, 3))
+        produce(cluster.bootstrapServers, topic, 0, "committed", 0L)
+
+        val initial = KafkaConsumer[Array[Byte], Array[Byte]](groupConsumerProperties(cluster.bootstrapServers, groupId))
+        try
+          initial.assign(java.util.List.of(topicPartition))
+          initial.seekToBeginning(java.util.List.of(topicPartition))
+          assertEquals(pollValues(initial, 1), Vector("committed"))
+          initial.commitSync()
+        finally initial.close()
+
+        val firstController = awaitController(admin)
+        val majority = Set(1, 2, 3) - firstController
+        cluster.faults.partition(Set(firstController), majority)
+        val majorityBootstrap = cluster.nodes.filter(node => majority(node.id))
+          .map(node => s"${node.host}:${node.port}").mkString(",")
+        val majorityAdmin = Admin.create(adminProperties(majorityBootstrap))
+        try awaitController(majorityAdmin, excluded = Some(firstController))
+        finally majorityAdmin.close(Duration.ofSeconds(5))
+
+        val isolatedBootstrap = {
+          val node = cluster.nodes(firstController - 1)
+          s"${node.host}:${node.port}"
+        }
+        Thread.sleep(750L)
+        assertEquals(offsetCommitError(isolatedBootstrap, groupId, topicPartition, 99L), Errors.NotCoordinator)
+
+        val majorityReader = KafkaConsumer[Array[Byte], Array[Byte]](groupConsumerProperties(majorityBootstrap, groupId))
+        try
+          assertEquals(
+            Option(majorityReader.committed(java.util.Set.of(topicPartition)).get(topicPartition)).map(_.offset()),
+            Some(1L)
+          )
+          majorityReader.assign(java.util.List.of(topicPartition))
+          majorityReader.commitSync(Map(topicPartition -> OffsetAndMetadata(2L)).asJava)
+        finally majorityReader.close()
+
+        cluster.faults.heal()
+        val healed = KafkaConsumer[Array[Byte], Array[Byte]](groupConsumerProperties(cluster.bootstrapServers, groupId))
+        try
+          assertEquals(
+            Option(healed.committed(java.util.Set.of(topicPartition)).get(topicPartition)).map(_.offset()),
+            Some(2L)
+          )
+        finally healed.close()
+      finally admin.close(Duration.ofSeconds(5))
+    finally cluster.close()
+  }
+
   private def produce(bootstrap: String, topic: String, partition: Int, value: String, expectedOffset: Long): Unit =
     val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrap))
     try
@@ -71,6 +133,50 @@ final class ClusterFaultQualificationSuite extends FunSuite:
     val result = values.result()
     assertEquals(result.size, expected)
     result
+
+  private def offsetCommitError(
+      bootstrap: String,
+      groupId: String,
+      topicPartition: TopicPartition,
+      offset: Long
+  ): Short =
+    val endpoint = bootstrap.split(':')
+    val socket = Socket(endpoint(0), endpoint(1).toInt)
+    try
+      val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+      val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+      val writer = ByteWriter()
+        .writeShort(ApiKey.OffsetCommit)
+        .writeShort(7)
+        .writeInt(77)
+        .writeNullableString(Some("fault-qualification"))
+        .writeString(groupId)
+        .writeInt(-1)
+        .writeString("")
+        .writeNullableString(None)
+      writer.writeArray(Vector(topicPartition.topic())) { topic =>
+        writer.writeString(topic)
+        writer.writeArray(Vector(topicPartition.partition())) { partition =>
+          writer.writeInt(partition).writeLong(offset).writeInt(-1).writeNullableString(None): Unit
+        }: Unit
+      }
+      val payload = writer.result()
+      output.writeInt(payload.length)
+      output.write(payload)
+      output.flush()
+      val response = new Array[Byte](input.readInt())
+      input.readFully(response)
+      val cursor = ByteCursor(response)
+      assertEquals(cursor.readInt(), 77)
+      cursor.readInt()
+      cursor.readInt()
+      cursor.readString()
+      cursor.readInt()
+      cursor.readInt()
+      val error = cursor.readShort()
+      cursor.ensureFullyRead()
+      error
+    finally socket.close()
 
   private def awaitController(admin: Admin, excluded: Option[Int] = None): Int =
     val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
@@ -121,4 +227,12 @@ final class ClusterFaultQualificationSuite extends FunSuite:
     values.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
     values.put(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "10000")
     values.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000")
+    values
+
+  private def groupConsumerProperties(bootstrap: String, groupId: String): Properties =
+    val values = consumerProperties(bootstrap)
+    values.put(ConsumerConfig.GROUP_ID_CONFIG, groupId)
+    values.put("group.protocol", "classic")
+    values.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "6000")
+    values.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "1000")
     values
