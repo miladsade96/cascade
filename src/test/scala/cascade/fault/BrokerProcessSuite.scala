@@ -4,6 +4,7 @@ import cascade.broker.{BrokerConfig, KafkaBroker, RecoveryMode}
 import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption.APPEND
 import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.TimeUnit
@@ -136,6 +137,17 @@ final class BrokerProcessSuite extends FunSuite:
         offsetWriter.commitSync(Map(partition -> OffsetAndMetadata(1L)).asJava)
       finally offsetWriter.close()
       process.kill()
+
+      Files.write(directory.resolve(".cascade").resolve("consumer-offsets.log"), Array[Byte](0, 0, 0), APPEND): Unit
+      Files.write(directory.resolve(".cascade").resolve("delivery-state.log"), Array[Byte](0, 0, 0), APPEND): Unit
+      val segments = Files.walk(directory.resolve(topic))
+      try
+        val activeSegment = segments.iterator().asScala
+          .filter(path => path.getFileName.toString.matches("[0-9]{20}\\.log"))
+          .toVector
+          .maxBy(_.getFileName.toString)
+        Files.write(activeSegment, Array[Byte](1, 2, 3, 4, 5), APPEND): Unit
+      finally segments.close()
 
       process = BrokerProcess.start(arguments)
       process.awaitListening("127.0.0.1", port)
