@@ -21,6 +21,10 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 - Observer synchronization, joint-consensus admission/removal, interrupted-transition resume, partition-drain validation, and active-controller handoff.
 - A versioned quorum image for classic-group membership and assignments, committed offsets, producer fencing, active transaction ranges, outcomes, and transactional offsets.
 - Stale coordinator-image rejection, rollback on quorum loss, controller-only expiry, and atomic transaction/outcome offset checkpoints.
+- Deterministic directional peer partitions and protocol-triggered message drops without using timing as the fault trigger.
+- Clean/unclean startup markers plus real subprocess force-kill tests that bypass broker shutdown hooks.
+- Exact data, transaction, producer-epoch, and committed-offset recovery after force kill, including conservative truncation of torn data, offset, and delivery journal tails.
+- Stable-quorum majority service, minority coordinator fencing, durable joint-transition resume, controller loss during joint consensus, and dual-majority write rejection tests.
 - Real Kafka 4.3.1 client tests for Admin, Producer, explicit Consumer, subscribed consumers, rebalancing, committed-offset recovery, broker restart, three/four-node replication, partition-leader shutdown, controller/coordinator loss, stale-term rejection, post-election metadata changes, reassignment cancellation, reassignment through controller loss, voter admission, active-controller removal/restart, and an open transaction completed after failover.
 - Exact-count load tests at one million and ten million records with latency, CPU, GC, heap, storage, and flush metrics.
 
@@ -28,16 +32,16 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 
 | Area | What must pass before release | Where Cascade is now |
 | --- | --- | --- |
-| Availability | At least three brokers, replicated partitions, ISR tracking, leader election, and verified recovery from broker, process, and disk loss | Graceful partition-leader and controller failover, persisted high-watermark recovery, incremental replica re-admission, and online reassignment pass; crash/power-loss qualification remains |
-| Metadata | Durable quorum controller, fencing, leader epochs, reassignment, and cluster membership changes | Durable election, leases, fencing, metadata images, leader epochs, resumable reassignment, and joint-consensus membership changes work; rolling-version and exhaustive failure qualification remain |
-| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Implemented in single-node and clustered modes; Kafka-client open-transaction, fencing, visibility, and transactional-offset failover tests pass, while crash/power-loss qualification and coordinator scale tests remain |
+| Availability | At least three brokers, replicated partitions, ISR tracking, leader election, and verified recovery from broker, process, and disk loss | Graceful and forced-kill recovery, persisted high-watermarks, replica re-admission, stable/joint partition tests, and online reassignment pass; physical power and device-loss qualification remains |
+| Metadata | Durable quorum controller, fencing, leader epochs, reassignment, and cluster membership changes | Durable election, leases, fencing, metadata images, leader epochs, resumable reassignment, joint consensus, deterministic partition recovery, and dual-majority write safety work; rolling-version and exhaustive external failure qualification remain |
+| Delivery semantics | Idempotent producers, sequence validation, transactions, producer-state recovery, and `read_committed` isolation | Implemented in single-node and clustered modes; Kafka-client failover plus forced-kill/torn-tail transaction, producer, and offset recovery tests pass, while coordinator scale tests remain |
 | Storage lifecycle | Time and size retention, log and offset compaction, timestamp and transaction indexes, disk-pressure handling, and safe deletion | Not implemented |
 | Security | TLS, SASL mechanisms, authorization and ACLs, audit events, and secret rotation | Not implemented |
 | Resource isolation | Client and user quotas, request and connection limits, bounded queues, overload shedding, and multi-tenant tests | Only frame bounds are implemented |
 | Operations | Metrics, health and readiness endpoints, structured logs, admin API coverage, backup and restore, and capacity alerts | Not implemented |
 | Compatibility | Supported-version contract, malformed-frame and fuzz tests, multiple client languages, and a rolling upgrade and downgrade matrix | Java-client coverage is partial |
 | Consumer groups | New consumer protocol, static-member fencing, administrative group APIs, offset retention and compaction, and coordinator failover | Classic group generations, members, assignments, and offsets survive elected-coordinator loss; the new protocol, static fencing, admin APIs, retention, compaction, and scale qualification remain |
-| Qualification | Multi-day soak tests, crash, kill, and power-failure simulation, network partitions, disk-full and corruption tests, and repeatable dedicated-host benchmarks | Short correctness/load runs and a controlled replica restart/rejoin test are complete |
+| Qualification | Multi-day soak tests, crash, kill, and power-failure simulation, network partitions, disk-full and corruption tests, and repeatable dedicated-host benchmarks | Deterministic stable/joint partitions, protocol-message drops, subprocess force kills, and torn-tail recovery pass; physical power loss, disk loss/full, arbitrary network impairment, long soak, and dedicated-host benchmarks remain |
 
 ## When I will call it production ready
 
@@ -45,4 +49,4 @@ I won't describe a release as a Kafka replacement until every blocking row above
 
 When I publish a performance result, I'll include the hardware, durability policy, workload, client configuration, and exact delivery count. When I claim compatibility, I'll list the API keys and versions instead of just saying "Kafka compatible."
 
-My next milestone is automated crash, kill, power-loss, and network-partition qualification during ordinary coordinator writes and both phases of a voter change. After that I need retention/compaction and a sharded coordinator design so the current full-image path does not become a high-cardinality bottleneck.
+I completed the deterministic process-kill, torn-tail, coordinator-write, and stable/joint network-partition milestone. My next milestone is storage lifecycle: time/size retention, log and coordinator compaction, offset expiry, indexes, disk-pressure handling, and crash-safe deletion. After that I need a sharded coordinator design so the current full-image path does not become a high-cardinality bottleneck.
