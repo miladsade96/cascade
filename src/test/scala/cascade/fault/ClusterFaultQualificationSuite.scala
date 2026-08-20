@@ -1,5 +1,6 @@
 package cascade.fault
 
+import cascade.cluster.{InternalApi, MetadataCodec, PeerClient}
 import cascade.protocol.{ApiKey, ByteCursor, ByteWriter, Errors}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
 import java.net.Socket
@@ -8,10 +9,10 @@ import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 import munit.FunSuite
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic, RaftVoterEndpoint}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
-import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
 
@@ -34,7 +35,7 @@ final class ClusterFaultQualificationSuite extends FunSuite:
           .map(node => s"${node.host}:${node.port}").mkString(",")
         val majorityAdmin = Admin.create(adminProperties(majorityBootstrap))
         try
-          val nextController = awaitController(majorityAdmin, excluded = Some(firstController))
+          val nextController = awaitControllerNodes(cluster.nodes.filter(node => majority(node.id)), Some(firstController))
           assert(majority(nextController))
           awaitInSyncReplicas(majorityAdmin, "partition-events", partition, majority)
           produce(majorityBootstrap, "partition-events", partition, "during-partition", 1L)
@@ -80,7 +81,7 @@ final class ClusterFaultQualificationSuite extends FunSuite:
         val majorityBootstrap = cluster.nodes.filter(node => majority(node.id))
           .map(node => s"${node.host}:${node.port}").mkString(",")
         val majorityAdmin = Admin.create(adminProperties(majorityBootstrap))
-        try awaitController(majorityAdmin, excluded = Some(firstController))
+        try awaitControllerNodes(cluster.nodes.filter(node => majority(node.id)), Some(firstController))
         finally majorityAdmin.close(Duration.ofSeconds(5))
 
         val isolatedBootstrap = {
@@ -108,6 +109,43 @@ final class ClusterFaultQualificationSuite extends FunSuite:
             Some(2L)
           )
         finally healed.close()
+      finally admin.close(Duration.ofSeconds(5))
+    finally cluster.close()
+  }
+
+  test("a joint voter transition remains durable when stabilization is partitioned and resumes after healing") {
+    val cluster = FaultCluster(size = 4, initialVoters = 3)
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        val controller = awaitController(admin)
+        val armed = ArmedFault(
+          triggerMatches = 2,
+          trigger = call =>
+            call.sourceId == controller && call.apiKey == InternalApi.MetadataCommit && metadataFromCommit(call).exists {
+              _.membership.exists(_.isJoint)
+            },
+          drop = call => call.sourceId == controller && call.apiKey == InternalApi.MetadataPrepare
+        )
+        cluster.faults.arm(armed)
+        val directoryId = Uuid.randomUuid()
+        intercept[Throwable] {
+          admin.addRaftVoter(
+            4,
+            directoryId,
+            Set(RaftVoterEndpoint("CONTROLLER", cluster.nodes(3).host, cluster.nodes(3).port)).asJava
+          ).all().get(10, TimeUnit.SECONDS)
+        }
+        assert(armed.isArmed)
+
+        val joint = metadataSnapshot(cluster.nodes(controller - 1))
+        assert(joint.membership.exists(_.isJoint))
+        assertEquals(joint.membership.get.targetVoters.map(_.id).toSet, Set(1, 2, 3, 4))
+
+        cluster.faults.heal()
+        awaitVoters(admin, Set(1, 2, 3, 4))
+        awaitStableMembership(cluster.nodes(controller - 1), Set(1, 2, 3, 4))
       finally admin.close(Duration.ofSeconds(5))
     finally cluster.close()
   }
@@ -178,6 +216,61 @@ final class ClusterFaultQualificationSuite extends FunSuite:
       error
     finally socket.close()
 
+  private def metadataFromCommit(call: PeerCall): Option[cascade.cluster.ClusterMetadata] =
+    try
+      val cursor = ByteCursor(call.payload.toArray)
+      cursor.readLong()
+      cursor.readInt()
+      val metadata = MetadataCodec.decode(cursor.readByteArray())
+      cursor.ensureFullyRead()
+      Some(metadata)
+    catch case _: Throwable => None
+
+  private def metadataSnapshot(node: cascade.cluster.ClusterNode): cascade.cluster.ClusterMetadata =
+    val peer = PeerClient()
+    try
+      val response = peer.call(node, InternalApi.MetadataSnapshot, Array.emptyByteArray, 1000)
+      response.readLong()
+      response.readInt()
+      val metadata = MetadataCodec.decode(response.readByteArray())
+      response.ensureFullyRead()
+      metadata
+    finally peer.close()
+
+  private def awaitControllerNodes(
+      nodes: Vector[cascade.cluster.ClusterNode],
+      excluded: Option[Int]
+  ): Int =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var controller = -1
+    while (controller < 0 || excluded.contains(controller)) && System.nanoTime() < deadline do
+      controller = nodes.iterator.flatMap { node =>
+        val peer = PeerClient()
+        try
+          val response = peer.call(node, InternalApi.MetadataSnapshot, Array.emptyByteArray, 1000)
+          response.readLong()
+          val leaderId = response.readInt()
+          response.readByteArray()
+          response.ensureFullyRead()
+          Option.when(leaderId >= 0 && !excluded.contains(leaderId))(leaderId)
+        catch case _: Throwable => None
+        finally peer.close()
+      }.nextOption().getOrElse(-1)
+      if controller < 0 || excluded.contains(controller) then Thread.sleep(100L)
+    assert(controller >= 0 && !excluded.contains(controller), s"controller election did not complete: $controller")
+    controller
+
+  private def awaitStableMembership(node: cascade.cluster.ClusterNode, expected: Set[Int]): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var membership: Option[cascade.cluster.QuorumMembership] = None
+    while membership.forall(value => value.isJoint || value.currentVoters.map(_.id).toSet != expected) &&
+        System.nanoTime() < deadline
+    do
+      try membership = metadataSnapshot(node).membership
+      catch case _: Throwable => membership = None
+      if membership.forall(value => value.isJoint || value.currentVoters.map(_.id).toSet != expected) then Thread.sleep(100L)
+    assert(membership.exists(value => !value.isJoint && value.currentVoters.map(_.id).toSet == expected))
+
   private def awaitController(admin: Admin, excluded: Option[Int] = None): Int =
     val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
     var controller = -1
@@ -196,6 +289,17 @@ final class ClusterFaultQualificationSuite extends FunSuite:
         actual = admin.describeTopics(java.util.List.of(topic)).allTopicNames().get(3, TimeUnit.SECONDS).get(topic)
           .partitions().asScala.find(_.partition() == partition)
           .map(_.isr().asScala.map(_.id()).toSet).getOrElse(Set.empty)
+      catch case _: Throwable => actual = Set.empty
+      if actual != expected then Thread.sleep(100L)
+    assertEquals(actual, expected)
+
+  private def awaitVoters(admin: Admin, expected: Set[Int]): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var actual = Set.empty[Int]
+    while actual != expected && System.nanoTime() < deadline do
+      try
+        actual = admin.describeMetadataQuorum().quorumInfo().get(3, TimeUnit.SECONDS)
+          .voters().asScala.map(_.replicaId()).toSet
       catch case _: Throwable => actual = Set.empty
       if actual != expected then Thread.sleep(100L)
     assertEquals(actual, expected)
