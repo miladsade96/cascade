@@ -11,15 +11,19 @@ import scala.jdk.CollectionConverters.*
 /** Three-or-more broker fixture with deterministic directional peer link control. */
 final class FaultCluster(
     size: Int,
+    initialVoters: Int = -1,
     defaultReplicationFactor: Int = 3,
     minInSyncReplicas: Int = 2
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
+  private val voterCount = if initialVoters < 0 then size else initialVoters
+  require(voterCount >= 3 && voterCount <= size, "initial voters must be between three and cluster size")
   private val ports = freePorts(size)
   val nodes: Vector[ClusterNode] = ports.zipWithIndex.map { case (port, index) =>
     ClusterNode(index + 1, "127.0.0.1", port)
   }
   val directories = nodes.map(node => Files.createTempDirectory(s"cascade-fault-${node.id}"))
+  val voterNodes: Vector[ClusterNode] = nodes.take(voterCount)
   val faults = NetworkFaultController()
   val configs: Vector[BrokerConfig] = nodes.zip(directories).map { case (node, directory) =>
     BrokerConfig(
@@ -30,7 +34,7 @@ final class FaultCluster(
       dataDirectory = directory,
       flushPolicy = FlushPolicy.Sync,
       nodeId = node.id,
-      clusterNodes = nodes,
+      clusterNodes = voterNodes,
       controllerId = 1,
       defaultReplicationFactor = defaultReplicationFactor,
       minInSyncReplicas = minInSyncReplicas,
