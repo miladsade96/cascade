@@ -1,0 +1,79 @@
+package cascade.fault
+
+import cascade.broker.{BrokerConfig, KafkaBroker}
+import cascade.cluster.{ClusterNode, PeerClient}
+import cascade.storage.FlushPolicy
+import java.net.ServerSocket
+import java.nio.file.Files
+import scala.collection.mutable
+import scala.jdk.CollectionConverters.*
+
+/** Three-or-more broker fixture with deterministic directional peer link control. */
+final class FaultCluster(
+    size: Int,
+    defaultReplicationFactor: Int = 3,
+    minInSyncReplicas: Int = 2
+) extends AutoCloseable:
+  require(size >= 3, "fault cluster requires at least three brokers")
+  private val ports = freePorts(size)
+  val nodes: Vector[ClusterNode] = ports.zipWithIndex.map { case (port, index) =>
+    ClusterNode(index + 1, "127.0.0.1", port)
+  }
+  val directories = nodes.map(node => Files.createTempDirectory(s"cascade-fault-${node.id}"))
+  val faults = NetworkFaultController()
+  val configs: Vector[BrokerConfig] = nodes.zip(directories).map { case (node, directory) =>
+    BrokerConfig(
+      bindHost = node.host,
+      port = node.port,
+      advertisedHost = node.host,
+      advertisedPort = Some(node.port),
+      dataDirectory = directory,
+      flushPolicy = FlushPolicy.Sync,
+      nodeId = node.id,
+      clusterNodes = nodes,
+      controllerId = 1,
+      defaultReplicationFactor = defaultReplicationFactor,
+      minInSyncReplicas = minInSyncReplicas,
+      peerTimeoutMillis = 300,
+      controllerHeartbeatMillis = 100,
+      controllerElectionTimeoutMillis = 600
+    )
+  }
+  private val running = mutable.HashMap.empty[Int, KafkaBroker]
+
+  def bootstrapServers: String = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+
+  def startAll(): Unit = nodes.foreach(node => start(node.id))
+
+  def start(nodeId: Int): KafkaBroker =
+    require(!running.contains(nodeId), s"broker $nodeId is already running")
+    val broker = KafkaBroker(
+      configs(nodeId - 1),
+      local => FaultInjectingPeerTransport(local.id, faults, PeerClient())
+    )
+    broker.start()
+    running.update(nodeId, broker)
+    broker
+
+  def stop(nodeId: Int): Unit =
+    running.remove(nodeId).foreach(_.close())
+
+  def broker(nodeId: Int): KafkaBroker = running(nodeId)
+
+  def runningNodeIds: Set[Int] = running.keySet.toSet
+
+  override def close(): Unit =
+    running.values.toVector.foreach(_.close())
+    running.clear()
+    directories.foreach(deleteTree)
+
+  private def freePorts(count: Int): Vector[Int] =
+    val sockets = Vector.fill(count)(ServerSocket(0))
+    try sockets.map(_.getLocalPort)
+    finally sockets.foreach(_.close())
+
+  private def deleteTree(root: java.nio.file.Path): Unit =
+    if Files.exists(root) then
+      val paths = Files.walk(root)
+      try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
+      finally paths.close()
