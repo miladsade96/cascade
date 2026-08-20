@@ -150,6 +150,47 @@ final class ClusterFaultQualificationSuite extends FunSuite:
     finally cluster.close()
   }
 
+  test("a joint quorum elects a replacement after controller loss and then stabilizes") {
+    val cluster = FaultCluster(size = 4, initialVoters = 3)
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic("joint-failover-events", 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
+        val controller = awaitController(admin)
+        awaitInSyncReplicas(admin, "joint-failover-events", 0, Set(1, 2, 3))
+        produce(cluster.bootstrapServers, "joint-failover-events", 0, "before-joint-loss", 0L)
+
+        val armed = armStabilizationFault(cluster, controller)
+        intercept[Throwable] {
+          admin.addRaftVoter(
+            4,
+            Uuid.randomUuid(),
+            Set(RaftVoterEndpoint("CONTROLLER", cluster.nodes(3).host, cluster.nodes(3).port)).asJava
+          ).all().get(10, TimeUnit.SECONDS)
+        }
+        assert(armed.isArmed)
+        assert(metadataSnapshot(cluster.nodes(controller - 1)).membership.exists(_.isJoint))
+
+        cluster.stop(controller)
+        cluster.faults.heal()
+        val survivors = cluster.nodes.filterNot(_.id == controller)
+        val nextController = awaitControllerNodes(survivors, Some(controller))
+        awaitStableMembership(cluster.nodes(nextController - 1), Set(1, 2, 3, 4))
+        val survivorBootstrap = survivors.map(node => s"${node.host}:${node.port}").mkString(",")
+        val survivorAdmin = Admin.create(adminProperties(survivorBootstrap))
+        try
+          awaitVoters(survivorAdmin, Set(1, 2, 3, 4))
+          awaitInSyncReplicas(survivorAdmin, "joint-failover-events", 0, Set(1, 2, 3) - controller)
+          produce(survivorBootstrap, "joint-failover-events", 0, "after-joint-loss", 1L)
+        finally survivorAdmin.close(Duration.ofSeconds(5))
+
+        cluster.start(controller)
+        awaitStableMembership(cluster.nodes(controller - 1), Set(1, 2, 3, 4))
+      finally admin.close(Duration.ofSeconds(5))
+    finally cluster.close()
+  }
+
   private def produce(bootstrap: String, topic: String, partition: Int, value: String, expectedOffset: Long): Unit =
     val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrap))
     try
@@ -225,6 +266,18 @@ final class ClusterFaultQualificationSuite extends FunSuite:
       cursor.ensureFullyRead()
       Some(metadata)
     catch case _: Throwable => None
+
+  private def armStabilizationFault(cluster: FaultCluster, controller: Int): ArmedFault =
+    val armed = ArmedFault(
+      triggerMatches = 2,
+      trigger = call =>
+        call.sourceId == controller && call.apiKey == InternalApi.MetadataCommit && metadataFromCommit(call).exists {
+          _.membership.exists(_.isJoint)
+        },
+      drop = call => call.sourceId == controller && call.apiKey == InternalApi.MetadataPrepare
+    )
+    cluster.faults.arm(armed)
+    armed
 
   private def metadataSnapshot(node: cascade.cluster.ClusterNode): cascade.cluster.ClusterMetadata =
     val peer = PeerClient()
