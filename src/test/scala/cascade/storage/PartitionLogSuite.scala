@@ -438,6 +438,40 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("key compaction rewrites closed segments and preserves latest, keyless, and transactional batches") {
+    val directory = Files.createTempDirectory("cascade-key-compaction-test")
+    val value = Array.fill[Byte](300)(7)
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(
+          cleanupPolicy = CleanupPolicy.Compact,
+          retentionMillis = -1L
+        )
+      )
+      try
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("key".getBytes), Some(value), 1000L))))
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(None, Some(value), 1001L))))
+        log.append(TestRecordBatch.producer(20L, 1, 0, transactional = true))
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("key".getBytes), Some(value), 1002L))))
+
+        val statistics = log.runLifecycle()
+        assertEquals(statistics.compactedBatches, 1L)
+        assert(statistics.reclaimedBytes > 300L)
+        assertEquals(batchBaseOffsets(log.fetch(0L, 4096).records), Vector(1L, 2L, 3L))
+        assertEquals(log.logStartOffset, 1L)
+        assertEquals(log.logEndOffset, 4L)
+        assertEquals(log.transactionBatches(0L, 4L).map(_.producerId), Vector(20L))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try assertEquals(batchBaseOffsets(recovered.fetch(0L, 4096).records), Vector(1L, 2L, 3L))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]

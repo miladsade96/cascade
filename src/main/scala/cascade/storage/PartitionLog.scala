@@ -340,6 +340,7 @@ final class PartitionLog(
 
   private[storage] def runLifecycle(nowMillis: Long = System.currentTimeMillis()): LifecycleStatistics = synchronized {
     lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
+    if lifecycleConfig.cleanupPolicy.compactEnabled then compactClosedSegments()
     if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
       awaitBackgroundFlush()
       flushDirtySegments()
@@ -512,6 +513,69 @@ final class PartitionLog(
     AtomicFileLifecycle.purgeMarked(marked)
     retiredSegments = Math.addExact(retiredSegments, 1L)
     reclaimedBytes = Math.addExact(reclaimedBytes, bytes)
+
+  private def compactClosedSegments(): Unit =
+    awaitBackgroundFlush()
+    flushDirtySegments()
+    val latestByKey = HashMap.empty[Vector[Byte], Long]
+    segments.iterator.flatMap(_.index.iterator).foreach { entry =>
+      if !entry.metadata.transactional && !entry.metadata.control then
+        RecordBatch.indexedRecords(readBatch(entry)).foreach { records =>
+          records.foreach(record => record.key.foreach(key => latestByKey.update(key, record.offset)))
+        }
+    }
+    val candidates = segments.dropRight(1).filter(_.index.lastOption.forall(_.lastOffset < committedOffset)).toVector
+    var changed = false
+    candidates.foreach { segment =>
+      val removable = segment.index.filter { entry =>
+        !entry.metadata.transactional && !entry.metadata.control &&
+          RecordBatch.indexedRecords(readBatch(entry)).exists { records =>
+            records.nonEmpty && records.forall(record => record.key.exists(key => latestByKey.get(key).exists(_ > record.offset)))
+          }
+      }.toSet
+      if removable.nonEmpty then
+        rewriteCompactedSegment(segment, removable)
+        compactedBatches = Math.addExact(compactedBatches, removable.size.toLong)
+        changed = true
+    }
+    if changed then rebuildProducerHistory()
+
+  private def rewriteCompactedSegment(segment: LogSegment, removable: Set[BatchIndex]): Unit =
+    val retained = segment.index.filterNot(removable).toVector
+    if retained.isEmpty then retireSegment(segment)
+    else
+      val temporary = segment.path.resolveSibling(segment.path.getFileName.toString + ".cleaned")
+      Files.deleteIfExists(temporary): Unit
+      val output = FileChannel.open(
+        temporary,
+        StandardOpenOption.CREATE_NEW,
+        StandardOpenOption.READ,
+        StandardOpenOption.WRITE
+      )
+      try
+        var position = 0L
+        retained.foreach { entry =>
+          val batch = readBatch(entry)
+          writeFully(output, ByteBuffer.wrap(batch), position)
+          position += batch.length
+        }
+        output.force(true)
+      finally output.close()
+      val oldSize = segment.size
+      val segmentIndex = segments.indexOf(segment)
+      segment.close()
+      AtomicFileLifecycle.replace(temporary, segment.path)
+      val replacement = LogSegment(segment.baseOffset, segment.path)
+      scan(replacement)
+      segments.update(segmentIndex, replacement)
+      reclaimedBytes = Math.addExact(reclaimedBytes, oldSize - replacement.size)
+
+  private def readBatch(entry: BatchIndex): Array[Byte] =
+    val owner = segments.iterator.find(_.index.contains(entry))
+      .getOrElse(throw ProtocolException(s"missing segment for batch ${entry.baseOffset}"))
+    val bytes = new Array[Byte](entry.size)
+    readFully(owner.channel, ByteBuffer.wrap(bytes), entry.position)
+    bytes
 
   private def beginBackgroundFlush(): Vector[FlushTarget] =
     flushInProgress = true
