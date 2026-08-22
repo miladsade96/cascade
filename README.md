@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, and dynamic broker/voter membership.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, and crash-safe storage lifecycle management.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I now replicate classic-group, committed-offset, producer, and transaction coordinator state through the metadata quorum, and I've tested live group and open-transaction failover with Kafka 4.3.1 clients. Voter changes use durable joint consensus, new observers synchronize before admission, and removing the active controller hands leadership to the surviving quorum. I have also qualified forced JVM kills, torn journal/data tails, stable-quorum partitions, coordinator fencing, and joint-quorum failures with deterministic tests. Physical power loss, disk loss/full behavior, storage lifecycle, security, resource isolation, and operations are still release blockers.
+> Cascade isn't a production Kafka replacement yet. I now replicate classic-group, committed-offset, producer, and transaction coordinator state through the metadata quorum, and I've tested live group and open-transaction failover with Kafka 4.3.1 clients. Voter changes use durable joint consensus, new observers synchronize before admission, and removing the active controller hands leadership to the surviving quorum. I have qualified forced JVM kills, torn journal/data tails, stable/joint quorum failures, retention and compaction restart recovery, and low-disk write rejection. Physical power/device loss, per-topic lifecycle policy, security, resource isolation, and operations are still release blockers.
 
 ## Performance I measured
 
@@ -25,6 +25,7 @@ I measured this on my Windows development machine with Java 21, eight partitions
 | 1,000,000 records, calibration | **614,413 records/s** / **600.0 MiB/s** | **556,232 records/s** / **543.2 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, coordinator-failover regression | **510,714 records/s** / **498.7 MiB/s** | **263,637 records/s** / **257.5 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, fault-qualification regression | **503,499 records/s** / **491.7 MiB/s** | **250,190 records/s** / **244.3 MiB/s** | **1,000,000 / 1,000,000** |
+| 1,000,000 records, storage-lifecycle regression | **423,662 records/s** / **413.7 MiB/s** | **477,368 records/s** / **466.2 MiB/s** | **1,000,000 / 1,000,000** |
 
 After I fixed the background-flush path, sustained ten-million-record production went from 57,400 to 182,285 records/s: a **3.18x improvement**. The write phase dropped from 174.2 to 54.9 seconds. That run forced 9.58 GiB in 47.6 cumulative seconds, so the drive was the main limit on this machine.
 
@@ -42,6 +43,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
+| Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -68,6 +70,14 @@ Any language can connect if its client speaks one of the supported Kafka protoco
 - `periodic` background flushing with dirty-age, byte-threshold, and segment-rollover triggers.
 - `sync` flushing for strict per-append local persistence.
 - Clean shutdown forces all remaining dirty segments.
+- Scheduled time and per-partition size retention only retire closed, fully committed segments and preserve the active segment.
+- Segment retirement uses an atomic `.deleted` rename; startup finishes an interrupted deletion without exposing the retired log again.
+- Conservative keyed compaction rewrites closed segments atomically and removes a batch only when every key has a strictly newer offset.
+- Compaction keeps compressed, malformed, keyless, control, and transactional batches opaque and untouched.
+- Batch timestamp and transaction-range indexes rebuild from immutable headers at startup; `ListOffsets` now returns the first batch whose maximum timestamp reaches the requested time.
+- Offset expiry is committed through the same local or quorum coordinator checkpoint as ordinary offset changes.
+- Offset, delivery, and cluster-metadata journals compact to their latest checksum-protected image after a configurable byte threshold.
+- A configurable free-space reserve rejects an append before its log end changes and returns Kafka error 56 (`KAFKA_STORAGE_ERROR`).
 
 Kafka acknowledgements and local disk forcing are separate settings. In single-node periodic mode, `acks=1` and `acks=all` acknowledge a local append before the next scheduled force. A process, OS, or power failure before that force can lose those records. In cluster mode, `acks=all` requires the configured minimum ISR and waits for every current ISR member to append before the committed high watermark advances.
 
@@ -327,6 +337,8 @@ After adding dynamic membership and retry rollback, I ran the same one-million-r
 
 After adding deterministic fault injection and forced-kill recovery qualification, I ran a clean **99/99** test suite and repeated the workload on 2026-08-20. It verified exactly **1,000,000 / 1,000,000** records at **503,499 produced records/s** (**491.7 MiB/s**) and **250,190 consumed records/s** (**244.3 MiB/s**). Produce took 1.986 seconds, consume took 3.997 seconds, p99 acknowledgement latency stayed at or below 500 ms, maximum acknowledgement latency was 445.075 ms, and peak heap was 1,222.1 MiB. I use this short cache-assisted run as a correctness and hot-path regression gate, not as a production capacity claim.
 
+After adding storage lifecycle management, I ran a clean **125/125** test suite and repeated the workload on 2026-08-22. It verified exactly **1,000,000 / 1,000,000** records at **423,662 produced records/s** (**413.7 MiB/s**) and **477,368 consumed records/s** (**466.2 MiB/s**). Produce took 2.360 seconds, consume took 2.095 seconds, p99 acknowledgement latency stayed at or below 1,000 ms, maximum acknowledgement latency was 643.996 ms, and peak heap was 1,747.6 MiB. The lifecycle interval is five minutes by default, so no cleanup ran during this seven-second regression; I use it to detect hot-path and exactness regressions, not to claim lifecycle throughput.
+
 ### Reproduce the load test
 
 ```bash
@@ -347,12 +359,12 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current clean `sbt test` suite passes **99/99 tests** in four layers:
+The current clean `sbt test` suite passes **125/125 tests** in four layers:
 
-- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, durable controller term/vote recovery, shutdown markers, and deterministic fault schedules.
+- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, timestamp and transaction indexes, time/size retention, conservative keyed compaction, interrupted replacement recovery, offset expiry, coordinator-journal compaction, disk admission, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, durable controller term/vote recovery, shutdown markers, and deterministic fault schedules.
 - TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, idempotent state recovery after broker restart, flexible voter-change framing, and Kafka quorum description decoding.
 - Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart and coordinator loss, RF=3/RF=4 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, reassignment visibility/cancellation, reassignment through controller loss, live voter admission, active-controller removal and restart as an observer, transactions, commit/abort isolation, active last stable offsets, transactional consumer offsets, and an open transaction committed after coordinator failover.
-- Qualification tests that force-kill real broker JVMs, corrupt persisted tails, partition stable and joint quorums, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
+- Qualification tests that force-kill real broker JVMs, corrupt persisted tails, partition stable and joint quorums, exercise retention through a real Kafka client and broker restart, surface low-disk rejection through the Kafka protocol, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
 
 The load harness separately checks the exact record count at one million and ten million records.
 
@@ -360,12 +372,12 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Storage lifecycle | Time/size retention, log and coordinator compaction, offset expiry, timestamp and transaction indexes, disk-pressure handling, and safe deletion |
-| 2 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
-| 3 | Operations | Metrics export, health/readiness endpoints, structured logs, admin API coverage, backup/restore, capacity alerts, and operational runbooks |
-| 4 | Compatibility | New Kafka consumer protocol, static-member fencing, more API versions, malformed-frame/fuzz testing, multiple client languages, and rolling upgrade/downgrade testing |
-| 5 | Qualification | Physical power loss, disk loss/full/corruption, arbitrary packet delay/reordering, multi-day soak, and dedicated-host replicated-cluster benchmarks |
-| 6 | Coordinator scale | Sharded and compacted coordinator state with high-cardinality and failover benchmarks |
+| 1 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
+| 2 | Operations | Metrics export, health/readiness endpoints, structured logs, admin API coverage, backup/restore, capacity alerts, and operational runbooks |
+| 3 | Compatibility | New Kafka consumer protocol, static-member fencing, more API versions, malformed-frame/fuzz testing, multiple client languages, and rolling upgrade/downgrade testing |
+| 4 | Qualification | Physical power loss, disk loss/full/corruption, arbitrary packet delay/reordering, multi-day soak, and dedicated-host replicated-cluster benchmarks |
+| 5 | Coordinator scale | Sharded coordinator state with high-cardinality and failover benchmarks |
+| 6 | Storage lifecycle follow-up | Per-topic policies, compressed-batch record compaction, tombstone grace periods, deletion throttles, and replicated retention coordination |
 | 7 | Profile-driven optimization | Zero-copy Fetch with `FileChannel.transferTo`, selector/worker pools, multi-device log placement, and further changes justified by profiling |
 
 I track the release gates in [docs/production-readiness.md](docs/production-readiness.md). I won't call Cascade a production Kafka replacement until every blocking gate passes on the deployment topology I document.
@@ -374,8 +386,10 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 
 - Dynamic membership is implemented and deterministic stable/joint partition tests pass, but automatic broker registration, rolling version negotiation, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
 - Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
-- Coordinator failover uses one full quorum image and one elected writer; I still need sharding, compaction, retention, and high-cardinality scale tests before treating it like Kafka's partitioned internal topics.
-- Retention, compaction, timestamp indexes, quotas, TLS/SASL, ACLs, and operational endpoints are not implemented.
+- Coordinator failover uses one full quorum image and one elected writer. The local journals are bounded and offsets expire, but I still need sharding and high-cardinality scale tests before treating it like Kafka's partitioned internal topics.
+- Lifecycle settings are broker-wide. I still need durable per-topic policies and Kafka configuration APIs.
+- Key compaction is deliberately batch-conservative: compressed, keyless, control, transactional, and partially superseded batches stay intact, and tombstone grace-period deletion is not implemented.
+- Quotas, TLS/SASL, ACLs, structured operational endpoints, backup/restore, and deletion I/O throttling are not implemented.
 - Only the classic consumer group protocol is supported.
 - The automated client matrix currently uses Kafka Java client 4.3.1.
 - The performance figures are single-node, shared-JVM development-machine measurements; replicated-cluster capacity has not been benchmarked.
@@ -395,6 +409,13 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--flush-policy` | `periodic` | Batched background forcing or strict per-append `sync` |
 | `--flush-interval-ms` | `1000` | Maximum periodic dirty age |
 | `--flush-bytes` | `67108864` | Per-partition dirty-byte threshold that schedules a force |
+| `--cleanup-policy` | `delete` | Broker-wide `delete`, `compact`, or combined `delete,compact` lifecycle policy |
+| `--retention-ms` | `604800000` | Age limit for closed committed segments; `-1` disables time retention |
+| `--retention-bytes` | `-1` | Per-partition byte budget; `-1` disables size retention |
+| `--lifecycle-interval-ms` | `300000` | Interval between lifecycle maintenance passes |
+| `--minimum-free-bytes` | `0` | Free-space reserve below which Cascade rejects new appends before writing |
+| `--offset-retention-ms` | `604800000` | Age limit for committed consumer offsets; `-1` disables expiry |
+| `--journal-compaction-bytes` | `67108864` | Local offset, delivery, and cluster-metadata journal compaction threshold |
 | `--node-id` | `1` | Broker/controller ID |
 | `--cluster-nodes` | Empty | Initial voters or observer discovery endpoints as `id@host:port`; empty selects single-node mode |
 | `--controller-id` | `1` | Preferred initial controller candidate; any configured voter can be elected later |
