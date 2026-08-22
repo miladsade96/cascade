@@ -354,6 +354,22 @@ final class PartitionLog(
       }.toVector
       expired.foreach(retireSegment)
       if expired.nonEmpty then rebuildProducerHistory()
+    if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionBytes > 0L then
+      awaitBackgroundFlush()
+      flushDirtySegments()
+      var totalBytes = segments.iterator.map(_.size).sum
+      val oversized = segments.dropRight(1).iterator
+        .filter(_.index.lastOption.forall(_.lastOffset < committedOffset))
+        .toVector
+        .iterator
+      var removed = false
+      while totalBytes > lifecycleConfig.retentionBytes && oversized.hasNext do
+        val segment = oversized.next()
+        val bytes = segment.size
+        retireSegment(segment)
+        totalBytes -= bytes
+        removed = true
+      if removed then rebuildProducerHistory()
     lifecycleStatistics
   }
 

@@ -390,6 +390,27 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("size retention removes oldest closed segments until the partition reaches its budget") {
+    val directory = Files.createTempDirectory("cascade-size-retention-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = -1L, retentionBytes = 1000L)
+      )
+      try
+        (0 until 3).foreach(_ => log.append(TestRecordBatch.single(totalBytes = 600)))
+        val statistics = log.runLifecycle()
+        assertEquals(statistics.retiredSegments, 2L)
+        assertEquals(statistics.reclaimedBytes, 1200L)
+        assertEquals(log.logStartOffset, 2L)
+        assertEquals(log.logEndOffset, 3L)
+        assertEquals(batchBaseOffsets(log.fetch(0L, 4096).records), Vector(2L))
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]
