@@ -47,3 +47,5 @@ final case class LifecycleStatistics(
 
 object LifecycleStatistics:
   val Empty: LifecycleStatistics = LifecycleStatistics(0L, 0L, 0L, 0L, 0L)
+
+final class StoragePressureException(message: String) extends RuntimeException(message)

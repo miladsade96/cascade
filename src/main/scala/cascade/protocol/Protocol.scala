@@ -43,6 +43,7 @@ object Errors:
   val InvalidProducerIdMapping: Short = 49
   val InvalidTransactionTimeout: Short = 50
   val ConcurrentTransactions: Short = 51
+  val KafkaStorageError: Short = 56
   val TransactionalIdAuthorizationFailed: Short = 53
   val UnknownProducerId: Short = 59
   val UnsupportedVersion: Short = 35

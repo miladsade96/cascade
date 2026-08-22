@@ -26,7 +26,8 @@ final class KafkaBroker(
     config.segmentBytes,
     config.flushPolicy,
     config.flushIntervalMillis,
-    config.flushBytes
+    config.flushBytes,
+    config.storageLifecycle
   )
   private val coordinatorLock = Object()
   private val clustered = config.clusterNodes.nonEmpty
@@ -81,6 +82,8 @@ final class KafkaBroker(
   def bootstrapServers: String = s"${config.advertisedHost}:$advertisedPort"
 
   def flushStatistics: FlushStatistics = registry.flushStatistics
+
+  def lifecycleStatistics: cascade.storage.LifecycleStatistics = registry.lifecycleStatistics
 
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then

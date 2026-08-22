@@ -61,7 +61,9 @@ final class PartitionLog(
     flushPolicy: FlushPolicy = FlushPolicy.Periodic,
     flushIntervalMillis: Long = 1000L,
     maxUnflushedBytes: Long = 64L * 1024 * 1024,
-    requestFlush: () => Unit = () => ()
+    requestFlush: () => Unit = () => (),
+    lifecycleConfig: StorageLifecycleConfig = StorageLifecycleConfig(),
+    usableSpace: Option[() => Long] = None
 ) extends AutoCloseable:
   require(maxSegmentBytes >= 1024, "maxSegmentBytes must be at least 1 KiB")
   require(flushIntervalMillis > 0, "flush interval must be positive")
@@ -93,6 +95,11 @@ final class PartitionLog(
   private var forceCount = 0L
   private var forcedBytes = 0L
   private var forceNanos = 0L
+  private var lifecycleRuns = 0L
+  private var retiredSegments = 0L
+  private var reclaimedBytes = 0L
+  private var compactedBatches = 0L
+  private var rejectedAppends = 0L
 
   def highWatermark: Long = synchronized(committedOffset)
 
@@ -225,6 +232,7 @@ final class PartitionLog(
   private def appendInternal(recordSet: Array[Byte], commitImmediately: Boolean): AppendResult =
     var scheduleFlush = false
     val result = synchronized {
+      ensureDiskCapacity(recordSet.length)
       val prepared = RecordBatch.prepare(recordSet, nextOffset)
       if prepared.isEmpty then throw ProtocolException("produce request contained an empty record set")
       val firstOffset = prepared.head.baseOffset
@@ -268,6 +276,10 @@ final class PartitionLog(
 
   private[storage] def flushStatistics: FlushStatistics = synchronized {
     FlushStatistics(forceCount, forcedBytes, forceNanos, unflushedBytes + inFlightFlushBytes)
+  }
+
+  private[storage] def lifecycleStatistics: LifecycleStatistics = synchronized {
+    LifecycleStatistics(lifecycleRuns, retiredSegments, reclaimedBytes, compactedBatches, rejectedAppends)
   }
 
   def fetch(offset: Long, maxBytes: Int): FetchResult =
@@ -399,6 +411,14 @@ final class PartitionLog(
     if segment.unflushedBytes == 0L then segment.dirtySinceNanos = System.nanoTime()
     segment.unflushedBytes = Math.addExact(segment.unflushedBytes, bytes.toLong)
     unflushedBytes = Math.addExact(unflushedBytes, bytes.toLong)
+
+  private def ensureDiskCapacity(incomingBytes: Int): Unit =
+    if lifecycleConfig.minimumFreeBytes > 0L then
+      val required = Math.addExact(lifecycleConfig.minimumFreeBytes, incomingBytes.toLong)
+      val available = usableSpace.fold(Files.getFileStore(directory).getUsableSpace)(value => value())
+      if available < required then
+        rejectedAppends = Math.addExact(rejectedAppends, 1L)
+        throw StoragePressureException(s"disk admission rejected $incomingBytes bytes; available=$available, required=$required")
 
   private def batchFingerprint(entry: BatchIndex): BatchFingerprint =
     ensureFingerprint(entry)

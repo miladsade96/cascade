@@ -2,7 +2,7 @@ package cascade.cluster
 
 import cascade.broker.BrokerConfig
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
-import cascade.storage.{BatchFingerprint, TopicRegistry}
+import cascade.storage.{BatchFingerprint, StoragePressureException, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, TimeUnit}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -47,8 +47,10 @@ final class ReplicationManager(
     if !cluster.isEnabled then
       registry.partition(topic, partition) match
         case Some(log) =>
-          val result = log.append(records)
-          ReplicatedAppendResult(Errors.None, result.baseOffset)
+          try
+            val result = log.append(records)
+            ReplicatedAppendResult(Errors.None, result.baseOffset)
+          catch case _: StoragePressureException => ReplicatedAppendResult(Errors.KafkaStorageError, -1L)
         case None => ReplicatedAppendResult(Errors.UnknownTopicOrPartition, -1L)
     else if cluster.isBrokerFenced then ReplicatedAppendResult(Errors.BrokerNotAvailable, -1L)
     else
@@ -170,7 +172,9 @@ final class ReplicationManager(
       registry.partition(topic, partition) match
         case None => ReplicatedAppendResult(Errors.UnknownTopicOrPartition, -1L)
         case Some(log) =>
-          val appended = log.appendReplica(records, log.logEndOffset)
+          val appended =
+            try log.appendReplica(records, log.logEndOffset)
+            catch case _: StoragePressureException => return ReplicatedAppendResult(Errors.KafkaStorageError, -1L)
           val followers = metadata.inSyncReplicas.filterNot(_ == config.nodeId).flatMap(nodeById)
           val appendPayload = ByteWriter(records.length + 128)
             .writeString(topic)
@@ -238,7 +242,9 @@ final class ReplicationManager(
             try
               log.appendReplica(records, expectedBaseOffset)
               (Errors.None, log.logEndOffset)
-            catch case _: Throwable => (Errors.InvalidRequest, log.logEndOffset)
+            catch
+              case _: StoragePressureException => (Errors.KafkaStorageError, log.logEndOffset)
+              case _: Throwable => (Errors.InvalidRequest, log.logEndOffset)
     ByteWriter().writeShort(error).writeLong(logEnd).result()
 
   private def replicaCommit(cursor: ByteCursor): Array[Byte] =

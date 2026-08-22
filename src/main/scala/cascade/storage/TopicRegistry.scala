@@ -15,7 +15,8 @@ final class TopicRegistry(
     maxSegmentBytes: Long,
     flushPolicy: FlushPolicy = FlushPolicy.Periodic,
     flushIntervalMillis: Long = 1000L,
-    flushBytes: Long = 64L * 1024 * 1024
+    flushBytes: Long = 64L * 1024 * 1024,
+    lifecycleConfig: StorageLifecycleConfig = StorageLifecycleConfig()
 ) extends AutoCloseable:
   require(flushIntervalMillis > 0, "flush interval must be positive")
   require(flushBytes > 0, "flush bytes must be positive")
@@ -83,6 +84,12 @@ final class TopicRegistry(
       .map(_.flushStatistics)
       .foldLeft(FlushStatistics.Empty)(_ + _)
 
+  def lifecycleStatistics: LifecycleStatistics =
+    topics.values().asScala
+      .flatMap(_.iterator)
+      .map(_.lifecycleStatistics)
+      .foldLeft(LifecycleStatistics.Empty)(_ + _)
+
   private def discoverTopics(): Unit =
     val directories = Files.list(dataDirectory)
     try
@@ -113,7 +120,8 @@ final class TopicRegistry(
       flushPolicy,
       flushIntervalMillis,
       flushBytes,
-      requestFlush
+      requestFlush,
+      lifecycleConfig
     )
 
   private def startPeriodicFlusher(): Unit =

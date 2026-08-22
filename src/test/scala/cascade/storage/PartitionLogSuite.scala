@@ -342,6 +342,22 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("disk-pressure admission rejects before changing the log") {
+    val directory = Files.createTempDirectory("cascade-disk-pressure-test")
+    try
+      val log = PartitionLog(
+        directory,
+        lifecycleConfig = StorageLifecycleConfig(minimumFreeBytes = 100L),
+        usableSpace = Some(() => 160L)
+      )
+      try
+        intercept[StoragePressureException](log.append(TestRecordBatch.single()))
+        assertEquals(log.logEndOffset, 0L)
+        assertEquals(log.lifecycleStatistics.rejectedAppends, 1L)
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]
