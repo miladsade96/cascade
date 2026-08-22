@@ -83,6 +83,27 @@ final class DeliveryStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("delivery journal compaction retains the latest complete image") {
+    val directory = Files.createTempDirectory("cascade-delivery-compaction")
+    val path = directory.resolve("delivery.log")
+    try
+      val store = DeliveryStore(path, compactionBytes = 1024L)
+      val latest =
+        try
+          (1L to 30L).map { version =>
+            val image = sampleImage(version, offsetsApplied = version % 2L == 0L)
+            store.commit(image)
+            image
+          }.last
+        finally store.close()
+      assert(Files.size(path) < 2048L)
+
+      val recovered = DeliveryStore(path)
+      try assertEquals(recovered.image, latest)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def sampleImage(version: Long, offsetsApplied: Boolean): DeliveryImage =
     val range = TransactionRange("events", 0, 10L, 19L)
     val offset = PendingOffset("workers", "events", 0, 20L, 3, Some("checkpoint"))

@@ -26,10 +26,11 @@ final class DeliveryCoordinator(
     groups: GroupCoordinator,
     stateLock: Object = Object(),
     durableLocal: Boolean = true,
-    scheduleExpiration: Boolean = true
+    scheduleExpiration: Boolean = true,
+    journalCompactionBytes: Long = Long.MaxValue
 ) extends AutoCloseable:
   private val MaximumTransactionTimeoutMillis = 15 * 60 * 1000
-  private val store = DeliveryStore(statePath)
+  private val store = DeliveryStore(statePath, journalCompactionBytes)
   private val partitionLocks = ConcurrentHashMap[TopicPartition, Object]()
   private val inFlightTransactionalAppends = mutable.HashMap.empty[String, Int]
   private val closed = AtomicBoolean(false)

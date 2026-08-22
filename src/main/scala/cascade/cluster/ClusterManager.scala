@@ -62,7 +62,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val metadataMutationLock = Object()
   private val peerExecutor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val metadataStore =
-    Option.when(enabled)(MetadataStore(config.dataDirectory.resolve(".cascade").resolve("cluster-metadata.log")))
+    Option.when(enabled)(
+      MetadataStore(
+        config.dataDirectory.resolve(".cascade").resolve("cluster-metadata.log"),
+        config.storageLifecycle.journalCompactionBytes
+      )
+    )
   private val controllerStore =
     Option.when(enabled)(ControllerStateStore(config.dataDirectory.resolve(".cascade").resolve("controller-state.log")))
   @volatile private var current = metadataStore.map(_.metadata).getOrElse(ClusterMetadata.Empty)

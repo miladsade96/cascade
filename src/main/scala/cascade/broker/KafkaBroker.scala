@@ -62,7 +62,8 @@ final class KafkaBroker(
       groupCoordinator,
       coordinatorLock,
       durableLocal = !clustered,
-      scheduleExpiration = !clustered
+      scheduleExpiration = !clustered,
+      journalCompactionBytes = config.storageLifecycle.journalCompactionBytes
     )
     val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery, coordinatorLock))
     peerClient = peers

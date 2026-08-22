@@ -151,6 +151,27 @@ final class MetadataStoreSuite extends FunSuite:
     )
   }
 
+  test("metadata journal compaction bounds full-image history and recovers the latest image") {
+    val directory = Files.createTempDirectory("cascade-metadata-compaction-test")
+    val path = directory.resolve("metadata.log")
+    try
+      val store = MetadataStore(path, compactionBytes = 1024L)
+      val latest =
+        try
+          (1L to 80L).map { version =>
+            val image = ClusterMetadata(version, Vector.empty, controllerTerm = version)
+            store.commit(image)
+            image
+          }.last
+        finally store.close()
+      assert(Files.size(path) < 1024L)
+
+      val recovered = MetadataStore(path)
+      try assertEquals(recovered.metadata, latest)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
