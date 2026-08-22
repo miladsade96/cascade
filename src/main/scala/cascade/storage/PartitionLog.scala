@@ -38,6 +38,8 @@ private final class LogSegment(val baseOffset: Long, val path: Path):
     StandardOpenOption.WRITE
   )
   val index: ArrayBuffer[BatchIndex] = ArrayBuffer.empty
+  val timestampIndex: TimestampIndex = TimestampIndex()
+  val transactionIndex: TransactionIndex = TransactionIndex()
   var unflushedBytes: Long = 0L
   var dirtySinceNanos: Long = 0L
 
@@ -169,6 +171,7 @@ final class PartitionLog(
       cutSegment.channel.truncate(cutPosition)
       cutSegment.channel.force(true)
       cutSegment.index.remove(retained.size, cutSegment.index.size - retained.size)
+      rebuildAuxiliaryIndexes(cutSegment)
       segments.drop(cutIndex + 1).foreach { segment =>
         segment.close()
         Files.deleteIfExists(segment.path): Unit
@@ -231,6 +234,8 @@ final class PartitionLog(
         writeFully(segment.channel, ByteBuffer.wrap(batch.bytes), position)
         val metadata = RecordBatch.metadata(batch.bytes)
         segment.index += BatchIndex(metadata, position, batch.bytes.length)
+        segment.timestampIndex.append(metadata)
+        segment.transactionIndex.append(metadata)
         indexProducerBatch(metadata)
         markDirty(segment, batch.bytes.length)
         nextOffset = Math.addExact(batch.lastOffset, 1L)
@@ -313,7 +318,12 @@ final class PartitionLog(
   def offsetForTimestamp(timestamp: Long): Long = synchronized {
     if timestamp == -2L then logStartOffset
     else if timestamp == -1L then committedOffset
-    else logStartOffset // Timestamp index is a later compatibility milestone.
+    else
+      segments.iterator.flatMap(_.timestampIndex.offsetFor(timestamp)).nextOption().getOrElse(-1L)
+  }
+
+  def transactionBatches(firstOffset: Long, lastOffsetExclusive: Long): Vector[TransactionIndexEntry] = synchronized {
+    segments.iterator.flatMap(_.transactionIndex.overlapping(firstOffset, lastOffsetExclusive)).toVector
   }
 
   override def close(): Unit = synchronized {
@@ -375,6 +385,8 @@ final class PartitionLog(
           readFully(segment.channel, ByteBuffer.wrap(batch), position)
           val metadata = RecordBatch.metadata(batch)
           segment.index += BatchIndex(metadata, position, totalSize)
+          segment.timestampIndex.append(metadata)
+          segment.transactionIndex.append(metadata)
           indexProducerBatch(metadata)
           position += totalSize
     if position < fileSize then
@@ -421,6 +433,14 @@ final class PartitionLog(
       val history = recentProducerBatches.getOrElseUpdate(metadata.producerId, ArrayDeque.empty)
       history.append(metadata)
       while history.length > producerHistoryLimit do history.removeHead(): Unit
+
+  private def rebuildAuxiliaryIndexes(segment: LogSegment): Unit =
+    segment.timestampIndex.clear()
+    segment.transactionIndex.clear()
+    segment.index.foreach { entry =>
+      segment.timestampIndex.append(entry.metadata)
+      segment.transactionIndex.append(entry.metadata)
+    }
 
   private def beginBackgroundFlush(): Vector[FlushTarget] =
     flushInProgress = true

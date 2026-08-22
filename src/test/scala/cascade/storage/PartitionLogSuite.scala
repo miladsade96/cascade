@@ -321,6 +321,27 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("timestamp and transaction indexes rebuild from immutable batches after restart") {
+    val directory = Files.createTempDirectory("cascade-lifecycle-index-test")
+    try
+      val log = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("a".getBytes), Some("1".getBytes), 1000L))))
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("b".getBytes), Some("2".getBytes), 2000L))))
+        log.append(TestRecordBatch.producer(20L, 1, 0, transactional = true))
+        assertEquals(log.offsetForTimestamp(1500L), 1L)
+        assertEquals(log.offsetForTimestamp(3000L), -1L)
+        assertEquals(log.transactionBatches(0L, 3L).map(_.producerId), Vector(20L))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.offsetForTimestamp(1500L), 1L)
+        assertEquals(recovered.transactionBatches(2L, 3L).map(_.producerId), Vector(20L))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]
