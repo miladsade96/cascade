@@ -33,6 +33,33 @@ final class AtomicFileLifecycleSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("startup discards an uninstalled cleaned file when the original is still present") {
+    val directory = Files.createTempDirectory("cascade-cleaned-original-test")
+    try
+      val target = directory.resolve("00000000000000000000.log")
+      val temporary = directory.resolve("00000000000000000000.log.cleaned")
+      Files.write(target, Array[Byte](1))
+      Files.write(temporary, Array[Byte](2))
+
+      AtomicFileLifecycle.recoverReplacements(directory)
+      assertEquals(Files.readAllBytes(target).toVector, Vector[Byte](1))
+      assert(!Files.exists(temporary))
+    finally deleteTree(directory)
+  }
+
+  test("startup installs a completed cleaned file when its target is absent") {
+    val directory = Files.createTempDirectory("cascade-cleaned-promote-test")
+    try
+      val target = directory.resolve("00000000000000000000.log")
+      val temporary = directory.resolve("00000000000000000000.log.cleaned")
+      Files.write(temporary, Array[Byte](2, 3))
+
+      AtomicFileLifecycle.recoverReplacements(directory)
+      assertEquals(Files.readAllBytes(target).toVector, Vector[Byte](2, 3))
+      assert(!Files.exists(temporary))
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)

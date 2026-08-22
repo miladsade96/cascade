@@ -392,6 +392,7 @@ final class PartitionLog(
         segment
 
   private def loadSegments(): Unit =
+    AtomicFileLifecycle.recoverReplacements(directory)
     AtomicFileLifecycle.recoverDeleted(directory)
     val paths = Files.list(directory)
     try
