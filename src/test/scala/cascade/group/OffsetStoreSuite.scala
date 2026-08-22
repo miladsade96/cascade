@@ -124,6 +124,28 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("offset expiration removes old commits durably and preserves recent commits") {
+    val directory = Files.createTempDirectory("cascade-offset-expiration-test")
+    val path = directory.resolve("offsets.log")
+    val old = OffsetCommitValue(GroupOffsetKey("old", "events", 0), CommittedOffset(10L, -1, None, 1000L))
+    val recent = OffsetCommitValue(GroupOffsetKey("recent", "events", 0), CommittedOffset(20L, -1, None, 3000L))
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(old, recent))
+        assertEquals(store.expireBefore(2000L), Vector(old.key))
+        assertEquals(store.get(old.key), None)
+        assertEquals(store.get(recent.key), Some(recent.value))
+      finally store.close()
+
+      val recovered = OffsetStore(path)
+      try
+        assertEquals(recovered.get(old.key), None)
+        assertEquals(recovered.get(recent.key), Some(recent.value))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
