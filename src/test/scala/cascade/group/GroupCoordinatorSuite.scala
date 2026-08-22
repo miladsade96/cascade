@@ -95,6 +95,28 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("coordinator expiration removes stale offsets and survives restart") {
+    val directory = Files.createTempDirectory("cascade-group-offset-expiration-test")
+    val path = directory.resolve("offsets.log")
+    val old = OffsetCommitValue(GroupOffsetKey("workers", "events", 0), CommittedOffset(10L, -1, None, 1000L))
+    val recent = OffsetCommitValue(GroupOffsetKey("workers", "events", 1), CommittedOffset(20L, -1, None, 2500L))
+    try
+      val coordinator = GroupCoordinator(path, scheduleExpiration = false, offsetRetentionMillis = 1000L)
+      try
+        assertEquals(coordinator.commitOffsets("workers", -1, "", Vector(old, recent)), Errors.None)
+        coordinator.expireNow(nowMillis = 3000L)
+        assertEquals(coordinator.fetchOffset(old.key), None)
+        assertEquals(coordinator.fetchOffset(recent.key), Some(recent.value))
+      finally coordinator.close()
+
+      val recovered = GroupCoordinator(path, scheduleExpiration = false, offsetRetentionMillis = 1000L)
+      try
+        assertEquals(recovered.fetchOffset(old.key), None)
+        assertEquals(recovered.fetchOffset(recent.key), Some(recent.value))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def command(memberId: String, metadata: Array[Byte]): JoinGroupCommand =
     JoinGroupCommand(
       groupId = "workers",

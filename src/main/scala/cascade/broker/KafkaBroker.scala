@@ -35,7 +35,8 @@ final class KafkaBroker(
     config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"),
     coordinatorLock,
     durableLocal = !clustered,
-    scheduleExpiration = !clustered
+    scheduleExpiration = !clustered,
+    offsetRetentionMillis = config.storageLifecycle.offsetRetentionMillis
   )
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null

@@ -57,8 +57,10 @@ final class GroupCoordinator(
     offsetPath: Path,
     stateLock: Object = Object(),
     durableLocal: Boolean = true,
-    scheduleExpiration: Boolean = true
+    scheduleExpiration: Boolean = true,
+    offsetRetentionMillis: Long = -1L
 ) extends AutoCloseable:
+  require(offsetRetentionMillis == -1L || offsetRetentionMillis > 0L, "offset retention must be -1 or positive")
   private val EmptyAssignment = Array.emptyByteArray
   private val closed = AtomicBoolean(false)
   private val groups = mutable.HashMap.empty[String, ManagedGroup]
@@ -297,8 +299,8 @@ final class GroupCoordinator(
       leader.protocols.iterator.map(_.name).find(name => members.forall(_.protocols.exists(_.name == name)))
     }
 
-  def expireNow(): Unit = stateLock.synchronized {
-    val now = System.currentTimeMillis()
+  def expireNow(nowMillis: Long = System.currentTimeMillis()): Unit = stateLock.synchronized {
+    val now = nowMillis
     var changed = false
     groups.valuesIterator.foreach { group =>
       val pendingBefore = group.pendingMemberIds.size
@@ -315,6 +317,9 @@ final class GroupCoordinator(
           if group.members.isEmpty then resetEmpty(group) else beginRebalance(group, now)
           stateLock.notifyAll()
     }
+    if offsetRetentionMillis > 0L then
+      val expiredOffsets = offsets.expireBefore(now - offsetRetentionMillis, durableLocal)
+      changed ||= expiredOffsets.nonEmpty
     if changed then checkpointState(): Unit
   }
 
