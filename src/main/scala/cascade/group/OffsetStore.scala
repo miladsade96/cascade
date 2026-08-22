@@ -1,6 +1,7 @@
 package cascade.group
 
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
+import cascade.storage.AtomicFileLifecycle
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
@@ -18,12 +19,8 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   private val MaximumRecordBytes = 1024 * 1024
 
   Option(path.getParent).foreach(directory => Files.createDirectories(directory): Unit)
-  private val channel = FileChannel.open(
-    path,
-    StandardOpenOption.CREATE,
-    StandardOpenOption.READ,
-    StandardOpenOption.WRITE
-  )
+  Option(path.getParent).foreach(AtomicFileLifecycle.recoverReplacements)
+  private var channel = openChannel()
   private val offsets = mutable.HashMap.empty[GroupOffsetKey, CommittedOffset]
   private var appendPosition = recover()
   private var closed = false
@@ -59,6 +56,35 @@ final class OffsetStore(path: Path) extends AutoCloseable:
 
   def all(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = synchronized {
     offsets.iterator.filter(_._1.groupId == groupId).toVector.sortBy { case (key, _) => (key.topic, key.partition) }
+  }
+
+  def journalSize: Long = synchronized(channel.size())
+
+  /** Rewrites only the latest value for every key and installs it with one atomic rename. */
+  def compact(): Unit = synchronized {
+    ensureOpen()
+    val temporary = path.resolveSibling(path.getFileName.toString + ".cleaned")
+    Files.deleteIfExists(temporary): Unit
+    val output = FileChannel.open(
+      temporary,
+      StandardOpenOption.CREATE_NEW,
+      StandardOpenOption.READ,
+      StandardOpenOption.WRITE
+    )
+    var position = 0L
+    try
+      entries.foreach { entry =>
+        val frame = encode(entry)
+        writeFully(output, ByteBuffer.wrap(frame), position)
+        position += frame.length
+      }
+      output.force(true)
+    finally output.close()
+    channel.force(false)
+    channel.close()
+    AtomicFileLifecycle.replace(temporary, path)
+    channel = openChannel()
+    appendPosition = position
   }
 
   override def close(): Unit = synchronized {
@@ -138,6 +164,13 @@ final class OffsetStore(path: Path) extends AutoCloseable:
       if written <= 0 then throw ProtocolException("offset store made no append progress")
       position += written
 
+  private def writeFully(target: FileChannel, buffer: ByteBuffer, start: Long): Unit =
+    var position = start
+    while buffer.hasRemaining do
+      val written = target.write(buffer, position)
+      if written <= 0 then throw ProtocolException("offset compaction made no write progress")
+      position += written
+
   private def readFully(buffer: ByteBuffer, start: Long): Unit =
     var position = start
     while buffer.hasRemaining do
@@ -145,3 +178,6 @@ final class OffsetStore(path: Path) extends AutoCloseable:
       if read < 0 then throw ProtocolException("unexpected end of committed-offset journal")
       if read == 0 then throw ProtocolException("offset store made no read progress")
       position += read
+
+  private def openChannel(): FileChannel =
+    FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)

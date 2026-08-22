@@ -98,6 +98,32 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("compaction atomically retains only the latest offset for every key") {
+    val directory = Files.createTempDirectory("cascade-offset-compaction-test")
+    val path = directory.resolve("offsets.log")
+    val key = GroupOffsetKey("workers", "events", 0)
+    try
+      val store = OffsetStore(path)
+      val before =
+        try
+          (1L to 20L).foreach { offset =>
+            store.commit(Vector(OffsetCommitValue(key, CommittedOffset(offset, -1, None, offset * 1000L))))
+          }
+          val size = store.journalSize
+          store.compact()
+          assert(store.journalSize < size)
+          assertEquals(store.get(key).map(_.offset), Some(20L))
+          size
+        finally store.close()
+
+      val recovered = OffsetStore(path)
+      try
+        assertEquals(recovered.get(key).map(_.offset), Some(20L))
+        assert(recovered.journalSize < before)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
