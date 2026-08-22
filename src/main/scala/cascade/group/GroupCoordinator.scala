@@ -58,9 +58,11 @@ final class GroupCoordinator(
     stateLock: Object = Object(),
     durableLocal: Boolean = true,
     scheduleExpiration: Boolean = true,
-    offsetRetentionMillis: Long = -1L
+    offsetRetentionMillis: Long = -1L,
+    journalCompactionBytes: Long = Long.MaxValue
 ) extends AutoCloseable:
   require(offsetRetentionMillis == -1L || offsetRetentionMillis > 0L, "offset retention must be -1 or positive")
+  require(journalCompactionBytes >= 1024L, "offset journal compaction threshold must be at least 1 KiB")
   private val EmptyAssignment = Array.emptyByteArray
   private val closed = AtomicBoolean(false)
   private val groups = mutable.HashMap.empty[String, ManagedGroup]
@@ -222,6 +224,7 @@ final class GroupCoordinator(
     }
     if validation == Errors.None then stateLock.synchronized {
       offsets.commit(values, durableLocal)
+      if durableLocal && offsets.journalSize >= journalCompactionBytes then offsets.compact()
       if !checkpointState() then return Errors.CoordinatorNotAvailable
     }
     validation

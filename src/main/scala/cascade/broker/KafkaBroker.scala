@@ -36,7 +36,8 @@ final class KafkaBroker(
     coordinatorLock,
     durableLocal = !clustered,
     scheduleExpiration = !clustered,
-    offsetRetentionMillis = config.storageLifecycle.offsetRetentionMillis
+    offsetRetentionMillis = config.storageLifecycle.offsetRetentionMillis,
+    journalCompactionBytes = config.storageLifecycle.journalCompactionBytes
   )
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null

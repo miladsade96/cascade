@@ -117,6 +117,31 @@ final class GroupCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("coordinator automatically compacts a growing local offset journal") {
+    val directory = Files.createTempDirectory("cascade-group-journal-compaction-test")
+    val path = directory.resolve("offsets.log")
+    val key = GroupOffsetKey("workers", "events", 0)
+    try
+      val coordinator = GroupCoordinator(
+        path,
+        scheduleExpiration = false,
+        journalCompactionBytes = 1024L
+      )
+      try
+        (1L to 50L).foreach { offset =>
+          val value = OffsetCommitValue(key, CommittedOffset(offset, -1, None, offset * 1000L))
+          assertEquals(coordinator.commitOffsets("workers", -1, "", Vector(value)), Errors.None)
+        }
+        assertEquals(coordinator.fetchOffset(key).map(_.offset), Some(50L))
+      finally coordinator.close()
+      assert(Files.size(path) < 1024L)
+
+      val recovered = GroupCoordinator(path, scheduleExpiration = false)
+      try assertEquals(recovered.fetchOffset(key).map(_.offset), Some(50L))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def command(memberId: String, metadata: Array[Byte]): JoinGroupCommand =
     JoinGroupCommand(
       groupId = "workers",
