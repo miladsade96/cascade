@@ -4,6 +4,7 @@ import cascade.TestRecordBatch
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.atomic.AtomicInteger
 import munit.FunSuite
 import scala.jdk.CollectionConverters.*
@@ -355,6 +356,37 @@ final class PartitionLogSuite extends FunSuite:
         assertEquals(log.logEndOffset, 0L)
         assertEquals(log.lifecycleStatistics.rejectedAppends, 1L)
       finally log.close()
+    finally deleteTree(directory)
+  }
+
+  test("time retention atomically retires only closed committed segments") {
+    val directory = Files.createTempDirectory("cascade-time-retention-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = 1000L)
+      )
+      try
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        val first = directory.resolve("00000000000000000000.log")
+        Files.setLastModifiedTime(first, FileTime.fromMillis(1000L))
+
+        val statistics = log.runLifecycle(nowMillis = 3000L)
+        assertEquals(statistics.retiredSegments, 1L)
+        assertEquals(statistics.reclaimedBytes, 600L)
+        assertEquals(log.logStartOffset, 1L)
+        assertEquals(batchBaseOffsets(log.fetch(0L, 4096).records), Vector(1L))
+        assert(!Files.exists(first))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.logStartOffset, 1L)
+        assertEquals(recovered.logEndOffset, 2L)
+      finally recovered.close()
     finally deleteTree(directory)
   }
 

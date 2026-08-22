@@ -338,6 +338,25 @@ final class PartitionLog(
     segments.iterator.flatMap(_.transactionIndex.overlapping(firstOffset, lastOffsetExclusive)).toVector
   }
 
+  private[storage] def runLifecycle(nowMillis: Long = System.currentTimeMillis()): LifecycleStatistics = synchronized {
+    lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
+    if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
+      awaitBackgroundFlush()
+      flushDirtySegments()
+      val cutoff = nowMillis - lifecycleConfig.retentionMillis
+      val expired = segments.dropRight(1).takeWhile { segment =>
+        val fullyCommitted = segment.index.lastOption.forall(_.lastOffset < committedOffset)
+        val maximumTimestamp = segment.index.iterator.map(_.metadata.maxTimestamp).maxOption.getOrElse(0L)
+        val ageTimestamp =
+          if maximumTimestamp > 0L then maximumTimestamp
+          else Files.getLastModifiedTime(segment.path).toMillis
+        fullyCommitted && ageTimestamp < cutoff
+      }.toVector
+      expired.foreach(retireSegment)
+      if expired.nonEmpty then rebuildProducerHistory()
+    lifecycleStatistics
+  }
+
   override def close(): Unit = synchronized {
     awaitBackgroundFlush()
     flushDirtySegments()
@@ -356,6 +375,7 @@ final class PartitionLog(
         segment
 
   private def loadSegments(): Unit =
+    AtomicFileLifecycle.recoverDeleted(directory)
     val paths = Files.list(directory)
     try
       val segmentPaths = paths.iterator().asScala
@@ -461,6 +481,21 @@ final class PartitionLog(
       segment.timestampIndex.append(entry.metadata)
       segment.transactionIndex.append(entry.metadata)
     }
+
+  private def rebuildProducerHistory(): Unit =
+    recentProducerBatches.clear()
+    segments.iterator.flatMap(_.index.iterator).foreach(entry => indexProducerBatch(entry.metadata))
+
+  private def retireSegment(segment: LogSegment): Unit =
+    val bytes = segment.size
+    segment.close()
+    val marked = AtomicFileLifecycle.markDeleted(segment.path)
+    val index = segments.indexOf(segment)
+    if index < 0 then throw IllegalStateException(s"failed to retire segment ${segment.path}")
+    segments.remove(index): Unit
+    AtomicFileLifecycle.purgeMarked(marked)
+    retiredSegments = Math.addExact(retiredSegments, 1L)
+    reclaimedBytes = Math.addExact(reclaimedBytes, bytes)
 
   private def beginBackgroundFlush(): Vector[FlushTarget] =
     flushInProgress = true
