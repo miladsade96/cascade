@@ -33,13 +33,10 @@ final class ClusterFaultQualificationSuite extends FunSuite:
         cluster.faults.partition(Set(firstController), majority)
         val majorityBootstrap = cluster.nodes.filter(node => majority(node.id))
           .map(node => s"${node.host}:${node.port}").mkString(",")
-        val majorityAdmin = Admin.create(adminProperties(majorityBootstrap))
-        try
-          val nextController = awaitControllerNodes(cluster.nodes.filter(node => majority(node.id)), Some(firstController))
-          assert(majority(nextController))
-          awaitInSyncReplicas(majorityAdmin, "partition-events", partition, majority)
-          produce(majorityBootstrap, "partition-events", partition, "during-partition", 1L)
-        finally majorityAdmin.close(Duration.ofSeconds(5))
+        val nextController = awaitControllerNodes(cluster.nodes.filter(node => majority(node.id)), Some(firstController))
+        assert(majority(nextController))
+        awaitSnapshotInSyncReplicas(cluster.nodes(nextController - 1), "partition-events", partition, majority)
+        produce(majorityBootstrap, "partition-events", partition, "during-partition", 1L)
 
         cluster.faults.heal()
         awaitInSyncReplicas(admin, "partition-events", partition, Set(1, 2, 3))
@@ -412,6 +409,24 @@ final class ClusterFaultQualificationSuite extends FunSuite:
         actual = admin.describeTopics(java.util.List.of(topic)).allTopicNames().get(3, TimeUnit.SECONDS).get(topic)
           .partitions().asScala.find(_.partition() == partition)
           .map(_.isr().asScala.map(_.id()).toSet).getOrElse(Set.empty)
+      catch case _: Throwable => actual = Set.empty
+      if actual != expected then Thread.sleep(100L)
+    assertEquals(actual, expected)
+
+  private def awaitSnapshotInSyncReplicas(
+      node: cascade.cluster.ClusterNode,
+      topic: String,
+      partition: Int,
+      expected: Set[Int]
+  ): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
+    var actual = Set.empty[Int]
+    while actual != expected && System.nanoTime() < deadline do
+      try
+        actual = metadataSnapshot(node).byName.get(topic)
+          .flatMap(_.partitions.find(_.partition == partition))
+          .map(_.inSyncReplicas.toSet)
+          .getOrElse(Set.empty)
       catch case _: Throwable => actual = Set.empty
       if actual != expected then Thread.sleep(100L)
     assertEquals(actual, expected)
