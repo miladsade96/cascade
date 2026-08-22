@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
-import cascade.storage.FlushPolicy
+import cascade.storage.{CleanupPolicy, FlushPolicy, StorageLifecycleConfig}
 import java.nio.file.{Path, Paths}
 
 final case class BrokerConfig(
@@ -25,6 +25,7 @@ final case class BrokerConfig(
     replicaRecoveryChunkBytes: Int = 8 * 1024 * 1024,
     controllerHeartbeatMillis: Int = 250,
     controllerElectionTimeoutMillis: Int = 1500,
+    storageLifecycle: StorageLifecycleConfig = StorageLifecycleConfig(),
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -87,6 +88,20 @@ object BrokerConfig:
         loop(tail, config.copy(controllerHeartbeatMillis = value.toInt))
       case "--controller-election-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(controllerElectionTimeoutMillis = value.toInt))
+      case "--cleanup-policy" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(cleanupPolicy = CleanupPolicy.parse(value))))
+      case "--retention-ms" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(retentionMillis = value.toLong)))
+      case "--retention-bytes" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(retentionBytes = value.toLong)))
+      case "--lifecycle-interval-ms" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(lifecycleIntervalMillis = value.toLong)))
+      case "--minimum-free-bytes" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(minimumFreeBytes = value.toLong)))
+      case "--offset-retention-ms" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(offsetRetentionMillis = value.toLong)))
+      case "--journal-compaction-bytes" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(journalCompactionBytes = value.toLong)))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
     loop(arguments.toList, BrokerConfig())

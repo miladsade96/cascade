@@ -1,6 +1,6 @@
 package cascade.broker
 
-import cascade.storage.FlushPolicy
+import cascade.storage.{CleanupPolicy, FlushPolicy}
 import munit.FunSuite
 
 final class BrokerConfigSuite extends FunSuite:
@@ -79,4 +79,39 @@ final class BrokerConfigSuite extends FunSuite:
 
     assertEquals(config.nodeId, 4)
     assert(!config.clusterNodes.exists(_.id == config.nodeId))
+  }
+
+  test("parses storage lifecycle and disk-pressure settings") {
+    val config = BrokerConfig.parse(
+      Array(
+        "--cleanup-policy",
+        "compact,delete",
+        "--retention-ms",
+        "3600000",
+        "--retention-bytes",
+        "1073741824",
+        "--lifecycle-interval-ms",
+        "30000",
+        "--minimum-free-bytes",
+        "536870912",
+        "--offset-retention-ms",
+        "86400000",
+        "--journal-compaction-bytes",
+        "1048576"
+      )
+    )
+
+    assertEquals(config.storageLifecycle.cleanupPolicy, CleanupPolicy.CompactDelete)
+    assertEquals(config.storageLifecycle.retentionMillis, 3_600_000L)
+    assertEquals(config.storageLifecycle.retentionBytes, 1_073_741_824L)
+    assertEquals(config.storageLifecycle.lifecycleIntervalMillis, 30_000L)
+    assertEquals(config.storageLifecycle.minimumFreeBytes, 536_870_912L)
+    assertEquals(config.storageLifecycle.offsetRetentionMillis, 86_400_000L)
+    assertEquals(config.storageLifecycle.journalCompactionBytes, 1_048_576L)
+  }
+
+  test("rejects invalid lifecycle settings") {
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--cleanup-policy", "archive")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--retention-ms", "0")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--minimum-free-bytes", "-1")))
   }
