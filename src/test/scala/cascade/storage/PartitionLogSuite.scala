@@ -411,6 +411,33 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("topic registry runs lifecycle maintenance for synchronous logs") {
+    val directory = Files.createTempDirectory("cascade-lifecycle-scheduler-test")
+    try
+      val registry = TopicRegistry(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = 50L, lifecycleIntervalMillis = 20L)
+      )
+      try
+        assertEquals(registry.createTopic("events", 1), CreateTopicResult.Created)
+        val log = registry.partition("events", 0).getOrElse(fail("missing partition"))
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        Files.setLastModifiedTime(
+          directory.resolve("events").resolve("partition-0").resolve("00000000000000000000.log"),
+          FileTime.fromMillis(1L)
+        )
+
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while registry.lifecycleStatistics.retiredSegments == 0L && System.nanoTime() < deadline do Thread.sleep(5L)
+        assertEquals(registry.lifecycleStatistics.retiredSegments, 1L)
+        assertEquals(log.logStartOffset, 1L)
+      finally registry.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]

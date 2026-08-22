@@ -30,10 +30,13 @@ final class TopicRegistry(
     case FlushPolicy.Periodic =>
       Some(Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-log-flusher").factory()))
     case FlushPolicy.Sync => None
+  private val lifecycleExecutor: ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-storage-lifecycle").factory())
 
   Files.createDirectories(dataDirectory)
   discoverTopics()
   startPeriodicFlusher()
+  startLifecycleScheduler()
 
   def topicNames: Vector[String] =
     ensureHealthy()
@@ -70,6 +73,10 @@ final class TopicRegistry(
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
+      lifecycleExecutor.shutdown()
+      if !lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS) then
+        lifecycleExecutor.shutdownNow(): Unit
+        lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS): Unit
       flusher.foreach { executor =>
         executor.shutdown()
         if !executor.awaitTermination(30, TimeUnit.SECONDS) then
@@ -133,6 +140,25 @@ final class TopicRegistry(
         checkIntervalMillis,
         TimeUnit.MILLISECONDS
       ): Unit
+    }
+
+  private def startLifecycleScheduler(): Unit =
+    lifecycleExecutor.scheduleWithFixedDelay(
+      () => runLifecycle(),
+      lifecycleConfig.lifecycleIntervalMillis,
+      lifecycleConfig.lifecycleIntervalMillis,
+      TimeUnit.MILLISECONDS
+    ): Unit
+
+  private def runLifecycle(): Unit =
+    topics.values().asScala.foreach { logs =>
+      logs.foreach { log =>
+        try log.runLifecycle()
+        catch
+          case error: Throwable =>
+            backgroundFailure.compareAndSet(null, error): Unit
+            System.err.println(s"Cascade storage lifecycle error: ${error.getMessage}")
+      }
     }
 
   private def requestFlush(): Unit =
