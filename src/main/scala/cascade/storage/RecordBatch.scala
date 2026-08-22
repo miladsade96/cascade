@@ -15,8 +15,12 @@ final case class RecordBatchMetadata(
     lastSequence: Int,
     recordCount: Int,
     transactional: Boolean,
-    control: Boolean
+    control: Boolean,
+    maxTimestamp: Long,
+    compressionType: Int
 )
+
+final case class IndexedRecord(offset: Long, timestamp: Long, key: Option[Vector[Byte]], tombstone: Boolean)
 
 object RecordBatch:
   private val MinimumSize = 61
@@ -78,9 +82,87 @@ object RecordBatch:
       lastSequence,
       recordCount,
       transactional = (attributes & 0x10) != 0,
-      control = (attributes & 0x20) != 0
+      control = (attributes & 0x20) != 0,
+      maxTimestamp = buffer.getLong(35),
+      compressionType = attributes & 0x07
     )
+
+  /** Decodes keys from an uncompressed magic-v2 batch; compressed or malformed batches stay opaque. */
+  def indexedRecords(bytes: Array[Byte]): Option[Vector[IndexedRecord]] =
+    try
+      val metadata = RecordBatch.metadata(bytes)
+      if metadata.compressionType != 0 then None
+      else
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+        buffer.position(MinimumSize)
+        val baseTimestamp = buffer.getLong(27)
+        val records = Vector.newBuilder[IndexedRecord]
+        var count = 0
+        while count < metadata.recordCount do
+          val recordLength = readVarInt(buffer)
+          if recordLength < 0 || recordLength > buffer.remaining() then
+            throw ProtocolException(s"invalid record length: $recordLength")
+          val recordEnd = Math.addExact(buffer.position(), recordLength)
+          buffer.get()
+          val timestampDelta = readVarLong(buffer)
+          val offsetDelta = readVarInt(buffer)
+          if offsetDelta < 0 then throw ProtocolException(s"negative record offset delta: $offsetDelta")
+          val key = readNullableBytes(buffer)
+          val value = readNullableBytes(buffer)
+          val headers = readVarInt(buffer)
+          if headers < 0 then throw ProtocolException(s"negative record header count: $headers")
+          var header = 0
+          while header < headers do
+            val headerKeyLength = readVarInt(buffer)
+            if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
+              throw ProtocolException(s"invalid record header key length: $headerKeyLength")
+            buffer.position(buffer.position() + headerKeyLength)
+            readNullableBytes(buffer)
+            header += 1
+          if buffer.position() != recordEnd then throw ProtocolException("record length does not match its contents")
+          records += IndexedRecord(
+            Math.addExact(metadata.baseOffset, offsetDelta.toLong),
+            Math.addExact(baseTimestamp, timestampDelta),
+            key,
+            value.isEmpty
+          )
+          count += 1
+        if buffer.hasRemaining then throw ProtocolException("record batch contains trailing bytes")
+        Some(records.result())
+    catch case _: Throwable => None
 
   def totalSize(prefix: Array[Byte]): Int =
     if prefix.length < 12 then throw ProtocolException("record batch prefix is too short")
     Math.addExact(ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN).getInt(8), 12)
+
+  private def readNullableBytes(buffer: ByteBuffer): Option[Vector[Byte]] =
+    val length = readVarInt(buffer)
+    if length == -1 then None
+    else if length < -1 || length > buffer.remaining() then throw ProtocolException(s"invalid byte-array length: $length")
+    else
+      val bytes = new Array[Byte](length)
+      buffer.get(bytes)
+      Some(bytes.toVector)
+
+  private def readVarInt(buffer: ByteBuffer): Int =
+    val raw = readUnsignedVarLong(buffer, 5)
+    ((raw >>> 1) ^ -(raw & 1L)).toInt
+
+  private def readVarLong(buffer: ByteBuffer): Long =
+    val raw = readUnsignedVarLong(buffer, 10)
+    (raw >>> 1) ^ -(raw & 1L)
+
+  private def readUnsignedVarLong(buffer: ByteBuffer, maximumBytes: Int): Long =
+    var result = 0L
+    var shift = 0
+    var count = 0
+    var complete = false
+    while !complete && count < maximumBytes do
+      if !buffer.hasRemaining then throw ProtocolException("truncated variable-length integer")
+      val value = buffer.get().toInt & 0xff
+      result |= (value & 0x7f).toLong << shift
+      complete = (value & 0x80) == 0
+      shift += 7
+      count += 1
+    if !complete then throw ProtocolException("variable-length integer is too long")
+    result

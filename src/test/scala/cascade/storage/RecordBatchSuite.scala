@@ -30,3 +30,33 @@ final class RecordBatchSuite extends FunSuite:
     ByteBuffer.wrap(invalid).order(ByteOrder.BIG_ENDIAN).putInt(57, -1)
     intercept[ProtocolException](RecordBatch.prepare(invalid, 0L))
   }
+
+  test("indexes timestamps, keys, tombstones, and absolute offsets from uncompressed records") {
+    val batch = TestRecordBatch.keyed(
+      Vector(
+        TestRecordBatch.Record(Some("alpha".getBytes), Some("one".getBytes), 1000L),
+        TestRecordBatch.Record(Some("beta".getBytes), None, 1010L)
+      ),
+      baseOffset = 20L
+    )
+
+    val metadata = RecordBatch.metadata(batch)
+    assertEquals(metadata.maxTimestamp, 1010L)
+    assertEquals(metadata.compressionType, 0)
+    assertEquals(
+      RecordBatch.indexedRecords(batch).getOrElse(fail("records were not decoded")),
+      Vector(
+        IndexedRecord(20L, 1000L, Some("alpha".getBytes.toVector), tombstone = false),
+        IndexedRecord(21L, 1010L, Some("beta".getBytes.toVector), tombstone = true)
+      )
+    )
+  }
+
+  test("keeps compressed and malformed record payloads opaque") {
+    val compressed = TestRecordBatch.keyed(
+      Vector(TestRecordBatch.Record(Some("key".getBytes), Some("value".getBytes), 1000L))
+    )
+    ByteBuffer.wrap(compressed).order(ByteOrder.BIG_ENDIAN).putShort(21, 1.toShort)
+    assertEquals(RecordBatch.indexedRecords(compressed), None)
+    assertEquals(RecordBatch.indexedRecords(TestRecordBatch.single()), None)
+  }
