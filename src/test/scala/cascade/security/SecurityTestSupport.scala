@@ -11,7 +11,11 @@ object SecurityTestSupport:
       principals: Map[Int, String]
   )
 
-  def createKeyStore(directory: Path, name: String = "broker.p12"): Path =
+  def createKeyStore(
+      directory: Path,
+      name: String = "broker.p12",
+      subjectAlternativeNames: String = "dns:localhost,ip:127.0.0.1"
+  ): Path =
     val path = directory.resolve(name)
     runKeytool(
       "-genkeypair",
@@ -20,7 +24,7 @@ object SecurityTestSupport:
       "-keysize", "2048",
       "-validity", "2",
       "-dname", "CN=localhost, OU=Test, O=Cascade, L=Test, ST=Test, C=US",
-      "-ext", "SAN=dns:localhost,ip:127.0.0.1",
+      "-ext", s"SAN=$subjectAlternativeNames",
       "-storetype", "PKCS12",
       "-keystore", path.toString,
       "-storepass", StorePassword,
