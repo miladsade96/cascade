@@ -4,7 +4,7 @@ final class ConnectionSession(
     val remoteAddress: String,
     val secure: Boolean,
     authenticationRequired: Boolean,
-    transportPrincipal: Option[String] = None
+    val transportPrincipal: Option[String] = None
 ):
   @volatile private var currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
   @volatile private var authenticatedState = !authenticationRequired
