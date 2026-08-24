@@ -12,7 +12,7 @@ enum RecoveryMode:
 
 /** Forced marker that distinguishes a completed shutdown from a killed broker process. */
 final class ShutdownMarker(dataDirectory: Path):
-  private val MarkerBytes = Array[Byte]('C', 'S', 'C', 'L', 1)
+  private val MarkerBytes = ShutdownMarker.MarkerBytes
   private val internalDirectory = dataDirectory.resolve(".cascade")
   private val markerPath = internalDirectory.resolve("clean-shutdown.marker")
   private val temporaryPath = internalDirectory.resolve("clean-shutdown.marker.tmp")
@@ -60,3 +60,14 @@ final class ShutdownMarker(dataDirectory: Path):
           Files.isRegularFile(path) && path != markerPath && path != temporaryPath && path != runningPath && Files.size(path) > 0L
         )
       finally paths.close()
+
+object ShutdownMarker:
+  private[cascade] val MarkerBytes = Array[Byte]('C', 'S', 'C', 'L', 1)
+
+  def isCleanlyStopped(dataDirectory: Path): Boolean =
+    val internalDirectory = dataDirectory.resolve(".cascade")
+    val clean = internalDirectory.resolve("clean-shutdown.marker")
+    val running = internalDirectory.resolve("broker-running.marker")
+    Files.isRegularFile(clean) &&
+      !Files.exists(running) &&
+      Files.readAllBytes(clean).sameElements(MarkerBytes)
