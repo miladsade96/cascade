@@ -4,7 +4,7 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.{BrokerMetricsSnapshot, StructuredLogger, TrafficMetrics}
+import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, HealthPolicy, OperationsServer, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -70,6 +70,7 @@ final class KafkaBroker(
   @volatile private var deliveryCoordinator: DeliveryCoordinator | Null = null
   @volatile private var coordinatorStateMachine: CoordinatorStateMachine | Null = null
   @volatile private var peerClient: PeerTransport | Null = null
+  @volatile private var operationsServer: OperationsServer | Null = null
 
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")
@@ -108,13 +109,27 @@ final class KafkaBroker(
     deliveryCoordinator = delivery
     coordinatorStateMachine = coordinatorState.orNull
     handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort)
+    val operations = config.operations.port.map { _ =>
+      OperationsServer(
+        config.operations,
+        () => metricsSnapshot,
+        () => healthSnapshot,
+        error => eventLog.error("operations_server_error", error, brokerFields)
+      )
+    }
+    operationsServer = operations.orNull
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
     cluster.start()
+    operations.foreach(_.start())
     if operationalEventsEnabled then
       eventLog.info(
         "broker_started",
-        brokerFields ++ Map("kafka_port" -> boundPort.toString, "security_protocol" -> config.security.protocol.toString)
+        brokerFields ++ Map(
+          "kafka_port" -> boundPort.toString,
+          "operations_port" -> operations.map(_.boundPort.toString).getOrElse("disabled"),
+          "security_protocol" -> config.security.protocol.toString
+        )
       )
   }
 
@@ -123,6 +138,8 @@ final class KafkaBroker(
   def advertisedPort: Int = config.advertisedPort.getOrElse(boundPort)
 
   def bootstrapServers: String = s"${config.advertisedHost}:$advertisedPort"
+
+  def operationsPort: Option[Int] = Option(operationsServer).map(_.boundPort)
 
   def flushStatistics: FlushStatistics = registry.flushStatistics
 
@@ -178,10 +195,21 @@ final class KafkaBroker(
       heapMaxBytes = runtime.maxMemory()
     )
 
+  def healthSnapshot: BrokerHealth =
+    BrokerHealth.evaluate(
+      metricsSnapshot,
+      HealthPolicy(
+        config.operations.readinessMaxPendingFlushBytes,
+        math.max(config.storageLifecycle.minimumFreeBytes, config.operations.capacityAlerts.minimumFreeBytes)
+      ),
+      eventLog.lastFailure
+    )
+
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
       if operationalEventsEnabled then eventLog.info("broker_stopping", brokerFields)
       running.set(false)
+      Option(operationsServer).foreach(_.close())
       server.close()
       connections.shutdownNow()
       Option(acceptThread).foreach(_.join(5000))
