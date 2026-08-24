@@ -70,6 +70,7 @@ final class RequestHandler(
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.CreateTopics => createTopics(body, session)
+      case ApiKey.DescribeConfigs => describeConfigs(body)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
       case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
@@ -448,6 +449,81 @@ final class RequestHandler(
     writer.writeInt(0)
     writer.writeArray(results) { case (name, error, message) =>
       writer.writeString(name).writeShort(error).writeNullableString(message): Unit
+    }
+    Some(writer.result())
+
+  private def describeConfigs(cursor: ByteCursor): Option[Array[Byte]] =
+    final case class RequestedResource(resourceType: Byte, name: String, keys: Option[Vector[String]])
+    final case class VisibleConfig(name: String, value: String, source: Int)
+    final case class ConfigResult(
+        resourceType: Byte,
+        name: String,
+        errorCode: Short,
+        errorMessage: Option[String],
+        values: Vector[VisibleConfig]
+    )
+    val requests = cursor.readArray {
+      RequestedResource(cursor.readByte(), cursor.readString(), cursor.readNullableArray(cursor.readString()))
+    }
+    cursor.readBoolean() // include_synonyms
+    cursor.ensureFullyRead()
+
+    val brokerValues = Vector(
+      VisibleConfig("broker.id", config.nodeId.toString, 4),
+      VisibleConfig("log.dirs", config.dataDirectory.toAbsolutePath.normalize().toString, 4),
+      VisibleConfig("message.max.bytes", config.maxRequestBytes.toString, 4),
+      VisibleConfig("log.segment.bytes", config.segmentBytes.toString, 4),
+      VisibleConfig("log.retention.ms", config.storageLifecycle.retentionMillis.toString, 4),
+      VisibleConfig("log.retention.bytes", config.storageLifecycle.retentionBytes.toString, 4),
+      VisibleConfig("log.cleanup.policy", cleanupPolicyName, 4),
+      VisibleConfig("num.partitions", "1", 4),
+      VisibleConfig("default.replication.factor", config.defaultReplicationFactor.toString, 4),
+      VisibleConfig("min.insync.replicas", config.minInSyncReplicas.toString, 4),
+      VisibleConfig("auto.create.topics.enable", config.autoCreateTopics.toString, 4)
+    )
+    val topicValues = Vector(
+      VisibleConfig("cleanup.policy", cleanupPolicyName, 5),
+      VisibleConfig("retention.ms", config.storageLifecycle.retentionMillis.toString, 5),
+      VisibleConfig("retention.bytes", config.storageLifecycle.retentionBytes.toString, 5),
+      VisibleConfig("segment.bytes", config.segmentBytes.toString, 5),
+      VisibleConfig("max.message.bytes", config.maxRequestBytes.toString, 5),
+      VisibleConfig("min.insync.replicas", config.minInSyncReplicas.toString, 5)
+    )
+    def selected(values: Vector[VisibleConfig], keys: Option[Vector[String]]): Vector[VisibleConfig] =
+      keys match
+        case None => values
+        case Some(requested) =>
+          val byName = values.iterator.map(value => value.name -> value).toMap
+          requested.flatMap(byName.get)
+
+    val results = requests.map { request =>
+      request.resourceType.toInt match
+        case 4 if request.name.isEmpty || request.name == config.nodeId.toString =>
+          ConfigResult(request.resourceType, request.name, Errors.None, None, selected(brokerValues, request.keys))
+        case 4 =>
+          ConfigResult(request.resourceType, request.name, Errors.BrokerNotAvailable, Some("broker is not available"), Vector.empty)
+        case 2 if topicExists(request.name) =>
+          ConfigResult(request.resourceType, request.name, Errors.None, None, selected(topicValues, request.keys))
+        case 2 =>
+          ConfigResult(request.resourceType, request.name, Errors.UnknownTopicOrPartition, Some("topic does not exist"), Vector.empty)
+        case _ =>
+          ConfigResult(request.resourceType, request.name, Errors.InvalidRequest, Some("unsupported config resource type"), Vector.empty)
+    }
+
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(results) { result =>
+      writer.writeShort(result.errorCode)
+      writer.writeNullableString(result.errorMessage)
+      writer.writeByte(result.resourceType)
+      writer.writeString(result.name)
+      writer.writeArray(result.values) { value =>
+        writer.writeString(value.name)
+        writer.writeNullableString(Some(value.value))
+        writer.writeBoolean(true) // Cascade does not expose incremental config mutation yet.
+        writer.writeByte(value.source)
+        writer.writeBoolean(false)
+        writer.writeArray(Vector.empty[Unit])(_ => ()): Unit
+      }
     }
     Some(writer.result())
 
@@ -939,6 +1015,16 @@ final class RequestHandler(
         requireAuthorized(session, AclOperation.Alter, ResourceType.Cluster, "cascade")
       case ApiKey.ListPartitionReassignments | ApiKey.DescribeQuorum =>
         requireAuthorized(session, AclOperation.Describe, ResourceType.Cluster, "cascade")
+      case ApiKey.DescribeConfigs =>
+        cursor.readArray {
+          val resourceType = cursor.readByte()
+          val resourceName = cursor.readString()
+          cursor.readNullableArray(cursor.readString())
+          if resourceType == 2.toByte then
+            requireAuthorized(session, AclOperation.Describe, ResourceType.Topic, resourceName)
+          else if resourceType == 4.toByte then
+            requireAuthorized(session, AclOperation.Describe, ResourceType.Cluster, "cascade")
+        }: Unit
       case _ => ()
 
   private def isAuthorized(
@@ -987,5 +1073,14 @@ final class RequestHandler(
   private def partitionExists(topic: String, partition: Int): Boolean =
     if clusterManager.isEnabled then clusterManager.partition(topic, partition).nonEmpty
     else registry.partition(topic, partition).nonEmpty
+
+  private def topicExists(topic: String): Boolean =
+    if clusterManager.isEnabled then clusterManager.topic(topic).nonEmpty
+    else registry.partitions(topic).nonEmpty
+
+  private def cleanupPolicyName: String = config.storageLifecycle.cleanupPolicy match
+    case cascade.storage.CleanupPolicy.Delete        => "delete"
+    case cascade.storage.CleanupPolicy.Compact       => "compact"
+    case cascade.storage.CleanupPolicy.CompactDelete => "compact,delete"
 
   private def isCoordinator: Boolean = !clusterManager.isEnabled || clusterManager.isActiveController

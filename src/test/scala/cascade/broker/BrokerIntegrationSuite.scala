@@ -186,6 +186,51 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("describes non-sensitive broker and topic configuration with Kafka protocol v2") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("configured", correlationId = 50))
+        val writer = requestHeader(ApiKey.DescribeConfigs, 2, 51)
+        writer.writeArray(Vector((4, broker.config.nodeId.toString), (2, "configured"))) { case (resourceType, name) =>
+          writer.writeByte(resourceType).writeString(name).writeNullableArray(None)(_ => ()): Unit
+        }
+        writer.writeBoolean(false)
+
+        val response = request(output, input, writer.result())
+        assertEquals(response.readInt(), 51)
+        assertEquals(response.readInt(), 0)
+        val resources = response.readArray {
+          val error = response.readShort()
+          response.readNullableString()
+          val resourceType = response.readByte()
+          val name = response.readString()
+          val values = response.readArray {
+            val key = response.readString()
+            val value = response.readNullableString()
+            val readOnly = response.readBoolean()
+            val source = response.readByte()
+            val sensitive = response.readBoolean()
+            response.readArray {
+              response.readString()
+              response.readNullableString()
+              response.readByte()
+            }
+            (key, value, readOnly, source, sensitive)
+          }
+          (error, resourceType, name, values)
+        }
+        response.ensureFullyRead()
+        assertEquals(resources.map(_._1), Vector(Errors.None, Errors.None))
+        assert(resources.head._4.exists(value => value._1 == "broker.id" && value._2.contains("1") && value._4 == 4.toByte))
+        assert(resources(1)._4.exists(value => value._1 == "cleanup.policy" && value._2.contains("delete") && value._4 == 5.toByte))
+        assert(resources.flatMap(_._4).forall(value => value._3 && !value._5))
+      finally socket.close()
+    }
+  }
+
   test("idempotent sequence state recovers from partition logs after broker restart") {
     val directory = Files.createTempDirectory("cascade-idempotent-recovery")
     var producerId = -1L

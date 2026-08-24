@@ -20,6 +20,7 @@ object ApiKey:
   val AddOffsetsToTxn: Short = 25
   val EndTxn: Short = 26
   val TxnOffsetCommit: Short = 28
+  val DescribeConfigs: Short = 32
   val SaslAuthenticate: Short = 36
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
@@ -102,6 +103,7 @@ object Compatibility:
     ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
     ApiVersion(ApiKey.EndTxn, 1, 1),
     ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
+    ApiVersion(ApiKey.DescribeConfigs, 2, 2),
     ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
