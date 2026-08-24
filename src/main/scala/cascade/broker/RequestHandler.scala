@@ -4,8 +4,7 @@ import cascade.cluster.*
 import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
-import cascade.security.ConnectionSession
-import cascade.security.ReloadableCredentials
+import cascade.security.*
 import cascade.storage.TopicRegistry
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
@@ -23,6 +22,9 @@ final class RequestHandler(
   private val credentials = config.security.authentication.credentialsFile.map { path =>
     ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
   }
+  private val authorizer = config.security.authorization.aclFile.map { path =>
+    ReloadableAuthorizer(path, config.security.authorization.superUsers, config.security.authorization.reloadIntervalMillis)
+  }
 
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)
 
@@ -30,6 +32,7 @@ final class RequestHandler(
     val (header, body) = RequestHeader.decode(frame)
     if InternalApi.contains(header.apiKey) then
       if !header.clientId.contains("cascade-peer") then throw ProtocolException("internal API requires a peer client")
+      requireAuthorized(session, AclOperation.ClusterAction, ResourceType.Cluster, "cascade")
       val response = header.apiKey match
         case InternalApi.ReplicaAppend | InternalApi.ReplicaCommit | InternalApi.ReplicaCatchUp |
             InternalApi.ReplicaReset | InternalApi.ReplicaRecoveryComplete | InternalApi.ReplicaRecoveryState |
@@ -45,12 +48,13 @@ final class RequestHandler(
     if config.security.protocol.sasl && !session.authenticated &&
         header.apiKey != ApiKey.ApiVersions && header.apiKey != ApiKey.SaslHandshake && header.apiKey != ApiKey.SaslAuthenticate
     then throw ProtocolException("Kafka request received before SASL authentication")
+    authorizeControlRequest(header.apiKey, frame, session)
 
     val response = header.apiKey match
       case ApiKey.ApiVersions  => apiVersions(header.apiVersion, body)
       case ApiKey.SaslHandshake => saslHandshake(body, session)
       case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
-      case ApiKey.Metadata     => metadata(body)
+      case ApiKey.Metadata     => metadata(body, session)
       case ApiKey.OffsetCommit => offsetCommit(body)
       case ApiKey.OffsetFetch  => offsetFetch(body)
       case ApiKey.FindCoordinator => findCoordinator(body)
@@ -58,7 +62,7 @@ final class RequestHandler(
       case ApiKey.Heartbeat    => heartbeat(body)
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
-      case ApiKey.CreateTopics => createTopics(body)
+      case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
       case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
@@ -69,9 +73,9 @@ final class RequestHandler(
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
       case ApiKey.EndTxn => endTxn(body)
       case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
-      case ApiKey.Produce      => produce(body)
-      case ApiKey.Fetch        => fetch(body)
-      case ApiKey.ListOffsets  => listOffsets(body)
+      case ApiKey.Produce      => produce(body, session)
+      case ApiKey.Fetch        => fetch(body, session)
+      case ApiKey.ListOffsets  => listOffsets(body, session)
       case other               => throw ProtocolException(s"unsupported API key: $other")
     response.map(ResponseFrame.encode(header, _))
 
@@ -340,7 +344,7 @@ final class RequestHandler(
     writer.writeShort(if isCoordinator then Errors.None else Errors.NotCoordinator)
     Some(writer.result())
 
-  private def metadata(cursor: ByteCursor): Option[Array[Byte]] =
+  private def metadata(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val requestedTopics = cursor.readNullableArray(cursor.readString())
     val allowAutoCreation = cursor.readBoolean()
     cursor.ensureFullyRead()
@@ -348,10 +352,12 @@ final class RequestHandler(
     requestedTopics.foreach { names =>
       if config.autoCreateTopics && allowAutoCreation then
         names.foreach { name =>
-          if clusterManager.isEnabled then
-            if clusterManager.topic(name).isEmpty then
+          val canDescribe = isAuthorized(session, AclOperation.Describe, ResourceType.Topic, name)
+          val exists = if clusterManager.isEnabled then clusterManager.topic(name).nonEmpty else registry.partitions(name).nonEmpty
+          if canDescribe && !exists && isAuthorized(session, AclOperation.Create, ResourceType.Topic, name) then
+            if clusterManager.isEnabled then
               clusterManager.createTopic(name, 1, config.defaultReplicationFactor): Unit
-          else registry.getOrCreate(name): Unit
+            else registry.getOrCreate(name): Unit
         }
     }
     val topicNames = requestedTopics.getOrElse(clusterManager.topicNames)
@@ -369,7 +375,10 @@ final class RequestHandler(
     writer.writeArray(topicNames) { topic =>
       val clusterTopic = clusterManager.topic(topic)
       val localPartitions = registry.partitions(topic)
-      if clusterManager.isEnabled then clusterTopic match
+      if !isAuthorized(session, AclOperation.Describe, ResourceType.Topic, topic) then
+        writer.writeShort(Errors.TopicAuthorizationFailed).writeString(topic).writeBoolean(false)
+        writer.writeArray(Vector.empty[Int])(_ => ())
+      else if clusterManager.isEnabled then clusterTopic match
         case None =>
           writer.writeShort(Errors.UnknownTopicOrPartition).writeString(topic).writeBoolean(false)
           writer.writeArray(Vector.empty[Int])(_ => ())
@@ -399,7 +408,7 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def createTopics(cursor: ByteCursor): Option[Array[Byte]] =
+  private def createTopics(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     final case class RequestedTopic(name: String, partitions: Int, replicationFactor: Short)
     val topics = cursor.readArray {
       val topic = RequestedTopic(cursor.readString(), cursor.readInt(), cursor.readShort())
@@ -420,7 +429,9 @@ final class RequestHandler(
     val results = topics.map { topic =>
       val replicationFactor = topic.replicationFactor.toInt
       val result =
-        if validateOnly then clusterManager.validateTopic(topic.name, topic.partitions, replicationFactor)
+        if !isAuthorized(session, AclOperation.Create, ResourceType.Topic, topic.name) then
+          ClusterCreateResult(Errors.TopicAuthorizationFailed, Some("topic authorization failed"))
+        else if validateOnly then clusterManager.validateTopic(topic.name, topic.partitions, replicationFactor)
         else clusterManager.createTopic(topic.name, topic.partitions, replicationFactor)
       (topic.name, result.errorCode, result.message)
     }
@@ -617,7 +628,7 @@ final class RequestHandler(
       .writeEmptyTaggedFields()
       .result()
 
-  private def produce(cursor: ByteCursor): Option[Array[Byte]] =
+  private def produce(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val transactionalId = cursor.readNullableString()
     val acknowledgements = cursor.readShort()
     val timeoutMillis = cursor.readInt()
@@ -633,13 +644,20 @@ final class RequestHandler(
     cursor.ensureFullyRead()
 
     val results = requests.map { case (topic, partitions) =>
-      if config.autoCreateTopics then
+      val topicAuthorized = isAuthorized(session, AclOperation.Write, ResourceType.Topic, topic)
+      val transactionAuthorized = transactionalId.forall { id =>
+        isAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, id)
+      }
+      if topicAuthorized && transactionAuthorized && config.autoCreateTopics then
         if clusterManager.isEnabled then
-          if clusterManager.topic(topic).isEmpty then
+          if clusterManager.topic(topic).isEmpty && isAuthorized(session, AclOperation.Create, ResourceType.Topic, topic) then
             clusterManager.createTopic(topic, 1, config.defaultReplicationFactor): Unit
-        else registry.getOrCreate(topic): Unit
+        else if registry.partitions(topic).nonEmpty || isAuthorized(session, AclOperation.Create, ResourceType.Topic, topic) then
+          registry.getOrCreate(topic): Unit
       val partitionResults = partitions.map { case (index, records) =>
-        records match
+        if !topicAuthorized then (index, Errors.TopicAuthorizationFailed, -1L)
+        else if !transactionAuthorized then (index, Errors.TransactionalIdAuthorizationFailed, -1L)
+        else records match
           case Some(batch) =>
             val result = deliveryCoordinator.append(
               transactionalId,
@@ -668,7 +686,7 @@ final class RequestHandler(
       writer.writeInt(0)
       Some(writer.result())
 
-  private def fetch(cursor: ByteCursor): Option[Array[Byte]] =
+  private def fetch(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     cursor.readInt() // replica_id
     cursor.readInt() // max_wait_ms
     cursor.readInt() // min_bytes
@@ -691,7 +709,9 @@ final class RequestHandler(
     val results = requests.map { case (topic, partitions) =>
       val values = partitions.map { case (index, offset, partitionMaxBytes) =>
         val partitionMetadata = clusterManager.partition(topic, index)
-        if clusterManager.isEnabled && clusterManager.isBrokerFenced then
+        if !isAuthorized(session, AclOperation.Read, ResourceType.Topic, topic) then
+          (index, Errors.TopicAuthorizationFailed, None)
+        else if clusterManager.isEnabled && clusterManager.isBrokerFenced then
           (index, Errors.BrokerNotAvailable, None)
         else if clusterManager.isEnabled && partitionMetadata.isEmpty then
           (index, Errors.UnknownTopicOrPartition, None)
@@ -732,7 +752,7 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def listOffsets(cursor: ByteCursor): Option[Array[Byte]] =
+  private def listOffsets(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     cursor.readInt() // replica_id
     val readCommitted = cursor.readByte() == 1.toByte
     val requests = cursor.readArray {
@@ -748,7 +768,9 @@ final class RequestHandler(
       writer.writeString(topic)
       writer.writeArray(partitions) { case (index, timestamp) =>
         val partitionMetadata = clusterManager.partition(topic, index)
-        if clusterManager.isEnabled && clusterManager.isBrokerFenced then
+        if !isAuthorized(session, AclOperation.Read, ResourceType.Topic, topic) then
+          writer.writeInt(index).writeShort(Errors.TopicAuthorizationFailed).writeLong(-1L).writeLong(-1L): Unit
+        else if clusterManager.isEnabled && clusterManager.isBrokerFenced then
           writer.writeInt(index).writeShort(Errors.BrokerNotAvailable).writeLong(-1L).writeLong(-1L): Unit
         else if clusterManager.isEnabled && partitionMetadata.isEmpty then
           writer.writeInt(index).writeShort(Errors.UnknownTopicOrPartition).writeLong(-1L).writeLong(-1L): Unit
@@ -866,6 +888,65 @@ final class RequestHandler(
       }
     }
     Some(writer.result())
+
+  private def authorizeControlRequest(apiKey: Short, frame: Array[Byte], session: ConnectionSession): Unit =
+    if authorizer.isEmpty then return
+    val (_, cursor) = RequestHeader.decode(frame)
+    apiKey match
+      case ApiKey.OffsetCommit | ApiKey.OffsetFetch | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
+          ApiKey.SyncGroup =>
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+      case ApiKey.FindCoordinator =>
+        val resource = cursor.readString()
+        val coordinatorType = cursor.readByte()
+        if coordinatorType == 0.toByte then requireAuthorized(session, AclOperation.Describe, ResourceType.Group, resource)
+        else requireAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, resource)
+      case ApiKey.InitProducerId =>
+        cursor.readNullableString() match
+          case Some(transactionalId) =>
+            requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
+          case None => requireAuthorized(session, AclOperation.IdempotentWrite, ResourceType.Cluster, "cascade")
+      case ApiKey.AddPartitionsToTxn =>
+        val transactionalId = cursor.readString()
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
+        cursor.readLong()
+        cursor.readShort()
+        cursor.readArray {
+          val topic = cursor.readString()
+          requireAuthorized(session, AclOperation.Write, ResourceType.Topic, topic)
+          cursor.readArray(cursor.readInt())
+        }: Unit
+      case ApiKey.AddOffsetsToTxn =>
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
+        cursor.readLong()
+        cursor.readShort()
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+      case ApiKey.EndTxn =>
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
+      case ApiKey.TxnOffsetCommit =>
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+      case ApiKey.AlterPartitionReassignments | ApiKey.AddRaftVoter | ApiKey.RemoveRaftVoter =>
+        requireAuthorized(session, AclOperation.Alter, ResourceType.Cluster, "cascade")
+      case ApiKey.ListPartitionReassignments | ApiKey.DescribeQuorum =>
+        requireAuthorized(session, AclOperation.Describe, ResourceType.Cluster, "cascade")
+      case _ => ()
+
+  private def isAuthorized(
+      session: ConnectionSession,
+      operation: AclOperation,
+      resourceType: ResourceType,
+      resourceName: String
+  ): Boolean = authorizer.forall(_.authorize(session.principal, operation, Resource(resourceType, resourceName)))
+
+  private def requireAuthorized(
+      session: ConnectionSession,
+      operation: AclOperation,
+      resourceType: ResourceType,
+      resourceName: String
+  ): Unit =
+    if !isAuthorized(session, operation, resourceType, resourceName) then
+      throw ProtocolException(s"${operation.toString.toLowerCase} authorization failed for ${resourceType.toString.toLowerCase}")
 
   private def partitionExists(topic: String, partition: Int): Boolean =
     if clusterManager.isEnabled then clusterManager.partition(topic, partition).nonEmpty

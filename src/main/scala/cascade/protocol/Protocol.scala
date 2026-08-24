@@ -62,7 +62,9 @@ object Errors:
   val UnknownMemberId: Short = 25
   val InvalidSessionTimeout: Short = 26
   val RebalanceInProgress: Short = 27
+  val TopicAuthorizationFailed: Short = 29
   val GroupAuthorizationFailed: Short = 30
+  val ClusterAuthorizationFailed: Short = 31
   val UnsupportedSaslMechanism: Short = 33
   val IllegalSaslState: Short = 34
   val SaslAuthenticationFailed: Short = 58

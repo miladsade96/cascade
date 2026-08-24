@@ -11,7 +11,10 @@ import java.util.concurrent.TimeUnit
 import munit.FunSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.clients.CommonClientConfigs
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.config.{SaslConfigs, SslConfigs}
+import org.apache.kafka.common.errors.TopicAuthorizationException
+import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class SecurityIntegrationSuite extends FunSuite:
   test("Kafka clients negotiate TLS with the broker") {
@@ -163,6 +166,65 @@ final class SecurityIntegrationSuite extends FunSuite:
     finally
       java.util.Arrays.fill(firstPassword, '\u0000')
       java.util.Arrays.fill(secondPassword, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
+  test("enforces topic ACLs before records reach storage") {
+    val directory = Files.createTempDirectory("cascade-topic-acls")
+    val credentials = directory.resolve("users.conf")
+    val acls = directory.resolve("acls.conf")
+    val password = "acl-client-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
+    Files.writeString(
+      acls,
+      """allow alice Describe Topic *
+        |allow alice Create Topic *
+        |allow alice Write Topic allowed
+        |allow alice IdempotentWrite Cluster cascade
+        |""".stripMargin
+    )
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(credentialsFile = Some(credentials)),
+          authorization = AuthorizationConfig(aclFile = Some(acls))
+        )
+      )
+    )
+    try
+      broker.start()
+      val properties = Properties()
+      properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+      properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+      properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+      properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false")
+      properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "5000")
+      properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000")
+      properties.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_PLAINTEXT")
+      properties.put(SaslConfigs.SASL_MECHANISM, "PLAIN")
+      properties.put(
+        SaslConfigs.SASL_JAAS_CONFIG,
+        "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"acl-client-password\";"
+      )
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](properties)
+      try
+        assertEquals(
+          producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("allowed", "accepted".getBytes())).get(10, TimeUnit.SECONDS).offset(),
+          0L
+        )
+        val rejected = intercept[java.util.concurrent.ExecutionException] {
+          producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("blocked", "rejected".getBytes())).get(10, TimeUnit.SECONDS)
+        }
+        assert(rejected.getCause.isInstanceOf[TopicAuthorizationException])
+      finally producer.close(Duration.ofSeconds(5))
+    finally
+      java.util.Arrays.fill(password, '\u0000')
       broker.close()
       SecurityTestSupport.deleteTree(directory)
   }
