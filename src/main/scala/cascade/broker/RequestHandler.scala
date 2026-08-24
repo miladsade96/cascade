@@ -5,6 +5,7 @@ import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
 import cascade.security.*
+import cascade.operations.PeerSecurityMetrics
 import cascade.storage.TopicRegistry
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
@@ -17,7 +18,8 @@ final class RequestHandler(
     clusterManager: ClusterManager,
     replicationManager: ReplicationManager,
     deliveryCoordinator: DeliveryCoordinator,
-    advertisedPort: Int
+    advertisedPort: Int,
+    peerSecurityMetrics: PeerSecurityMetrics = PeerSecurityMetrics()
 ) extends AutoCloseable:
   private val credentials = config.security.authentication.credentialsFile.map { path =>
     ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
@@ -41,6 +43,7 @@ final class RequestHandler(
     if InternalApi.contains(header.apiKey) then
       peerAuthenticator.authenticate(header.clientId, session) match
         case Left(reason) =>
+          peerSecurityMetrics.recordRejected()
           recordAudit(
             "peer_authentication",
             session,
@@ -51,6 +54,7 @@ final class RequestHandler(
           )
           throw ProtocolException(s"peer authentication failed: $reason")
         case Right(peer) =>
+          peerSecurityMetrics.recordAuthenticated(peer.encrypted)
           recordAudit(
             "peer_authentication",
             session,

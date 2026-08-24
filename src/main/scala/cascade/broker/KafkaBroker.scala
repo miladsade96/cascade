@@ -4,7 +4,7 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, StructuredLogger, TrafficMetrics}
+import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -37,6 +37,7 @@ final class KafkaBroker(
   private val eventLog = StructuredLogger.from(config.operations)
   private val operationalEventsEnabled = config.operations.enabled || config.operations.structuredLog.nonEmpty
   private val trafficMetrics = TrafficMetrics()
+  private val peerSecurityMetrics = PeerSecurityMetrics()
   private val startedAtNanos = AtomicLong(0L)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
@@ -119,7 +120,7 @@ final class KafkaBroker(
     replicationManager = replication
     deliveryCoordinator = delivery
     coordinatorStateMachine = coordinatorState.orNull
-    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort)
+    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort, peerSecurityMetrics)
     val operations = config.operations.port.map { _ =>
       OperationsServer(
         config.operations,
@@ -215,7 +216,8 @@ final class KafkaBroker(
       usableDiskBytes = fileStore.getUsableSpace,
       totalDiskBytes = fileStore.getTotalSpace,
       heapUsedBytes = runtime.totalMemory() - runtime.freeMemory(),
-      heapMaxBytes = runtime.maxMemory()
+      heapMaxBytes = runtime.maxMemory(),
+      peerSecurity = peerSecurityMetrics.snapshot
     )
 
   def healthSnapshot: BrokerHealth =

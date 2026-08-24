@@ -70,7 +70,8 @@ final case class BrokerMetricsSnapshot(
     usableDiskBytes: Long,
     totalDiskBytes: Long,
     heapUsedBytes: Long,
-    heapMaxBytes: Long
+    heapMaxBytes: Long,
+    peerSecurity: PeerSecuritySnapshot = PeerSecuritySnapshot.Empty
 )
 
 object PrometheusMetrics:
