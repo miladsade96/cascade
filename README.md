@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, and crash-safe storage lifecycle management.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, crash-safe storage lifecycle management, TLS, Kafka SASL/PLAIN, resource ACLs, security auditing, live credential/policy rotation, and broker admission controls.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I now replicate classic-group, committed-offset, producer, and transaction coordinator state through the metadata quorum, and I've tested live group and open-transaction failover with Kafka 4.3.1 clients. Voter changes use durable joint consensus, new observers synchronize before admission, and removing the active controller hands leadership to the surviving quorum. I have qualified forced JVM kills, torn journal/data tails, stable/joint quorum failures, retention and compaction restart recovery, and low-disk write rejection. Physical power/device loss, per-topic lifecycle policy, security, resource isolation, and operations are still release blockers.
+> Cascade isn't a production Kafka replacement yet. I now protect the client listener with TLS or SASL/TLS, reload salted credentials and deny-by-default ACLs, persist audit decisions, and bound connections, in-flight requests, and principal ingress rates. I have tested those paths with Kafka 4.3.1 Admin, Producer, and group Consumer clients. Secure broker-to-broker transport, additional SASL mechanisms, production observability, physical power/device-loss qualification, and per-topic lifecycle policy are still release blockers.
 
 ## Performance I measured
 
@@ -26,6 +26,7 @@ I measured this on my Windows development machine with Java 21, eight partitions
 | 1,000,000 records, coordinator-failover regression | **510,714 records/s** / **498.7 MiB/s** | **263,637 records/s** / **257.5 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, fault-qualification regression | **503,499 records/s** / **491.7 MiB/s** | **250,190 records/s** / **244.3 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, storage-lifecycle regression | **423,662 records/s** / **413.7 MiB/s** | **477,368 records/s** / **466.2 MiB/s** | **1,000,000 / 1,000,000** |
+| 1,000,000 records, security/isolation regression | **544,611 records/s** / **531.8 MiB/s** | **291,753 records/s** / **284.9 MiB/s** | **1,000,000 / 1,000,000** |
 
 After I fixed the background-flush path, sustained ten-million-record production went from 57,400 to 182,285 records/s: a **3.18x improvement**. The write phase dropped from 174.2 to 54.9 seconds. That run forced 9.58 GiB in 47.6 cumulative seconds, so the drive was the main limit on this machine.
 
@@ -44,6 +45,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
 | Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
+| Security and isolation | TLS 1.2/1.3, Kafka SASL/PLAIN, PBKDF2 credentials, deny-by-default ACLs, JSONL audit events, live credential/ACL rotation, connection/request caps, principal ingress quotas, and overload shedding |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -52,6 +54,9 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 
 - Persistent, length-delimited, big-endian Kafka TCP frames.
 - Hard request-size bounds and version validation before request handling.
+- `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` listeners with TLS 1.2/1.3 and optional client-certificate verification.
+- Kafka-framed `SaslHandshake` v1 and `SaslAuthenticate` v1 with SASL/PLAIN identities scoped to one connection.
+- Global/per-IP connection caps, a bounded global in-flight request gate, and per-principal request-byte token buckets.
 - Correlation IDs preserved in every response.
 - Ordered processing within a connection and Java 21 virtual-thread isolation between connections.
 - Explicitly advertised API keys and versions rather than a broad, unverified compatibility claim.
@@ -195,6 +200,51 @@ isolation.level=read_committed
 
 Set `transactional.id` on a producer when you want to use transactions. Use `read_uncommitted` only when the consumer should also see aborted transactional records.
 
+### Protect a client listener
+
+I use `SASL_SSL` for password authentication because SASL/PLAIN sends the password inside the TLS tunnel. I keep the key-store password in a separate file instead of a command-line argument.
+
+I generate a salted PBKDF2-SHA-256 credential line like this, then copy the final `alice=pbkdf2-sha256$...` line into `users.conf`:
+
+```powershell
+Set-Content -NoNewline alice.password "replace-with-a-long-random-secret"
+.\sbt.bat "runMain cascade.security.CredentialTool alice --password-file alice.password"
+Remove-Item -LiteralPath alice.password
+```
+
+My ACL file uses `effect principal operation resource-type resource-pattern`. A final `*` makes a prefix rule, a rule containing only `*` matches everything, and an explicit deny wins over every matching allow:
+
+```text
+allow alice Create Topic orders
+allow alice Describe Topic orders
+allow alice Write Topic orders
+allow alice Read Topic orders
+allow alice Read Group order-workers
+allow alice Describe Group order-workers
+deny alice Write Topic orders-private
+```
+
+I start the protected listener with a PKCS12 or JKS key store:
+
+```powershell
+.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --credentials-file users.conf --acl-file acls.conf --audit-log security-audit.jsonl --max-connections 10000 --max-connections-per-ip 1000 --max-inflight-requests 10000 --request-bytes-per-second 104857600 --request-burst-bytes 209715200 --max-throttle-ms 1000"
+```
+
+The matching Kafka client properties are:
+
+```properties
+bootstrap.servers=broker.example.com:9093
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="alice" password="replace-with-a-long-random-secret";
+ssl.truststore.location=cluster-ca.p12
+ssl.truststore.password=replace-with-the-truststore-password
+ssl.truststore.type=PKCS12
+group.protocol=classic
+```
+
+Credential and ACL snapshots reload on their configured interval. A malformed replacement never replaces the last valid in-memory snapshot. TLS key material is loaded at startup, so I still use a rolling restart to rotate the listener certificate.
+
 ### Bootstrap a three-node cluster for development
 
 Run each command in a separate process and give every broker its own data directory:
@@ -239,6 +289,7 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | Heartbeat | 12 | 3 | Session liveness and generation validation |
 | LeaveGroup | 13 | 2 | Explicit departure and rebalance initiation |
 | SyncGroup | 14 | 3 | Leader assignments and follower synchronization |
+| SaslHandshake | 17 | 1 | Negotiate the `PLAIN` mechanism before authentication |
 | ApiVersions | 18 | 0-4 | Legacy and flexible encodings with tagged fields |
 | CreateTopics | 19 | 2 | Validation and quorum-committed topic metadata |
 | InitProducerId | 22 | 1 | Durable producer IDs, epoch allocation, and fencing |
@@ -246,6 +297,7 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | AddOffsetsToTxn | 25 | 1 | Consumer-group enrollment in a transaction |
 | EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
 | TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
+| SaslAuthenticate | 36 | 1 | Kafka-framed SASL/PLAIN exchange and session lifetime |
 | AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
 | ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
 | DescribeQuorum | 55 | 0-2 | Metadata leader, epoch, high watermark, voter identities, and endpoints |
@@ -259,14 +311,15 @@ I follow the [Apache Kafka 4.3 protocol grammar](https://kafka.apache.org/43/des
 ```text
 Kafka client in any language
         |
-        | Kafka length-delimited TCP frames
+        | optional TLS + Kafka length-delimited TCP frames
         v
 Virtual-thread connection handler
         |
-        | frame bounds + versioned binary codec
+        | connection cap + SASL identity + request quota/admission
         v
 Request routing
         |
+        +-- deny-by-default resource ACLs + durable JSONL audit
         +-- metadata quorum + durable joint membership, election, and fencing
         +-- classic group coordinator + durable offset journal
         +-- producer/transaction coordinator + delivery journal
@@ -339,6 +392,8 @@ After adding deterministic fault injection and forced-kill recovery qualificatio
 
 After adding storage lifecycle management, I ran a clean **125/125** test suite and repeated the workload on 2026-08-22. It verified exactly **1,000,000 / 1,000,000** records at **423,662 produced records/s** (**413.7 MiB/s**) and **477,368 consumed records/s** (**466.2 MiB/s**). Produce took 2.360 seconds, consume took 2.095 seconds, p99 acknowledgement latency stayed at or below 1,000 ms, maximum acknowledgement latency was 643.996 ms, and peak heap was 1,747.6 MiB. The lifecycle interval is five minutes by default, so no cleanup ran during this seven-second regression; I use it to detect hot-path and exactness regressions, not to claim lifecycle throughput.
 
+After adding client-listener security and resource isolation, I ran a clean **149/149** suite, added two final rotation/tool checks, and repeated the one-million workload twice on 2026-08-24. Both runs verified exactly **1,000,000 / 1,000,000** records. The repeat produced **544,611 records/s** (**531.8 MiB/s**) and consumed **291,753 records/s** (**284.9 MiB/s**); the first run measured 545,911 and 295,007 records/s. Produce p99 stayed at or below 1,000 ms and the repeat's maximum was 537.726 ms. The plaintext load harness leaves authentication, ACLs, and quotas disabled, so I use this as a default-path regression gate rather than a security-capacity benchmark.
+
 ### Reproduce the load test
 
 ```bash
@@ -359,11 +414,11 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current clean `sbt test` suite passes **125/125 tests** in four layers:
+The current test suite passes **151/151 tests** in four layers:
 
-- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, timestamp and transaction indexes, time/size retention, conservative keyed compaction, interrupted replacement recovery, offset expiry, coordinator-journal compaction, disk admission, delivery-state recovery, producer fencing, transaction timeout, interrupted offset application, group coordination, metadata recovery, durable controller term/vote recovery, shutdown markers, and deterministic fault schedules.
-- TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, idempotent state recovery after broker restart, flexible voter-change framing, and Kafka quorum description decoding.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, classic group rebalances, committed offsets across restart and coordinator loss, RF=3/RF=4 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, reassignment visibility/cancellation, reassignment through controller loss, live voter admission, active-controller removal and restart as an observer, transactions, commit/abort isolation, active last stable offsets, transactional consumer offsets, and an open transaction committed after coordinator failover.
+- Unit tests for binary codecs, bounds failures, record-batch metadata and sequence wrap, storage pagination, segment rollover, flush policies, corrupt/partial-tail recovery, durable high-watermark recovery, incremental suffix truncation, recovery fingerprints, timestamp and transaction indexes, lifecycle behavior, delivery and group coordination, metadata/controller recovery, TLS contexts, PBKDF2 credential files, atomic credential/ACL reloads, ACL precedence, audit escaping, connection/request admission, and token-bucket quotas.
+- TCP integration tests for discovery, Produce/Fetch, acknowledgement behavior, duplicate retry offsets, sequence-gap rejection, idempotent state recovery, flexible voter framing, TLS and SASL negotiation, encrypted authentication and credential rotation, ACL errors and live policy rotation, security auditing, connection caps, and quota shedding.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, a full `SASL_SSL` + ACL Producer/group Consumer flow, classic group rebalances, committed offsets across restart and coordinator loss, RF=3/RF=4 replication, ISR/leader failover, controller election and stale-term fencing, divergent-tail replacement, safe replica re-admission, reassignment, dynamic voters, transactions, and an open transaction committed after coordinator failover.
 - Qualification tests that force-kill real broker JVMs, corrupt persisted tails, partition stable and joint quorums, exercise retention through a real Kafka client and broker restart, surface low-disk rejection through the Kafka protocol, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
 
 The load harness separately checks the exact record count at one million and ten million records.
@@ -372,8 +427,8 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Security and isolation | TLS, SASL mechanisms, ACL authorization, audit events, secret rotation, quotas, bounded queues, overload shedding, and connection/request limits |
-| 2 | Operations | Metrics export, health/readiness endpoints, structured logs, admin API coverage, backup/restore, capacity alerts, and operational runbooks |
+| 1 | Operations | Metrics export, health/readiness endpoints, structured logs, admin API coverage, backup/restore, capacity alerts, and operational runbooks |
+| 2 | Security hardening | Secure broker-to-broker transport, SCRAM, certificate hot reload, Kafka ACL Admin APIs, egress quotas, and multi-tenant soak tests |
 | 3 | Compatibility | New Kafka consumer protocol, static-member fencing, more API versions, malformed-frame/fuzz testing, multiple client languages, and rolling upgrade/downgrade testing |
 | 4 | Qualification | Physical power loss, disk loss/full/corruption, arbitrary packet delay/reordering, multi-day soak, and dedicated-host replicated-cluster benchmarks |
 | 5 | Coordinator scale | Sharded coordinator state with high-cardinality and failover benchmarks |
@@ -389,7 +444,10 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - Coordinator failover uses one full quorum image and one elected writer. The local journals are bounded and offsets expire, but I still need sharding and high-cardinality scale tests before treating it like Kafka's partitioned internal topics.
 - Lifecycle settings are broker-wide. I still need durable per-topic policies and Kafka configuration APIs.
 - Key compaction is deliberately batch-conservative: compressed, keyless, control, transactional, and partially superseded batches stay intact, and tombstone grace-period deletion is not implemented.
-- Quotas, TLS/SASL, ACLs, structured operational endpoints, backup/restore, and deletion I/O throttling are not implemented.
+- The client listener supports TLS and SASL/PLAIN, but broker-to-broker traffic does not yet authenticate or encrypt itself; I also still need SCRAM/OAuth mechanisms and certificate hot reload.
+- ACL files are local operator-managed policy, not the Kafka ACL Admin APIs. Topic data paths return Kafka authorization errors, while some denied control APIs currently close the connection.
+- The current quota measures inbound request bytes per principal. I still need response/egress, produce/fetch-specific, and cluster-wide distributed quotas plus multi-tenant soak qualification.
+- Structured operational endpoints, metrics export, backup/restore, and deletion I/O throttling are not implemented.
 - Only the classic consumer group protocol is supported.
 - The automated client matrix currently uses Kafka Java client 4.3.1.
 - The performance figures are single-node, shared-JVM development-machine measurements; replicated-cluster capacity has not been benchmarked.
@@ -426,6 +484,28 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--replica-recovery-chunk-bytes` | `8388608` | Maximum record-batch payload requested per incremental recovery transfer |
 | `--controller-heartbeat-ms` | `250` | Elected-controller heartbeat interval |
 | `--controller-election-timeout-ms` | `1500` | Controller lease and minimum election timeout; must be at least three heartbeat intervals |
+| `--security-protocol` | `PLAINTEXT` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, or `SASL_SSL` client listener |
+| `--ssl-keystore` | Empty | PKCS12 or JKS server key store; required by `SSL` and `SASL_SSL` |
+| `--ssl-keystore-password-file` | Empty | UTF-8 file containing the key-store password |
+| `--ssl-key-password-file` | Key-store password | Optional separate private-key password file |
+| `--ssl-truststore` | JVM default | PKCS12 or JKS client trust store; required when client certificates are requested |
+| `--ssl-truststore-password-file` | Empty | UTF-8 file containing the trust-store password |
+| `--ssl-client-auth` | `none` | `none`, `requested`, or `required` TLS client-certificate verification |
+| `--tls-protocols` | `TLSv1.3,TLSv1.2` | Enabled TLS protocol list |
+| `--credentials-file` | Empty | PBKDF2 credential file required by SASL listeners |
+| `--credential-reload-ms` | `1000` | Interval for atomic credential snapshot reload |
+| `--sasl-session-lifetime-ms` | `0` | Session lifetime reported by `SaslAuthenticate`; zero disables reauthentication expiry |
+| `--acl-file` | Empty | Deny-by-default resource ACL file; no file leaves authorization disabled |
+| `--acl-reload-ms` | `1000` | Interval for atomic ACL snapshot reload |
+| `--super-users` | Empty | Comma-separated principals that bypass ACL evaluation |
+| `--audit-log` | Empty | Append-only JSONL destination for authentication and authorization events |
+| `--audit-buffered` | Off | Skip per-event `force(false)`; shutdown still forces and closes the audit log |
+| `--max-connections` | `10000` | Global active connection cap |
+| `--max-connections-per-ip` | `1000` | Active connection cap for one source IP |
+| `--max-inflight-requests` | `10000` | Global request permits before overload shedding closes a connection |
+| `--request-bytes-per-second` | `0` | Per-principal ingress quota; zero disables quota work |
+| `--request-burst-bytes` | Quota rate | Per-principal token-bucket burst size |
+| `--max-throttle-ms` | `1000` | Maximum quota delay; larger required delays shed the request connection |
 | `--no-auto-create` | Off | Disable Metadata/Produce auto-creation |
 
 ## More documentation
