@@ -20,7 +20,7 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySe
 import scala.jdk.CollectionConverters.*
 
 final class SecurePeerClusterEndToEndSuite extends munit.FunSuite:
-  test("three brokers elect, replicate, produce, and fetch over authenticated peer TLS") {
+  test("three brokers replicate and fail over while every peer request uses authenticated TLS") {
     val root = Files.createTempDirectory("cascade-secure-peer-cluster")
     val ports = freePorts(3)
     val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "localhost", port) }
@@ -83,6 +83,20 @@ final class SecurePeerClusterEndToEndSuite extends munit.FunSuite:
         }
       finally producer.close(Duration.ofSeconds(5))
 
+      brokers.head.close()
+      val failoverProducer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(bootstrap, material.trustStore))
+      try
+        val metadata = failoverProducer.send(
+          ProducerRecord[Array[Byte], Array[Byte]](
+            "secure-replicated",
+            0,
+            null,
+            "secure-20".getBytes(StandardCharsets.UTF_8)
+          )
+        ).get(30, TimeUnit.SECONDS)
+        assertEquals(metadata.offset(), 20L)
+      finally failoverProducer.close(Duration.ofSeconds(5))
+
       val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrap, material.trustStore))
       try
         val partition = TopicPartition("secure-replicated", 0)
@@ -90,12 +104,17 @@ final class SecurePeerClusterEndToEndSuite extends munit.FunSuite:
         consumer.seekToBeginning(java.util.List.of(partition))
         val deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos
         val values = scala.collection.mutable.ArrayBuffer.empty[String]
-        while values.size < 20 && System.nanoTime() < deadline do
+        while values.size < 21 && System.nanoTime() < deadline do
           consumer.poll(Duration.ofMillis(250)).iterator().asScala.foreach { record =>
             values += String(record.value(), StandardCharsets.UTF_8)
           }
-        assertEquals(values.toVector, (0 until 20).map(index => s"secure-$index").toVector)
+        assertEquals(values.toVector, (0 until 21).map(index => s"secure-$index").toVector)
       finally consumer.close()
+
+      brokers.tail.foreach { broker =>
+        assert(broker.metricsSnapshot.peerSecurity.tlsAuthenticated > 0L)
+        assertEquals(broker.metricsSnapshot.peerSecurity.rejected, 0L)
+      }
     finally
       brokers.foreach(_.close())
       SecurityTestSupport.deleteTree(root)
