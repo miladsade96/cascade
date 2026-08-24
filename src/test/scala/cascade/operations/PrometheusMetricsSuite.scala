@@ -1,0 +1,45 @@
+package cascade.operations
+
+import munit.FunSuite
+
+final class PrometheusMetricsSuite extends FunSuite:
+  test("encodes deterministic Prometheus 0.0.4 counters and gauges") {
+    val output = PrometheusMetrics.encode(snapshot)
+    assert(output.endsWith("\n"))
+    assert(output.contains("# TYPE cascade_broker_up gauge\ncascade_broker_up{node_id=\"7\"} 1.0\n"))
+    assert(output.contains("# TYPE cascade_requests_total counter\ncascade_requests_total{node_id=\"7\"} 11.0\n"))
+    assert(output.contains("cascade_request_processing_seconds_total{node_id=\"7\"} 1.5\n"))
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 33)
+  }
+
+  private val snapshot = BrokerMetricsSnapshot(
+    nodeId = 7,
+    uptimeMillis = 2500L,
+    running = true,
+    clustered = true,
+    controllerId = 3,
+    brokerFenced = false,
+    topics = 2,
+    partitions = 4,
+    activeConnections = 5,
+    rejectedConnections = 1L,
+    activeRequests = 2,
+    rejectedRequests = 3L,
+    quotaPrincipals = 2,
+    quotaThrottledRequests = 4L,
+    quotaRejectedRequests = 5L,
+    quotaThrottleMillis = 600L,
+    traffic = TrafficSnapshot(11L, 12L, 13L, 14L, 15L, 1_500_000_000L),
+    flushOperations = 16L,
+    flushBytes = 17L,
+    flushNanos = 18L,
+    pendingFlushBytes = 19L,
+    lifecycleRuns = 20L,
+    retiredSegments = 21L,
+    reclaimedBytes = 22L,
+    rejectedAppends = 23L,
+    usableDiskBytes = 24L,
+    totalDiskBytes = 25L,
+    heapUsedBytes = 26L,
+    heapMaxBytes = 27L
+  )
