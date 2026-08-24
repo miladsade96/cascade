@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.storage.{CleanupPolicy, FlushPolicy}
-import cascade.security.{SecurityProtocol, TlsClientAuth}
+import cascade.security.{PeerSecurityProtocol, SecurityProtocol, TlsClientAuth}
 import java.nio.file.Files
 import munit.FunSuite
 
@@ -136,6 +136,9 @@ final class BrokerConfigSuite extends FunSuite:
           "--ssl-truststore-password-file", trustPassword.toString,
           "--ssl-client-auth", "requested",
           "--tls-protocols", "TLSv1.3,TLSv1.2",
+          "--peer-security-protocol", "SSL",
+          "--peer-identity-file", "peers.conf",
+          "--peer-identity-reload-ms", "400",
           "--credentials-file", "users.conf",
           "--credential-reload-ms", "250",
           "--sasl-session-lifetime-ms", "3600000",
@@ -158,6 +161,9 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.tls.keyPassword, Some("key-secret"))
       assertEquals(config.security.tls.trustStorePassword, Some("trust-secret"))
       assertEquals(config.security.tls.clientAuth, TlsClientAuth.Requested)
+      assertEquals(config.security.peer.protocol, PeerSecurityProtocol.Ssl)
+      assertEquals(config.security.peer.identityFile.map(_.toString), Some("peers.conf"))
+      assertEquals(config.security.peer.identityReloadIntervalMillis, 400L)
       assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
       assertEquals(config.security.resources.maxConnections, 500)
       assertEquals(config.security.resources.requestBytesPerSecond, 1_048_576L)
@@ -171,6 +177,9 @@ final class BrokerConfigSuite extends FunSuite:
   test("validates TLS and SASL dependencies after all options are parsed") {
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SSL")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT")))
+    intercept[IllegalArgumentException](
+      BrokerConfig.parse(Array("--peer-security-protocol", "SSL", "--peer-identity-file", "peers.conf"))
+    )
   }
 
   test("parses operations, readiness, logging, and capacity settings") {
