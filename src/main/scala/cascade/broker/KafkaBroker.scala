@@ -4,16 +4,17 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.StructuredLogger
+import cascade.operations.{BrokerMetricsSnapshot, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
+import java.nio.file.Files
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.{SSLPeerUnverifiedException, SSLSocket}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
 final class KafkaBroker(
     val config: BrokerConfig,
@@ -25,6 +26,8 @@ final class KafkaBroker(
   private val closed = AtomicBoolean(false)
   private val eventLog = StructuredLogger.from(config.operations)
   private val operationalEventsEnabled = config.operations.enabled || config.operations.structuredLog.nonEmpty
+  private val trafficMetrics = TrafficMetrics()
+  private val startedAtNanos = AtomicLong(0L)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
   private val server: ServerSocket =
@@ -71,6 +74,7 @@ final class KafkaBroker(
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")
     if running.get() then throw IllegalStateException("broker is already running")
+    startedAtNanos.set(System.nanoTime())
     if operationalEventsEnabled then
       eventLog.info("broker_starting", brokerFields ++ Map("recovery_mode" -> recoveryMode.toString.toLowerCase))
     server.setReuseAddress(true)
@@ -129,6 +133,50 @@ final class KafkaBroker(
   def requestAdmissionSnapshot: RequestAdmissionSnapshot = requestAdmission.snapshot
 
   def requestQuotaSnapshot: RequestQuotaSnapshot = requestQuota.snapshot
+
+  def metricsSnapshot: BrokerMetricsSnapshot =
+    val cluster = Option(clusterManager)
+    val topicNames = try cluster.map(_.topicNames).getOrElse(registry.topicNames) catch case _: Throwable => Vector.empty
+    val localPartitions = try topicNames.flatMap(name => registry.partitions(name).toVector.flatten).size catch case _: Throwable => 0
+    val connections = connectionAdmission.snapshot
+    val requests = requestAdmission.snapshot
+    val quota = requestQuota.snapshot
+    val flush = registry.flushStatistics
+    val lifecycle = registry.lifecycleStatistics
+    val fileStore = Files.getFileStore(config.dataDirectory)
+    val runtime = Runtime.getRuntime
+    val start = startedAtNanos.get()
+    BrokerMetricsSnapshot(
+      nodeId = config.nodeId,
+      uptimeMillis = if start == 0L then 0L else math.max(0L, (System.nanoTime() - start) / 1_000_000L),
+      running = running.get(),
+      clustered = clustered,
+      controllerId = cluster.map(_.controllerId).getOrElse(config.nodeId),
+      brokerFenced = cluster.exists(_.isBrokerFenced),
+      topics = topicNames.size,
+      partitions = localPartitions,
+      activeConnections = connections.active,
+      rejectedConnections = connections.rejected,
+      activeRequests = requests.active,
+      rejectedRequests = requests.rejected,
+      quotaPrincipals = quota.principals,
+      quotaThrottledRequests = quota.throttled,
+      quotaRejectedRequests = quota.rejected,
+      quotaThrottleMillis = quota.throttleMillis,
+      traffic = trafficMetrics.snapshot,
+      flushOperations = flush.forces,
+      flushBytes = flush.bytes,
+      flushNanos = flush.nanos,
+      pendingFlushBytes = flush.pendingBytes,
+      lifecycleRuns = lifecycle.runs,
+      retiredSegments = lifecycle.retiredSegments,
+      reclaimedBytes = lifecycle.reclaimedBytes,
+      rejectedAppends = lifecycle.rejectedAppends,
+      usableDiskBytes = fileStore.getUsableSpace,
+      totalDiskBytes = fileStore.getTotalSpace,
+      heapUsedBytes = runtime.totalMemory() - runtime.freeMemory(),
+      heapMaxBytes = runtime.maxMemory()
+    )
 
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
@@ -213,15 +261,24 @@ final class KafkaBroker(
     requestAdmission.tryAcquire() match
       case None => false
       case Some(lease) =>
+        val started = System.nanoTime()
+        trafficMetrics.recordRequest(frame.length + Integer.BYTES)
         try
           val currentHandler = handler
           if currentHandler == null then throw IllegalStateException("request handler is not initialized")
           currentHandler.handle(frame, session).foreach { response =>
             output.write(response)
             output.flush()
+            trafficMetrics.recordResponse(response.length)
           }
           !session.terminateRequested
-        finally lease.close()
+        catch
+          case error: Throwable =>
+            trafficMetrics.recordFailure()
+            throw error
+        finally
+          trafficMetrics.recordDuration(System.nanoTime() - started)
+          lease.close()
 
   private def connectionSession(socket: Socket): ConnectionSession =
     val transportPrincipal = socket match

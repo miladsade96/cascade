@@ -1,5 +1,7 @@
 package cascade.operations
 
+import java.util.concurrent.atomic.AtomicLong
+
 final case class TrafficSnapshot(
     requests: Long,
     requestBytes: Long,
@@ -8,6 +10,36 @@ final case class TrafficSnapshot(
     failures: Long,
     requestNanos: Long
 )
+
+final class TrafficMetrics:
+  private val requests = AtomicLong(0L)
+  private val requestBytes = AtomicLong(0L)
+  private val responses = AtomicLong(0L)
+  private val responseBytes = AtomicLong(0L)
+  private val failures = AtomicLong(0L)
+  private val requestNanos = AtomicLong(0L)
+
+  def recordRequest(bytes: Int): Unit =
+    requests.incrementAndGet(): Unit
+    requestBytes.addAndGet(bytes.toLong): Unit
+
+  def recordResponse(bytes: Int): Unit =
+    responses.incrementAndGet(): Unit
+    responseBytes.addAndGet(bytes.toLong): Unit
+
+  def recordFailure(): Unit = failures.incrementAndGet(): Unit
+
+  def recordDuration(nanos: Long): Unit = requestNanos.addAndGet(math.max(0L, nanos)): Unit
+
+  def snapshot: TrafficSnapshot =
+    TrafficSnapshot(
+      requests.get(),
+      requestBytes.get(),
+      responses.get(),
+      responseBytes.get(),
+      failures.get(),
+      requestNanos.get()
+    )
 
 final case class BrokerMetricsSnapshot(
     nodeId: Int,
