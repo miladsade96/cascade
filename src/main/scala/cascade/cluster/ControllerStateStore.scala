@@ -1,6 +1,7 @@
 package cascade.cluster
 
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
+import cascade.storage.AtomicFileLifecycle
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
@@ -57,9 +58,8 @@ final class ControllerStateStore(path: Path) extends AutoCloseable:
 
   override def close(): Unit = synchronized {
     if !closed then
-      channel.force(false)
-      channel.close()
       closed = true
+      AtomicFileLifecycle.forceAndClose(channel)
   }
 
   private def recover(): ControllerState =

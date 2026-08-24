@@ -43,9 +43,8 @@ final class DeliveryStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
 
   override def close(): Unit = synchronized {
     if !closed then
-      channel.force(false)
-      channel.close()
       closed = true
+      AtomicFileLifecycle.forceAndClose(channel)
   }
 
   private def recover(): DeliveryImage =

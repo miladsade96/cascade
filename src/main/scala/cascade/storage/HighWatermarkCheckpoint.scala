@@ -52,9 +52,8 @@ private[storage] final class HighWatermarkCheckpoint(path: Path) extends AutoClo
 
   override def close(): Unit = synchronized {
     if !closed then
-      channel.force(false)
-      channel.close()
       closed = true
+      AtomicFileLifecycle.forceAndClose(channel)
   }
 
   private def recover(): Option[(Long, Long)] =

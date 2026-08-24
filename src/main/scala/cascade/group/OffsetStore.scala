@@ -97,9 +97,8 @@ final class OffsetStore(path: Path) extends AutoCloseable:
 
   override def close(): Unit = synchronized {
     if !closed then
-      channel.force(false)
-      channel.close()
       closed = true
+      AtomicFileLifecycle.forceAndClose(channel)
   }
 
   private def encode(entry: OffsetCommitValue): Array[Byte] =

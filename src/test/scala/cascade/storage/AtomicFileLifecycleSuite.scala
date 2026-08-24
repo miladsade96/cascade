@@ -1,10 +1,25 @@
 package cascade.storage
 
-import java.nio.file.Files
+import java.nio.channels.FileChannel
+import java.nio.file.{Files, StandardOpenOption}
 import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 final class AtomicFileLifecycleSuite extends FunSuite:
+  test("forced channel shutdown tolerates channels already closed by interruption") {
+    val path = Files.createTempFile("cascade-force-close", ".log")
+    try
+      val open = FileChannel.open(path, StandardOpenOption.WRITE)
+      AtomicFileLifecycle.forceAndClose(open)
+      assert(!open.isOpen)
+
+      val interrupted = FileChannel.open(path, StandardOpenOption.WRITE)
+      interrupted.close()
+      AtomicFileLifecycle.forceAndClose(interrupted)
+      assert(!interrupted.isOpen)
+    finally Files.deleteIfExists(path): Unit
+  }
+
   test("startup purges a segment left in the renamed deletion state") {
     val directory = Files.createTempDirectory("cascade-atomic-delete-test")
     try
