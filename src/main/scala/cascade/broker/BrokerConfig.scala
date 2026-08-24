@@ -1,8 +1,10 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
+import cascade.security.*
 import cascade.storage.{CleanupPolicy, FlushPolicy, StorageLifecycleConfig}
-import java.nio.file.{Path, Paths}
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path, Paths}
 
 final case class BrokerConfig(
     bindHost: String = "0.0.0.0",
@@ -26,6 +28,7 @@ final case class BrokerConfig(
     controllerHeartbeatMillis: Int = 250,
     controllerElectionTimeoutMillis: Int = 1500,
     storageLifecycle: StorageLifecycleConfig = StorageLifecycleConfig(),
+    security: BrokerSecurityConfig = BrokerSecurityConfig(),
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -102,6 +105,58 @@ object BrokerConfig:
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(offsetRetentionMillis = value.toLong)))
       case "--journal-compaction-bytes" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(journalCompactionBytes = value.toLong)))
+      case "--security-protocol" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(protocol = SecurityProtocol.parse(value))))
+      case "--ssl-keystore" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(keyStore = Some(Paths.get(value))))))
+      case "--ssl-keystore-password-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(keyStorePassword = Some(readSecret(value))))))
+      case "--ssl-key-password-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(keyPassword = Some(readSecret(value))))))
+      case "--ssl-truststore" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(trustStore = Some(Paths.get(value))))))
+      case "--ssl-truststore-password-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(trustStorePassword = Some(readSecret(value))))))
+      case "--ssl-client-auth" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(clientAuth = TlsClientAuth.parse(value)))))
+      case "--tls-protocols" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(enabledProtocols = splitCsv(value)))))
+      case "--credentials-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(credentialsFile = Some(Paths.get(value))))))
+      case "--credential-reload-ms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(reloadIntervalMillis = value.toLong))))
+      case "--sasl-session-lifetime-ms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(sessionLifetimeMillis = value.toLong))))
+      case "--acl-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authorization = config.security.authorization.copy(aclFile = Some(Paths.get(value))))))
+      case "--acl-reload-ms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authorization = config.security.authorization.copy(reloadIntervalMillis = value.toLong))))
+      case "--super-users" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authorization = config.security.authorization.copy(superUsers = splitCsv(value).toSet))))
+      case "--audit-log" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(audit = config.security.audit.copy(path = Some(Paths.get(value))))))
+      case "--audit-buffered" :: tail =>
+        loop(tail, config.copy(security = config.security.copy(audit = config.security.audit.copy(forceEachEvent = false))))
+      case "--max-connections" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxConnections = value.toInt))))
+      case "--max-connections-per-ip" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxConnectionsPerIp = value.toInt))))
+      case "--max-inflight-requests" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxInFlightRequests = value.toInt))))
+      case "--request-bytes-per-second" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(requestBytesPerSecond = value.toLong))))
+      case "--request-burst-bytes" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(requestBurstBytes = value.toLong))))
+      case "--max-throttle-ms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxThrottleMillis = value.toLong))))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
-    loop(arguments.toList, BrokerConfig())
+    val parsed = loop(arguments.toList, BrokerConfig())
+    parsed.security.validate()
+    parsed
+
+  private def readSecret(value: String): String =
+    Files.readString(Paths.get(value), StandardCharsets.UTF_8).stripTrailing()
+
+  private def splitCsv(value: String): Vector[String] =
+    value.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector

@@ -76,10 +76,12 @@ final case class BrokerSecurityConfig(
     audit: AuditConfig = AuditConfig(),
     resources: ResourceLimits = ResourceLimits()
 ):
-  require(!protocol.tls || tls.keyStore.nonEmpty, "TLS requires a key store")
-  require(!protocol.tls || tls.keyStorePassword.nonEmpty, "TLS requires a key-store password")
-  require(!protocol.sasl || authentication.credentialsFile.nonEmpty, "SASL requires a credentials file")
-  require(
-    tls.clientAuth == TlsClientAuth.None || tls.trustStore.nonEmpty,
-    "TLS client authentication requires a trust store"
-  )
+  def validate(): BrokerSecurityConfig =
+    require(!protocol.tls || tls.keyStore.nonEmpty, "TLS requires a key store")
+    require(!protocol.tls || tls.keyStorePassword.nonEmpty, "TLS requires a key-store password")
+    require(!protocol.sasl || authentication.credentialsFile.nonEmpty, "SASL requires a credentials file")
+    require(
+      tls.clientAuth == TlsClientAuth.None || tls.trustStore.nonEmpty,
+      "TLS client authentication requires a trust store"
+    )
+    this

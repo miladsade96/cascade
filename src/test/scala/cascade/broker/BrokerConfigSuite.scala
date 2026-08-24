@@ -1,6 +1,8 @@
 package cascade.broker
 
 import cascade.storage.{CleanupPolicy, FlushPolicy}
+import cascade.security.{SecurityProtocol, TlsClientAuth}
+import java.nio.file.Files
 import munit.FunSuite
 
 final class BrokerConfigSuite extends FunSuite:
@@ -114,4 +116,59 @@ final class BrokerConfigSuite extends FunSuite:
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--cleanup-policy", "archive")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--retention-ms", "0")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--minimum-free-bytes", "-1")))
+  }
+
+  test("parses security and resource-isolation settings without exposing secrets on the command line") {
+    val password = Files.createTempFile("cascade-keystore", ".password")
+    val keyPassword = Files.createTempFile("cascade-key", ".password")
+    val trustPassword = Files.createTempFile("cascade-truststore", ".password")
+    Files.writeString(password, "store-secret\n")
+    Files.writeString(keyPassword, "key-secret\r\n")
+    Files.writeString(trustPassword, "trust-secret")
+    try
+      val config = BrokerConfig.parse(
+        Array(
+          "--security-protocol", "SASL_SSL",
+          "--ssl-keystore", "broker.p12",
+          "--ssl-keystore-password-file", password.toString,
+          "--ssl-key-password-file", keyPassword.toString,
+          "--ssl-truststore", "clients.p12",
+          "--ssl-truststore-password-file", trustPassword.toString,
+          "--ssl-client-auth", "requested",
+          "--tls-protocols", "TLSv1.3,TLSv1.2",
+          "--credentials-file", "users.conf",
+          "--credential-reload-ms", "250",
+          "--sasl-session-lifetime-ms", "3600000",
+          "--acl-file", "acls.conf",
+          "--acl-reload-ms", "300",
+          "--super-users", "admin,operator",
+          "--audit-log", "audit.jsonl",
+          "--audit-buffered",
+          "--max-connections", "500",
+          "--max-connections-per-ip", "50",
+          "--max-inflight-requests", "250",
+          "--request-bytes-per-second", "1048576",
+          "--request-burst-bytes", "2097152",
+          "--max-throttle-ms", "750"
+        )
+      )
+
+      assertEquals(config.security.protocol, SecurityProtocol.SaslSsl)
+      assertEquals(config.security.tls.keyStorePassword, Some("store-secret"))
+      assertEquals(config.security.tls.keyPassword, Some("key-secret"))
+      assertEquals(config.security.tls.trustStorePassword, Some("trust-secret"))
+      assertEquals(config.security.tls.clientAuth, TlsClientAuth.Requested)
+      assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
+      assertEquals(config.security.resources.maxConnections, 500)
+      assertEquals(config.security.resources.requestBytesPerSecond, 1_048_576L)
+      assert(!config.security.audit.forceEachEvent)
+    finally
+      Files.deleteIfExists(password): Unit
+      Files.deleteIfExists(keyPassword): Unit
+      Files.deleteIfExists(trustPassword): Unit
+  }
+
+  test("validates TLS and SASL dependencies after all options are parsed") {
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SSL")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT")))
   }
