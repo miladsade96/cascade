@@ -13,4 +13,8 @@ I don't want Cascade to advertise compatibility that it can't prove. Before addi
 
 If your change touches security or resource isolation, I also need a focused unit test, a broker integration test for the failure boundary, and a real Kafka-client test when the client exposes that path. Please never put a clear password, key-store secret, private key, or generated test key store in the repository. I keep denial behavior fail-closed and preserve the last valid credential or ACL snapshot when a live reload is malformed.
 
+If your change touches metrics, health/readiness, structured events, or capacity alerts, I need a deterministic encoder/evaluator test and an operations-listener integration test. Please keep metric labels bounded; I don't accept topic, client, request, or principal identifiers as Prometheus labels without a measured cardinality budget.
+
+If your change touches backup or restore, I need tests for traversal, symlinks, unexpected files, corruption, partial publication, existing targets, and exact Kafka-client recovery. I keep the source offline, publish only through a sibling atomic rename, and never weaken manifest verification to make a damaged backup pass.
+
 If you're unsure about the behavior of an API, open an issue before building a large change. I'm happy to discuss the design first.
