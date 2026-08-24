@@ -4,7 +4,7 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, HealthPolicy, OperationsServer, StructuredLogger, TrafficMetrics}
+import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -71,6 +71,7 @@ final class KafkaBroker(
   @volatile private var coordinatorStateMachine: CoordinatorStateMachine | Null = null
   @volatile private var peerClient: PeerTransport | Null = null
   @volatile private var operationsServer: OperationsServer | Null = null
+  @volatile private var capacityMonitor: CapacityMonitor | Null = null
 
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")
@@ -118,10 +119,22 @@ final class KafkaBroker(
       )
     }
     operationsServer = operations.orNull
+    val capacity = Option.when(operationalEventsEnabled) {
+      CapacityMonitor(
+        config.operations.capacityAlerts,
+        () => metricsSnapshot,
+        CapacityLimits(config.security.resources.maxConnections, config.security.resources.maxInFlightRequests),
+        alert => eventLog.warn("capacity_alert", brokerFields ++ alert.fields),
+        code => eventLog.info("capacity_alert_resolved", brokerFields ++ Map("alert" -> code)),
+        error => eventLog.error("capacity_monitor_error", error, brokerFields)
+      )
+    }
+    capacityMonitor = capacity.orNull
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
     cluster.start()
     operations.foreach(_.start())
+    capacity.foreach(_.start())
     if operationalEventsEnabled then
       eventLog.info(
         "broker_started",
@@ -209,6 +222,7 @@ final class KafkaBroker(
     if closed.compareAndSet(false, true) then
       if operationalEventsEnabled then eventLog.info("broker_stopping", brokerFields)
       running.set(false)
+      Option(capacityMonitor).foreach(_.close())
       Option(operationsServer).foreach(_.close())
       server.close()
       connections.shutdownNow()
