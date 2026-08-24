@@ -26,6 +26,16 @@ object TlsClientAuth:
     case "required"  => TlsClientAuth.Required
     case other        => throw IllegalArgumentException(s"unsupported TLS client authentication mode: $other")
 
+enum PeerSecurityProtocol(val tls: Boolean):
+  case Plaintext extends PeerSecurityProtocol(false)
+  case Ssl extends PeerSecurityProtocol(true)
+
+object PeerSecurityProtocol:
+  def parse(value: String): PeerSecurityProtocol = value.trim.toUpperCase match
+    case "PLAINTEXT" => PeerSecurityProtocol.Plaintext
+    case "SSL"       => PeerSecurityProtocol.Ssl
+    case other        => throw IllegalArgumentException(s"unsupported peer security protocol: $other")
+
 final case class TlsConfig(
     keyStore: Option[Path] = None,
     keyStorePassword: Option[String] = None,
@@ -53,6 +63,25 @@ final case class AuthorizationConfig(
 
 final case class AuditConfig(path: Option[Path] = None, forceEachEvent: Boolean = true)
 
+final case class PeerSecurityConfig(
+    protocol: PeerSecurityProtocol = PeerSecurityProtocol.Plaintext,
+    identityFile: Option[Path] = None,
+    identityReloadIntervalMillis: Long = 1000L,
+    endpointIdentificationAlgorithm: String = "HTTPS"
+):
+  require(identityReloadIntervalMillis >= 0L, "peer identity reload interval cannot be negative")
+  require(endpointIdentificationAlgorithm == "HTTPS", "peer TLS endpoint identification must use HTTPS hostname verification")
+
+  def validate(listenerProtocol: SecurityProtocol, tls: TlsConfig): PeerSecurityConfig =
+    if protocol.tls then
+      require(listenerProtocol.tls, "peer SSL requires an SSL or SASL_SSL broker listener")
+      require(tls.clientAuth != TlsClientAuth.None, "peer SSL requires requested or required TLS client authentication")
+      require(tls.trustStore.nonEmpty, "peer SSL requires a trust store")
+      require(tls.trustStorePassword.nonEmpty, "peer SSL requires a trust-store password")
+      require(identityFile.nonEmpty, "peer SSL requires a peer identity file")
+    else require(identityFile.isEmpty, "a peer identity file requires peer SSL")
+    this
+
 final case class ResourceLimits(
     maxConnections: Int = 10000,
     maxConnectionsPerIp: Int = 1000,
@@ -74,7 +103,8 @@ final case class BrokerSecurityConfig(
     authentication: AuthenticationConfig = AuthenticationConfig(),
     authorization: AuthorizationConfig = AuthorizationConfig(),
     audit: AuditConfig = AuditConfig(),
-    resources: ResourceLimits = ResourceLimits()
+    resources: ResourceLimits = ResourceLimits(),
+    peer: PeerSecurityConfig = PeerSecurityConfig()
 ):
   def validate(): BrokerSecurityConfig =
     require(!protocol.tls || tls.keyStore.nonEmpty, "TLS requires a key store")
@@ -84,4 +114,5 @@ final case class BrokerSecurityConfig(
       tls.clientAuth == TlsClientAuth.None || tls.trustStore.nonEmpty,
       "TLS client authentication requires a trust store"
     )
+    peer.validate(protocol, tls): Unit
     this
