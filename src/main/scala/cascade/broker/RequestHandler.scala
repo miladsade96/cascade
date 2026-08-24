@@ -25,6 +25,7 @@ final class RequestHandler(
   private val authorizer = config.security.authorization.aclFile.map { path =>
     ReloadableAuthorizer(path, config.security.authorization.superUsers, config.security.authorization.reloadIntervalMillis)
   }
+  private val peerAuthenticator = PeerAuthenticator(config.security.peer)
   private val audit = config.security.audit.path.map(path => AuditLog.open(path, config.security.audit.forceEachEvent))
 
   def auditTransport(session: ConnectionSession): Unit =
@@ -38,7 +39,26 @@ final class RequestHandler(
   def handle(frame: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
     val (header, body) = RequestHeader.decode(frame)
     if InternalApi.contains(header.apiKey) then
-      if !header.clientId.contains("cascade-peer") then throw ProtocolException("internal API requires a peer client")
+      peerAuthenticator.authenticate(header.clientId, session) match
+        case Left(reason) =>
+          recordAudit(
+            "peer_authentication",
+            session,
+            "denied",
+            Some(AclOperation.ClusterAction.toString),
+            Some(ResourceType.Cluster.toString),
+            header.clientId
+          )
+          throw ProtocolException(s"peer authentication failed: $reason")
+        case Right(peer) =>
+          recordAudit(
+            "peer_authentication",
+            session,
+            "allowed",
+            Some(AclOperation.ClusterAction.toString),
+            Some(ResourceType.Cluster.toString),
+            Some(peer.nodeId.map(id => s"node-$id").getOrElse("legacy-peer"))
+          )
       requireAuthorized(session, AclOperation.ClusterAction, ResourceType.Cluster, "cascade")
       val response = header.apiKey match
         case InternalApi.ReplicaAppend | InternalApi.ReplicaCommit | InternalApi.ReplicaCatchUp |
