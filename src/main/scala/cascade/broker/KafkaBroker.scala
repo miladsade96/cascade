@@ -151,6 +151,7 @@ final class KafkaBroker(
             output.write(response)
             output.flush()
           }
+          if session.terminateRequested then connected = false
         catch
           case _: EOFException => connected = false
     catch

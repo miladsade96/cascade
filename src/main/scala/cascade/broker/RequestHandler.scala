@@ -5,7 +5,11 @@ import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
 import cascade.security.ConnectionSession
+import cascade.security.ReloadableCredentials
 import cascade.storage.TopicRegistry
+import java.nio.ByteBuffer
+import java.nio.charset.{CodingErrorAction, StandardCharsets}
+import java.util.Arrays
 
 final class RequestHandler(
     config: BrokerConfig,
@@ -16,6 +20,10 @@ final class RequestHandler(
     deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int
 ):
+  private val credentials = config.security.authentication.credentialsFile.map { path =>
+    ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
+  }
+
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)
 
   def handle(frame: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
@@ -41,6 +49,7 @@ final class RequestHandler(
     val response = header.apiKey match
       case ApiKey.ApiVersions  => apiVersions(header.apiVersion, body)
       case ApiKey.SaslHandshake => saslHandshake(body, session)
+      case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
       case ApiKey.Metadata     => metadata(body)
       case ApiKey.OffsetCommit => offsetCommit(body)
       case ApiKey.OffsetFetch  => offsetFetch(body)
@@ -104,9 +113,60 @@ final class RequestHandler(
       else
         session.selectMechanism(mechanism)
         Errors.None
+    if error != Errors.None then session.terminateAfterResponse()
     val writer = ByteWriter().writeShort(error)
     writer.writeArray(Vector("PLAIN"))(writer.writeString)
     Some(writer.result())
+
+  private def saslAuthenticate(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val token = cursor.readByteArray()
+    cursor.ensureFullyRead()
+    val authenticated =
+      if !config.security.protocol.sasl || !session.mechanism.contains("PLAIN") then None
+      else parsePlainToken(token).filter { case (user, password) =>
+        try credentials.exists(_.authenticate(user, password))
+        finally Arrays.fill(password, '\u0000')
+      }.map(_._1)
+    Arrays.fill(token, 0.toByte)
+
+    val (error, message) = authenticated match
+      case Some(principal) =>
+        session.authenticate(principal)
+        (Errors.None, None)
+      case None =>
+        session.rejectAuthentication()
+        (Errors.SaslAuthenticationFailed, Some("authentication failed"))
+    Some(
+      ByteWriter()
+        .writeShort(error)
+        .writeNullableString(message)
+        .writeByteArray(Array.emptyByteArray)
+        .writeLong(config.security.authentication.sessionLifetimeMillis)
+        .result()
+    )
+
+  private def parsePlainToken(token: Array[Byte]): Option[(String, Array[Char])] =
+    val first = token.indexOf(0.toByte)
+    val second = if first < 0 then -1 else token.indexOf(0.toByte, first + 1)
+    val third = if second < 0 then -1 else token.indexOf(0.toByte, second + 1)
+    if first < 0 || second <= first + 0 || third >= 0 then None
+    else
+      try
+        val authorizationId = decodeUtf8(token, 0, first)
+        val authenticationId = decodeUtf8(token, first + 1, second - first - 1)
+        val password = decodeUtf8(token, second + 1, token.length - second - 1).toCharArray
+        if authenticationId.isEmpty || (authorizationId.nonEmpty && authorizationId != authenticationId) then
+          Arrays.fill(password, '\u0000')
+          None
+        else Some(authenticationId -> password)
+      catch case _: java.nio.charset.CharacterCodingException => None
+
+  private def decodeUtf8(bytes: Array[Byte], offset: Int, length: Int): String =
+    StandardCharsets.UTF_8.newDecoder()
+      .onMalformedInput(CodingErrorAction.REPORT)
+      .onUnmappableCharacter(CodingErrorAction.REPORT)
+      .decode(ByteBuffer.wrap(bytes, offset, length))
+      .toString
 
   private def findCoordinator(cursor: ByteCursor): Option[Array[Byte]] =
     cursor.readString()

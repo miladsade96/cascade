@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit
 import munit.FunSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.clients.CommonClientConfigs
-import org.apache.kafka.common.config.SslConfigs
+import org.apache.kafka.common.config.{SaslConfigs, SslConfigs}
 
 final class SecurityIntegrationSuite extends FunSuite:
   test("Kafka clients negotiate TLS with the broker") {
@@ -86,6 +86,42 @@ final class SecurityIntegrationSuite extends FunSuite:
         assertEquals(cursor.readArray(cursor.readString()), Vector("PLAIN"))
         cursor.ensureFullyRead()
       finally socket.close()
+    finally
+      java.util.Arrays.fill(password, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
+  test("authenticates Apache Kafka clients with framed SASL PLAIN") {
+    val directory = Files.createTempDirectory("cascade-sasl-client")
+    val credentials = directory.resolve("users.conf")
+    val password = "kafka-client-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(credentialsFile = Some(credentials))
+        )
+      )
+    )
+    try
+      broker.start()
+      val properties = Properties()
+      properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+      properties.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_PLAINTEXT")
+      properties.put(SaslConfigs.SASL_MECHANISM, "PLAIN")
+      properties.put(
+        SaslConfigs.SASL_JAAS_CONFIG,
+        "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"kafka-client-password\";"
+      )
+      val admin = Admin.create(properties)
+      try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)
+      finally admin.close(Duration.ofSeconds(5))
     finally
       java.util.Arrays.fill(password, '\u0000')
       broker.close()
