@@ -4,6 +4,7 @@ import cascade.cluster.*
 import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
+import cascade.security.ConnectionSession
 import cascade.storage.TopicRegistry
 
 final class RequestHandler(
@@ -15,7 +16,9 @@ final class RequestHandler(
     deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int
 ):
-  def handle(frame: Array[Byte]): Option[Array[Byte]] =
+  def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)
+
+  def handle(frame: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
     val (header, body) = RequestHeader.decode(frame)
     if InternalApi.contains(header.apiKey) then
       if !header.clientId.contains("cascade-peer") then throw ProtocolException("internal API requires a peer client")

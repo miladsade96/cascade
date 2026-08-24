@@ -5,11 +5,12 @@ import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
-import cascade.security.{TlsClientAuth, TlsContextFactory}
+import cascade.security.{ConnectionSession, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.{SSLPeerUnverifiedException, SSLSocket}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -133,6 +134,7 @@ final class KafkaBroker(
 
   private def serve(socket: Socket): Unit =
     try
+      val session = connectionSession(socket)
       val input = DataInputStream(BufferedInputStream(socket.getInputStream, 64 * 1024))
       val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream, 64 * 1024))
       var connected = true
@@ -145,7 +147,7 @@ final class KafkaBroker(
           input.readFully(frame)
           val currentHandler = handler
           if currentHandler == null then throw IllegalStateException("request handler is not initialized")
-          currentHandler.handle(frame).foreach { response =>
+          currentHandler.handle(frame, session).foreach { response =>
             output.write(response)
             output.flush()
           }
@@ -156,3 +158,17 @@ final class KafkaBroker(
       case error: ProtocolException => System.err.println(s"Cascade protocol error: ${error.getMessage}")
       case error: Throwable => System.err.println(s"Cascade connection error: ${error.getMessage}")
     finally socket.close()
+
+  private def connectionSession(socket: Socket): ConnectionSession =
+    val transportPrincipal = socket match
+      case tlsSocket: SSLSocket =>
+        tlsSocket.startHandshake()
+        try Some(tlsSocket.getSession.getPeerPrincipal.getName)
+        catch case _: SSLPeerUnverifiedException => None
+      case _ => None
+    ConnectionSession(
+      socket.getInetAddress.getHostAddress,
+      secure = socket.isInstanceOf[SSLSocket],
+      authenticationRequired = config.security.protocol.sasl,
+      transportPrincipal = transportPrincipal
+    )
