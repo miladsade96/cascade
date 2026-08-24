@@ -26,7 +26,7 @@ The token protects every endpoint and is compared in constant time. It does not 
 | Endpoint | Healthy response | Failure response | What I use it for |
 | --- | ---: | ---: | --- |
 | `GET /live` | 200 | 503 | Process supervision; it checks whether the broker is running |
-| `GET /ready` | 200 | 503 | Load-balancer admission; it checks running, unfenced state, flush backlog, disk reserve, and structured-log health |
+| `GET /ready` | 200 | 503 | Load-balancer admission; it checks running, unfenced state, flush backlog, disk reserve, structured-log health, and peer identity-policy reload health |
 | `GET /metrics` | 200 | 500 | Prometheus 0.0.4 scrape output |
 | `GET /v1/status` | 200 | 500 | Compact JSON broker, traffic, storage, disk, and readiness state |
 
@@ -50,13 +50,15 @@ scrape_configs:
       - targets: ["127.0.0.1:9404"]
 ```
 
-All current metric series have only the `node_id` label. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, and request identifiers out of labels to avoid unbounded cardinality.
+All current metric series have only the `node_id` label. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, peer authentication/TLS/rejection totals, quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, and request identifiers out of labels to avoid unbounded cardinality.
 
 ## Readiness policy
 
 I set `--readiness-max-pending-flush-bytes` to the largest dirty backlog I am willing to serve. Its default is effectively unlimited so an operator must choose a deployment-specific threshold. The disk readiness threshold is the larger of `--minimum-free-bytes` and `--capacity-minimum-free-bytes`.
 
 I remove a broker from client routing when `/ready` is 503, but I do not immediately restart it if `/live` remains 200. A fenced broker, flush backlog, or low-disk state often needs the controller, storage, or traffic pressure to recover. I restart only after the failed check and structured events show that the process itself cannot recover.
+
+If `peer_identity_policy` fails, Cascade continues using the last valid policy. I repair and atomically replace the identity file, then wait for readiness to recover. I do not restart into a malformed policy.
 
 ## Structured events and capacity alerts
 
@@ -66,6 +68,7 @@ The main event families are:
 
 - `broker_starting`, `broker_started`, `broker_stopping`, and `broker_stopped`;
 - connection accept, connection handling, protocol, operations-server, storage, and capacity-monitor failures;
+- `peer_authentication` audit events for certificate-bound internal requests, with allowed or denied decisions;
 - `capacity_alert` with `alert`, `current`, `threshold`, and `unit` fields;
 - `capacity_alert_resolved` when an active condition clears.
 
@@ -83,4 +86,4 @@ Before startup I verify that the Kafka and operations addresses are correct, the
 
 For shutdown I first drain client traffic, wait for in-flight work and pending flush bytes to fall, terminate the broker normally, and wait for `broker_stopped`. A clean close forces dirty logs and publishes the clean-shutdown marker required by the backup tool. I never take an offline backup after a forced kill until I have started Cascade to perform recovery and then completed a clean shutdown.
 
-My separate [backup and restore runbook](backup-restore.md) covers disaster-recovery copies and restore drills. The remaining release gates stay in [production-readiness.md](production-readiness.md).
+My [broker-to-broker security runbook](peer-security.md) covers certificate inventory, identity policy, monitoring, and rolling rotation. My separate [backup and restore runbook](backup-restore.md) covers disaster-recovery copies and restore drills. The remaining release gates stay in [production-readiness.md](production-readiness.md).
