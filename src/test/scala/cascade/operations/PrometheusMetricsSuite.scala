@@ -9,7 +9,9 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("# TYPE cascade_broker_up gauge\ncascade_broker_up{node_id=\"7\"} 1.0\n"))
     assert(output.contains("# TYPE cascade_requests_total counter\ncascade_requests_total{node_id=\"7\"} 11.0\n"))
     assert(output.contains("cascade_request_processing_seconds_total{node_id=\"7\"} 1.5\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 33)
+    assert(output.contains("cascade_peer_tls_authentications_total{node_id=\"7\"} 29.0\n"))
+    assert(output.contains("cascade_peer_authentication_rejections_total{node_id=\"7\"} 30.0\n"))
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 36)
   }
 
   private val snapshot = BrokerMetricsSnapshot(
@@ -41,5 +43,6 @@ final class PrometheusMetricsSuite extends FunSuite:
     usableDiskBytes = 24L,
     totalDiskBytes = 25L,
     heapUsedBytes = 26L,
-    heapMaxBytes = 27L
+    heapMaxBytes = 27L,
+    peerSecurity = PeerSecuritySnapshot(28L, 29L, 30L)
   )

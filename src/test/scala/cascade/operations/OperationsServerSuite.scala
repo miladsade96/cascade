@@ -31,6 +31,8 @@ class OperationsServerSuite extends munit.FunSuite:
       val status = request(server, "/v1/status", Some(token))
       assertEquals(status.statusCode(), 200)
       assert(status.body().contains("\"node_id\":7"))
+      assert(status.body().contains("\"peer_authentications\":0"))
+      assert(status.body().contains("\"peer_authentication_rejections\":0"))
       assertEquals(status.headers().firstValue("Cache-Control").orElse(""), "no-store")
     finally server.close()
   }
