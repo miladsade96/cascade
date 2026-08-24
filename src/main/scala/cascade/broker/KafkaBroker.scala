@@ -108,6 +108,7 @@ final class KafkaBroker(
       connections.shutdownNow()
       Option(acceptThread).foreach(_.join(5000))
       connections.awaitTermination(5, TimeUnit.SECONDS)
+      Option(handler).foreach(_.close())
       Option(coordinatorStateMachine).foreach(_.close())
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
@@ -135,6 +136,7 @@ final class KafkaBroker(
   private def serve(socket: Socket): Unit =
     try
       val session = connectionSession(socket)
+      Option(handler).foreach(_.auditTransport(session))
       val input = DataInputStream(BufferedInputStream(socket.getInputStream, 64 * 1024))
       val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream, 64 * 1024))
       var connected = true

@@ -18,13 +18,20 @@ final class RequestHandler(
     replicationManager: ReplicationManager,
     deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int
-):
+) extends AutoCloseable:
   private val credentials = config.security.authentication.credentialsFile.map { path =>
     ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
   }
   private val authorizer = config.security.authorization.aclFile.map { path =>
     ReloadableAuthorizer(path, config.security.authorization.superUsers, config.security.authorization.reloadIntervalMillis)
   }
+  private val audit = config.security.audit.path.map(path => AuditLog.open(path, config.security.audit.forceEachEvent))
+
+  def auditTransport(session: ConnectionSession): Unit =
+    if session.secure then
+      recordAudit("transport_authentication", session, "allowed")
+
+  override def close(): Unit = audit.foreach(_.close())
 
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)
 
@@ -136,9 +143,11 @@ final class RequestHandler(
     val (error, message) = authenticated match
       case Some(principal) =>
         session.authenticate(principal)
+        recordAudit("authentication", session, "allowed")
         (Errors.None, None)
       case None =>
         session.rejectAuthentication()
+        recordAudit("authentication", session, "denied")
         (Errors.SaslAuthenticationFailed, Some("authentication failed"))
     Some(
       ByteWriter()
@@ -937,7 +946,20 @@ final class RequestHandler(
       operation: AclOperation,
       resourceType: ResourceType,
       resourceName: String
-  ): Boolean = authorizer.forall(_.authorize(session.principal, operation, Resource(resourceType, resourceName)))
+  ): Boolean =
+    authorizer match
+      case None => true
+      case Some(current) =>
+        val allowed = current.authorize(session.principal, operation, Resource(resourceType, resourceName))
+        recordAudit(
+          "authorization",
+          session,
+          if allowed then "allowed" else "denied",
+          Some(operation.toString),
+          Some(resourceType.toString),
+          Some(resourceName)
+        )
+        allowed
 
   private def requireAuthorized(
       session: ConnectionSession,
@@ -947,6 +969,20 @@ final class RequestHandler(
   ): Unit =
     if !isAuthorized(session, operation, resourceType, resourceName) then
       throw ProtocolException(s"${operation.toString.toLowerCase} authorization failed for ${resourceType.toString.toLowerCase}")
+
+  private def recordAudit(
+      eventType: String,
+      session: ConnectionSession,
+      decision: String,
+      operation: Option[String] = None,
+      resourceType: Option[String] = None,
+      resource: Option[String] = None
+  ): Unit =
+    audit.foreach(
+      _.record(
+        AuditEvent(eventType, session.principal, session.remoteAddress, session.secure, decision, operation, resourceType, resource)
+      )
+    )
 
   private def partitionExists(topic: String, partition: Int): Boolean =
     if clusterManager.isEnabled then clusterManager.partition(topic, partition).nonEmpty

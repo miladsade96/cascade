@@ -174,6 +174,7 @@ final class SecurityIntegrationSuite extends FunSuite:
     val directory = Files.createTempDirectory("cascade-topic-acls")
     val credentials = directory.resolve("users.conf")
     val acls = directory.resolve("acls.conf")
+    val audit = directory.resolve("security-audit.jsonl")
     val password = "acl-client-password".toCharArray
     Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
     Files.writeString(
@@ -193,7 +194,8 @@ final class SecurityIntegrationSuite extends FunSuite:
         security = BrokerSecurityConfig(
           protocol = SecurityProtocol.SaslPlaintext,
           authentication = AuthenticationConfig(credentialsFile = Some(credentials)),
-          authorization = AuthorizationConfig(aclFile = Some(acls))
+          authorization = AuthorizationConfig(aclFile = Some(acls)),
+          audit = AuditConfig(path = Some(audit))
         )
       )
     )
@@ -222,6 +224,10 @@ final class SecurityIntegrationSuite extends FunSuite:
           producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("blocked", "rejected".getBytes())).get(10, TimeUnit.SECONDS)
         }
         assert(rejected.getCause.isInstanceOf[TopicAuthorizationException])
+        val events = Files.readString(audit)
+        assert(events.contains("\"event\":\"authentication\""))
+        assert(events.contains("\"decision\":\"denied\""))
+        assert(events.contains("\"resource\":\"blocked\""))
       finally producer.close(Duration.ofSeconds(5))
     finally
       java.util.Arrays.fill(password, '\u0000')
