@@ -1,6 +1,7 @@
 package cascade.operations
 
 import java.net.URI
+import java.net.{InetAddress, ServerSocket}
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 
 class OperationsServerSuite extends munit.FunSuite:
@@ -63,6 +64,22 @@ class OperationsServerSuite extends munit.FunSuite:
       assertEquals(client.send(post, HttpResponse.BodyHandlers.ofString()).statusCode(), 405)
       assertEquals(request(server, "/live/extra").statusCode(), 404)
     finally server.close()
+  }
+
+  test("does not bind before start and close leaves the configured port available") {
+    val reservation = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+    val port = reservation.getLocalPort
+    reservation.close()
+    val server = OperationsServer(
+      OperationsConfig(port = Some(port), logToStderr = false),
+      () => snapshot(),
+      () => BrokerHealth.evaluate(snapshot(), HealthPolicy(1024L, 0L), None)
+    )
+    server.close()
+
+    val replacement = ServerSocket(port, 1, InetAddress.getByName("127.0.0.1"))
+    try assertEquals(replacement.getLocalPort, port)
+    finally replacement.close()
   }
 
   private def request(server: OperationsServer, path: String, bearer: Option[String] = None): HttpResponse[String] =

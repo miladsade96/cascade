@@ -45,9 +45,12 @@ object BackupRestore:
         Files.copy(source, destination, COPY_ATTRIBUTES): Unit
         require(Files.size(destination) == entry.length, s"restored length mismatch: ${entry.relativePath}")
         require(Sha256.file(destination) == entry.sha256, s"restored checksum mismatch: ${entry.relativePath}")
+        BackupDurability.forceFile(destination)
       }
       require(verify(backup) == verified, "backup changed while it was being restored")
+      BackupDurability.forceDirectoryWhenSupported(staging)
       Files.move(staging, target, ATOMIC_MOVE): Unit
+      BackupDurability.forceDirectoryWhenSupported(parent)
       published = true
       verified
     finally
@@ -72,4 +75,3 @@ object BackupRestore:
       val paths = Files.walk(staging)
       try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(path => Files.deleteIfExists(path): Unit)
       finally paths.close()
-

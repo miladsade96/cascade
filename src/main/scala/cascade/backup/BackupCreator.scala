@@ -37,13 +37,16 @@ object BackupCreator:
         Files.copy(file.path, destination, COPY_ATTRIBUTES): Unit
         val copiedLength = Files.size(destination)
         require(copiedLength == file.length, s"file changed while copying: ${file.relativePath}")
+        BackupDurability.forceFile(destination)
         BackupEntry(file.relativePath, copiedLength, Sha256.file(destination))
       }
       require(ShutdownMarker.isCleanlyStopped(source), "broker started while the backup was running")
       require(sourceFiles(source) == before, "backup source changed while it was being copied")
       val manifest = BackupManifest(clock(), entries)
       writeForced(staging.resolve(BackupManifest.FileName), BackupManifest.encode(manifest))
+      BackupDurability.forceDirectoryWhenSupported(staging)
       Files.move(staging, target, ATOMIC_MOVE): Unit
+      BackupDurability.forceDirectoryWhenSupported(parent)
       published = true
       manifest
     finally
@@ -78,4 +81,3 @@ object BackupCreator:
       val paths = Files.walk(staging)
       try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(path => Files.deleteIfExists(path): Unit)
       finally paths.close()
-

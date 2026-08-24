@@ -17,7 +17,7 @@ final class OperationsServer(
   config.validate(): Unit
   private val configuredPort = config.port.getOrElse(throw IllegalArgumentException("operations port is not configured"))
   private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
-  private val server = HttpServer.create(InetSocketAddress(config.bindHost, configuredPort), 64)
+  private val server = HttpServer.create()
   private val started = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
   server.setExecutor(executor)
@@ -38,7 +38,15 @@ final class OperationsServer(
   def start(): Unit =
     if closed.get() then throw IllegalStateException("operations server is closed")
     if !started.compareAndSet(false, true) then throw IllegalStateException("operations server is already running")
-    server.start()
+    try
+      server.bind(InetSocketAddress(config.bindHost, configuredPort), 64)
+      server.start()
+    catch
+      case error: Throwable =>
+        server.stop(0)
+        executor.shutdownNow(): Unit
+        closed.set(true)
+        throw error
 
   def boundPort: Int = server.getAddress.getPort
 
@@ -125,4 +133,3 @@ private object OperationsJson:
       case character => result.append(character)
     }
     result.result()
-
