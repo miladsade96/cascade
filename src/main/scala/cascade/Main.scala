@@ -1,10 +1,14 @@
 package cascade
 
+import cascade.backup.BackupCommand
 import cascade.broker.{BrokerConfig, KafkaBroker}
 import java.util.concurrent.CountDownLatch
 
 object Main:
   def main(arguments: Array[String]): Unit =
+    if arguments.headOption.exists(Set("backup", "verify-backup", "restore")) then
+      println(BackupCommand.run(arguments))
+      return
     val config = BrokerConfig.parse(arguments)
     val broker = KafkaBroker(config)
     broker.start()
