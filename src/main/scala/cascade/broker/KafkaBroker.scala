@@ -5,7 +5,7 @@ import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
-import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, TlsClientAuth, TlsContextFactory}
+import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, RequestAdmission, RequestAdmissionSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
@@ -30,6 +30,7 @@ final class KafkaBroker(
     config.security.resources.maxConnections,
     config.security.resources.maxConnectionsPerIp
   )
+  private val requestAdmission = RequestAdmission(config.security.resources.maxInFlightRequests)
   private val registry = TopicRegistry(
     config.dataDirectory,
     config.segmentBytes,
@@ -107,6 +108,8 @@ final class KafkaBroker(
 
   def connectionAdmissionSnapshot: ConnectionAdmissionSnapshot = connectionAdmission.snapshot
 
+  def requestAdmissionSnapshot: RequestAdmissionSnapshot = requestAdmission.snapshot
+
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
       running.set(false)
@@ -165,13 +168,18 @@ final class KafkaBroker(
             throw ProtocolException(s"invalid request frame size: $size")
           val frame = new Array[Byte](size)
           input.readFully(frame)
-          val currentHandler = handler
-          if currentHandler == null then throw IllegalStateException("request handler is not initialized")
-          currentHandler.handle(frame, session).foreach { response =>
-            output.write(response)
-            output.flush()
-          }
-          if session.terminateRequested then connected = false
+          requestAdmission.tryAcquire() match
+            case None => connected = false
+            case Some(lease) =>
+              try
+                val currentHandler = handler
+                if currentHandler == null then throw IllegalStateException("request handler is not initialized")
+                currentHandler.handle(frame, session).foreach { response =>
+                  output.write(response)
+                  output.flush()
+                }
+                if session.terminateRequested then connected = false
+              finally lease.close()
         catch
           case _: EOFException => connected = false
     catch
