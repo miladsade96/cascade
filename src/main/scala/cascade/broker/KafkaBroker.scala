@@ -18,6 +18,7 @@ final class KafkaBroker(
     val config: BrokerConfig,
     peerTransportFactory: ClusterNode => PeerTransport = _ => PeerClient()
 ) extends AutoCloseable:
+  config.security.validate(): Unit
   private val running = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)

@@ -31,3 +31,16 @@ final class CredentialFileSuite extends FunSuite:
       intercept[IllegalArgumentException](CredentialFile.load(path))
     finally Files.deleteIfExists(path): Unit
   }
+
+  test("credential tool output is directly loadable without exposing the password") {
+    val path = Files.createTempFile("cascade-generated-credential", ".conf")
+    val password = "tool-password".toCharArray
+    try
+      val line = CredentialTool.generateLine("operator", password, CredentialHash.MinimumIterations)
+      assert(!line.contains("tool-password"))
+      Files.writeString(path, s"$line\n")
+      assert(CredentialFile.load(path)("operator").verify(password))
+    finally
+      Arrays.fill(password, '\u0000')
+      Files.deleteIfExists(path): Unit
+  }

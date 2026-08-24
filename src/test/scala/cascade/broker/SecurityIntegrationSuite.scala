@@ -306,6 +306,79 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("applies ACL rotation to live broker traffic without a restart") {
+    val directory = Files.createTempDirectory("cascade-live-acl-rotation")
+    val credentials = directory.resolve("users.conf")
+    val acls = directory.resolve("acls.conf")
+    val password = "acl-rotation-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
+    def writeAcl(effect: String): Unit =
+      Files.writeString(
+        acls,
+        s"""allow alice Describe Topic rotating
+           |allow alice Create Topic rotating
+           |$effect alice Write Topic rotating
+           |""".stripMargin
+      ): Unit
+    writeAcl("allow")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(credentialsFile = Some(credentials)),
+          authorization = AuthorizationConfig(aclFile = Some(acls), reloadIntervalMillis = 0L)
+        )
+      )
+    )
+    try
+      broker.start()
+      val first = KafkaProducer[Array[Byte], Array[Byte]](plainSaslProducerProperties(broker))
+      try
+        assertEquals(
+          first.send(new ProducerRecord[Array[Byte], Array[Byte]]("rotating", "first".getBytes())).get(10, TimeUnit.SECONDS).offset(),
+          0L
+        )
+        writeAcl("deny")
+        val denied = intercept[java.util.concurrent.ExecutionException] {
+          first.send(new ProducerRecord[Array[Byte], Array[Byte]]("rotating", "blocked".getBytes())).get(10, TimeUnit.SECONDS)
+        }
+        assert(denied.getCause.isInstanceOf[TopicAuthorizationException])
+      finally first.close(Duration.ofSeconds(5))
+
+      writeAcl("allow")
+      val second = KafkaProducer[Array[Byte], Array[Byte]](plainSaslProducerProperties(broker))
+      try
+        assertEquals(
+          second.send(new ProducerRecord[Array[Byte], Array[Byte]]("rotating", "second".getBytes())).get(10, TimeUnit.SECONDS).offset(),
+          1L
+        )
+      finally second.close(Duration.ofSeconds(5))
+    finally
+      java.util.Arrays.fill(password, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
+  private def plainSaslProducerProperties(broker: KafkaBroker): Properties =
+    val properties = Properties()
+    properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+    properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+    properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+    properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false")
+    properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000")
+    properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "5000")
+    properties.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_PLAINTEXT")
+    properties.put(SaslConfigs.SASL_MECHANISM, "PLAIN")
+    properties.put(
+      SaslConfigs.SASL_JAAS_CONFIG,
+      "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"acl-rotation-password\";"
+    )
+    properties
+
   private def assertSecureAdmin(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Unit =
     val admin = Admin.create(secureSaslProperties(broker, keyStore, password))
     try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)
