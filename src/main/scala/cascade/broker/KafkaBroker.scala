@@ -4,6 +4,7 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
+import cascade.operations.StructuredLogger
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -22,6 +23,8 @@ final class KafkaBroker(
   config.operations.validate(): Unit
   private val running = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
+  private val eventLog = StructuredLogger.from(config.operations)
+  private val operationalEventsEnabled = config.operations.enabled || config.operations.structuredLog.nonEmpty
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
   private val server: ServerSocket =
@@ -44,7 +47,8 @@ final class KafkaBroker(
     config.flushPolicy,
     config.flushIntervalMillis,
     config.flushBytes,
-    config.storageLifecycle
+    config.storageLifecycle,
+    (event, error) => eventLog.error(event, error, brokerFields)
   )
   private val coordinatorLock = Object()
   private val clustered = config.clusterNodes.nonEmpty
@@ -67,6 +71,8 @@ final class KafkaBroker(
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")
     if running.get() then throw IllegalStateException("broker is already running")
+    if operationalEventsEnabled then
+      eventLog.info("broker_starting", brokerFields ++ Map("recovery_mode" -> recoveryMode.toString.toLowerCase))
     server.setReuseAddress(true)
     server match
       case tlsServer: SSLServerSocket =>
@@ -101,6 +107,11 @@ final class KafkaBroker(
     running.set(true)
     acceptThread = Thread.ofPlatform().name("cascade-acceptor").start(() => acceptLoop())
     cluster.start()
+    if operationalEventsEnabled then
+      eventLog.info(
+        "broker_started",
+        brokerFields ++ Map("kafka_port" -> boundPort.toString, "security_protocol" -> config.security.protocol.toString)
+      )
   }
 
   def boundPort: Int = server.getLocalPort
@@ -121,6 +132,7 @@ final class KafkaBroker(
 
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
+      if operationalEventsEnabled then eventLog.info("broker_stopping", brokerFields)
       running.set(false)
       server.close()
       connections.shutdownNow()
@@ -135,6 +147,8 @@ final class KafkaBroker(
       groupCoordinator.close()
       registry.close()
       shutdownMarker.markClean()
+      if operationalEventsEnabled then eventLog.info("broker_stopped", brokerFields)
+      eventLog.close()
   }
 
   private def acceptLoop(): Unit =
@@ -161,7 +175,7 @@ final class KafkaBroker(
       catch
         case _: SocketException if !running.get() => ()
         case error: Throwable =>
-          System.err.println(s"Cascade accept error: ${error.getMessage}")
+          eventLog.error("connection_accept_error", error, brokerFields)
 
   private def serve(socket: Socket): Unit =
     try
@@ -187,8 +201,8 @@ final class KafkaBroker(
           case _: EOFException => connected = false
     catch
       case _: SocketException => ()
-      case error: ProtocolException => System.err.println(s"Cascade protocol error: ${error.getMessage}")
-      case error: Throwable => System.err.println(s"Cascade connection error: ${error.getMessage}")
+      case error: ProtocolException => eventLog.error("protocol_error", error, brokerFields)
+      case error: Throwable => eventLog.error("connection_error", error, brokerFields)
     finally socket.close()
 
   private def handleAdmitted(
@@ -222,3 +236,8 @@ final class KafkaBroker(
       authenticationRequired = config.security.protocol.sasl,
       transportPrincipal = transportPrincipal
     )
+
+  private def brokerFields: Map[String, String] = Map(
+    "node_id" -> config.nodeId.toString,
+    "data_directory" -> config.dataDirectory.toAbsolutePath.normalize().toString
+  )

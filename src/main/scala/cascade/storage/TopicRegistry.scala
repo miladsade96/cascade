@@ -16,7 +16,9 @@ final class TopicRegistry(
     flushPolicy: FlushPolicy = FlushPolicy.Periodic,
     flushIntervalMillis: Long = 1000L,
     flushBytes: Long = 64L * 1024 * 1024,
-    lifecycleConfig: StorageLifecycleConfig = StorageLifecycleConfig()
+    lifecycleConfig: StorageLifecycleConfig = StorageLifecycleConfig(),
+    backgroundError: (String, Throwable) => Unit = (event, error) =>
+      System.err.println(s"Cascade $event: ${error.getMessage}")
 ) extends AutoCloseable:
   require(flushIntervalMillis > 0, "flush interval must be positive")
   require(flushBytes > 0, "flush bytes must be positive")
@@ -157,7 +159,7 @@ final class TopicRegistry(
         catch
           case error: Throwable =>
             backgroundFailure.compareAndSet(null, error): Unit
-            System.err.println(s"Cascade storage lifecycle error: ${error.getMessage}")
+            backgroundError("storage_lifecycle_error", error)
       }
     }
 
@@ -178,7 +180,7 @@ final class TopicRegistry(
         catch
           case error: Throwable =>
             backgroundFailure.compareAndSet(null, error): Unit
-            System.err.println(s"Cascade log flush error: ${error.getMessage}")
+            backgroundError("log_flush_error", error)
       }
     }
 
