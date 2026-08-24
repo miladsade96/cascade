@@ -1,6 +1,9 @@
 package cascade.broker
 
 import cascade.security.*
+import cascade.protocol.*
+import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
+import java.net.Socket
 import java.nio.file.Files
 import java.time.Duration
 import java.util.Properties
@@ -38,6 +41,53 @@ final class SecurityIntegrationSuite extends FunSuite:
       try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)
       finally admin.close(Duration.ofSeconds(5))
     finally
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
+  test("advertises and negotiates Kafka SASL PLAIN framing") {
+    val directory = Files.createTempDirectory("cascade-sasl-handshake")
+    val credentials = directory.resolve("users.conf")
+    val password = "test-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(credentialsFile = Some(credentials))
+        )
+      )
+    )
+    try
+      broker.start()
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        val request = ByteWriter()
+          .writeShort(ApiKey.SaslHandshake)
+          .writeShort(1)
+          .writeInt(7)
+          .writeNullableString(Some("security-test"))
+          .writeString("PLAIN")
+          .result()
+        output.writeInt(request.length)
+        output.write(request)
+        output.flush()
+        val response = new Array[Byte](input.readInt())
+        input.readFully(response)
+        val cursor = ByteCursor(response)
+        assertEquals(cursor.readInt(), 7)
+        assertEquals(cursor.readShort(), Errors.None)
+        assertEquals(cursor.readArray(cursor.readString()), Vector("PLAIN"))
+        cursor.ensureFullyRead()
+      finally socket.close()
+    finally
+      java.util.Arrays.fill(password, '\u0000')
       broker.close()
       SecurityTestSupport.deleteTree(directory)
   }

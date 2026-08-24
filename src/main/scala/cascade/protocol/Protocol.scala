@@ -12,6 +12,7 @@ object ApiKey:
   val Heartbeat: Short = 12
   val LeaveGroup: Short = 13
   val SyncGroup: Short = 14
+  val SaslHandshake: Short = 17
   val ApiVersions: Short = 18
   val CreateTopics: Short = 19
   val InitProducerId: Short = 22
@@ -19,6 +20,7 @@ object ApiKey:
   val AddOffsetsToTxn: Short = 25
   val EndTxn: Short = 26
   val TxnOffsetCommit: Short = 28
+  val SaslAuthenticate: Short = 36
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
   val DescribeQuorum: Short = 55
@@ -61,6 +63,9 @@ object Errors:
   val InvalidSessionTimeout: Short = 26
   val RebalanceInProgress: Short = 27
   val GroupAuthorizationFailed: Short = 30
+  val UnsupportedSaslMechanism: Short = 33
+  val IllegalSaslState: Short = 34
+  val SaslAuthenticationFailed: Short = 58
   val MemberIdRequired: Short = 79
   val FencedLeaderEpoch: Short = 74
   val ProducerFenced: Short = 90
@@ -87,6 +92,7 @@ object Compatibility:
     ApiVersion(ApiKey.Heartbeat, 3, 3),
     ApiVersion(ApiKey.LeaveGroup, 2, 2),
     ApiVersion(ApiKey.SyncGroup, 3, 3),
+    ApiVersion(ApiKey.SaslHandshake, 1, 1),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
     ApiVersion(ApiKey.CreateTopics, 2, 2),
     ApiVersion(ApiKey.InitProducerId, 1, 1),
@@ -94,6 +100,7 @@ object Compatibility:
     ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
     ApiVersion(ApiKey.EndTxn, 1, 1),
     ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
+    ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.DescribeQuorum, 0, 2),

@@ -34,8 +34,13 @@ final class RequestHandler(
         return Some(ResponseFrame.encode(header, unsupportedApiVersions()))
       throw ProtocolException(s"unsupported API ${header.apiKey} version ${header.apiVersion}")
 
+    if config.security.protocol.sasl && !session.authenticated &&
+        header.apiKey != ApiKey.ApiVersions && header.apiKey != ApiKey.SaslHandshake && header.apiKey != ApiKey.SaslAuthenticate
+    then throw ProtocolException("Kafka request received before SASL authentication")
+
     val response = header.apiKey match
       case ApiKey.ApiVersions  => apiVersions(header.apiVersion, body)
+      case ApiKey.SaslHandshake => saslHandshake(body, session)
       case ApiKey.Metadata     => metadata(body)
       case ApiKey.OffsetCommit => offsetCommit(body)
       case ApiKey.OffsetFetch  => offsetFetch(body)
@@ -88,6 +93,19 @@ final class RequestHandler(
       }
     if version >= 1 then writer.writeInt(0)
     if version >= 3 then writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def saslHandshake(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val mechanism = cursor.readString()
+    cursor.ensureFullyRead()
+    val error =
+      if !config.security.protocol.sasl then Errors.IllegalSaslState
+      else if mechanism != "PLAIN" then Errors.UnsupportedSaslMechanism
+      else
+        session.selectMechanism(mechanism)
+        Errors.None
+    val writer = ByteWriter().writeShort(error)
+    writer.writeArray(Vector("PLAIN"))(writer.writeString)
     Some(writer.result())
 
   private def findCoordinator(cursor: ByteCursor): Option[Array[Byte]] =
