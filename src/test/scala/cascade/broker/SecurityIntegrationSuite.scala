@@ -235,6 +235,37 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("sheds connections beyond the configured global cap") {
+    val directory = Files.createTempDirectory("cascade-connection-cap")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory,
+        security = BrokerSecurityConfig(resources = ResourceLimits(maxConnections = 1, maxConnectionsPerIp = 1))
+      )
+    )
+    try
+      broker.start()
+      val first = Socket("127.0.0.1", broker.boundPort)
+      try
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while broker.connectionAdmissionSnapshot.active != 1 && System.nanoTime() < deadline do Thread.sleep(10)
+        assertEquals(broker.connectionAdmissionSnapshot.active, 1)
+
+        val rejected = Socket("127.0.0.1", broker.boundPort)
+        try
+          rejected.setSoTimeout(5000)
+          assertEquals(rejected.getInputStream.read(), -1)
+          assertEquals(broker.connectionAdmissionSnapshot.rejected, 1L)
+        finally rejected.close()
+      finally first.close()
+    finally
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   private def assertSecureAdmin(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Unit =
     val admin = Admin.create(secureSaslProperties(broker, keyStore, password))
     try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)

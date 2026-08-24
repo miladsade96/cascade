@@ -5,7 +5,7 @@ import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
-import cascade.security.{ConnectionSession, TlsClientAuth, TlsContextFactory}
+import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
@@ -26,6 +26,10 @@ final class KafkaBroker(
     if config.security.protocol.tls then TlsContextFactory.create(config.security.tls).getServerSocketFactory.createServerSocket()
     else ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
+  private val connectionAdmission = ConnectionAdmission(
+    config.security.resources.maxConnections,
+    config.security.resources.maxConnectionsPerIp
+  )
   private val registry = TopicRegistry(
     config.dataDirectory,
     config.segmentBytes,
@@ -101,6 +105,8 @@ final class KafkaBroker(
 
   def lifecycleStatistics: cascade.storage.LifecycleStatistics = registry.lifecycleStatistics
 
+  def connectionAdmissionSnapshot: ConnectionAdmissionSnapshot = connectionAdmission.snapshot
+
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
       running.set(false)
@@ -123,11 +129,23 @@ final class KafkaBroker(
     while running.get() do
       try
         val socket = server.accept()
-        socket.setTcpNoDelay(true)
-        socket.setKeepAlive(true)
-        val task = new Runnable:
-          override def run(): Unit = serve(socket)
-        connections.submit(task): Unit
+        val remoteAddress = socket.getInetAddress.getHostAddress
+        connectionAdmission.tryAcquire(remoteAddress) match
+          case None => socket.close()
+          case Some(lease) =>
+            try
+              socket.setTcpNoDelay(true)
+              socket.setKeepAlive(true)
+              val task = new Runnable:
+                override def run(): Unit =
+                  try serve(socket)
+                  finally lease.close()
+              connections.submit(task): Unit
+            catch
+              case error: Throwable =>
+                lease.close()
+                socket.close()
+                throw error
       catch
         case _: SocketException if !running.get() => ()
         case error: Throwable =>
