@@ -34,6 +34,8 @@ final class RequestHandler(
     if session.secure then
       recordAudit("transport_authentication", session, "allowed")
 
+  def peerIdentityReloadError: Option[String] = peerAuthenticator.lastReloadError
+
   override def close(): Unit = audit.foreach(_.close())
 
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)

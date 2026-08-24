@@ -16,7 +16,8 @@ object BrokerHealth:
   def evaluate(
       snapshot: BrokerMetricsSnapshot,
       policy: HealthPolicy,
-      structuredLogFailure: Option[String]
+      structuredLogFailure: Option[String],
+      peerIdentityFailure: Option[String] = None
   ): BrokerHealth =
     val checks = Vector(
       HealthCheck("broker_running", snapshot.running, if snapshot.running then "running" else "stopped"),
@@ -35,7 +36,11 @@ object BrokerHealth:
         "structured_log",
         structuredLogFailure.isEmpty,
         structuredLogFailure.getOrElse("available")
+      ),
+      HealthCheck(
+        "peer_identity_policy",
+        peerIdentityFailure.isEmpty,
+        peerIdentityFailure.getOrElse("available")
       )
     )
     BrokerHealth(live = snapshot.running, ready = checks.forall(_.healthy), checks = checks)
-

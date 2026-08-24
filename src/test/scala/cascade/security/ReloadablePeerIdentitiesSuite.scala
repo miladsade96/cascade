@@ -16,6 +16,7 @@ final class ReloadablePeerIdentitiesSuite extends munit.FunSuite:
       assert(!identities.authorize(1, "CN=broker-old,O=Cascade"))
 
       Files.writeString(file, "malformed", StandardCharsets.UTF_8): Unit
+      assert(identities.lastReloadError.nonEmpty)
       assert(identities.authorize(1, "CN=broker-new,O=Cascade"))
       assert(identities.lastReloadError.nonEmpty)
 

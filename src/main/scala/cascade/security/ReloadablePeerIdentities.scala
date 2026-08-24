@@ -19,7 +19,9 @@ final class ReloadablePeerIdentities(path: Path, reloadIntervalMillis: Long):
     reloadIfDue()
     policy.get().nodeIds
 
-  def lastReloadError: Option[String] = reloadError.get()
+  def lastReloadError: Option[String] =
+    reloadIfDue()
+    reloadError.get()
 
   def reloadNow(): Boolean = synchronized {
     try
@@ -43,4 +45,3 @@ final class ReloadablePeerIdentities(path: Path, reloadIntervalMillis: Long):
     val intervalNanos = reloadIntervalMillis * 1_000_000L
     val now = System.nanoTime()
     if Long.MaxValue - now < intervalNanos then Long.MaxValue else now + intervalNanos
-
