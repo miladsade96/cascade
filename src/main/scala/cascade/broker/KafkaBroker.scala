@@ -5,9 +5,11 @@ import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
+import cascade.security.{TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
+import javax.net.ssl.SSLServerSocket
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -19,7 +21,9 @@ final class KafkaBroker(
   private val closed = AtomicBoolean(false)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
-  private val server = ServerSocket()
+  private val server: ServerSocket =
+    if config.security.protocol.tls then TlsContextFactory.create(config.security.tls).getServerSocketFactory.createServerSocket()
+    else ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val registry = TopicRegistry(
     config.dataDirectory,
@@ -51,6 +55,14 @@ final class KafkaBroker(
     if closed.get() then throw IllegalStateException("broker is closed")
     if running.get() then throw IllegalStateException("broker is already running")
     server.setReuseAddress(true)
+    server match
+      case tlsServer: SSLServerSocket =>
+        tlsServer.setEnabledProtocols(config.security.tls.enabledProtocols.toArray)
+        config.security.tls.clientAuth match
+          case TlsClientAuth.None      => ()
+          case TlsClientAuth.Requested => tlsServer.setWantClientAuth(true)
+          case TlsClientAuth.Required  => tlsServer.setNeedClientAuth(true)
+      case _ => ()
     server.bind(InetSocketAddress(config.bindHost, config.port))
     val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
     val peers = peerTransportFactory(localNode)
