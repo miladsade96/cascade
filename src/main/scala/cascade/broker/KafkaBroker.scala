@@ -18,8 +18,18 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
 final class KafkaBroker(
     val config: BrokerConfig,
-    peerTransportFactory: ClusterNode => PeerTransport = _ => PeerClient()
+    peerTransportFactory: ClusterNode => PeerTransport
 ) extends AutoCloseable:
+  def this(config: BrokerConfig) =
+    this(
+      config,
+      _ => PeerClient(
+        localNodeId = if config.security.peer.protocol.tls then config.nodeId else -1,
+        security = config.security.peer,
+        tls = Option.when(config.security.peer.protocol.tls)(config.security.tls)
+      )
+    )
+
   config.security.validate(): Unit
   config.operations.validate(): Unit
   private val running = AtomicBoolean(false)
