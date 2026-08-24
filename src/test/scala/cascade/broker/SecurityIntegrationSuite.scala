@@ -127,3 +127,63 @@ final class SecurityIntegrationSuite extends FunSuite:
       broker.close()
       SecurityTestSupport.deleteTree(directory)
   }
+
+  test("encrypts SASL authentication and applies rotated credentials to new connections") {
+    val directory = Files.createTempDirectory("cascade-sasl-ssl")
+    val keyStore = SecurityTestSupport.createKeyStore(directory)
+    val credentials = directory.resolve("users.conf")
+    val firstPassword = "first-client-password".toCharArray
+    val secondPassword = "rotated-client-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(firstPassword, CredentialHash.MinimumIterations)}\n")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslSsl,
+          tls = TlsConfig(keyStore = Some(keyStore), keyStorePassword = Some(SecurityTestSupport.StorePassword)),
+          authentication = AuthenticationConfig(credentialsFile = Some(credentials), reloadIntervalMillis = 0L)
+        )
+      )
+    )
+    try
+      broker.start()
+      assertSecureAdmin(broker, keyStore, "first-client-password")
+
+      Files.writeString(credentials, s"alice=${CredentialHash.create(secondPassword, CredentialHash.MinimumIterations)}\n")
+      assertSecureAdmin(broker, keyStore, "rotated-client-password")
+
+      val rejected = Admin.create(secureSaslProperties(broker, keyStore, "first-client-password"))
+      try intercept[java.util.concurrent.ExecutionException] {
+        rejected.describeMetadataQuorum().quorumInfo().get(5, TimeUnit.SECONDS)
+      }
+      finally rejected.close(Duration.ofSeconds(1))
+    finally
+      java.util.Arrays.fill(firstPassword, '\u0000')
+      java.util.Arrays.fill(secondPassword, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
+  private def assertSecureAdmin(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Unit =
+    val admin = Admin.create(secureSaslProperties(broker, keyStore, password))
+    try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)
+    finally admin.close(Duration.ofSeconds(5))
+
+  private def secureSaslProperties(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Properties =
+    val properties = Properties()
+    properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+    properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "3000")
+    properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000")
+    properties.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_SSL")
+    properties.put(SaslConfigs.SASL_MECHANISM, "PLAIN")
+    properties.put(
+      SaslConfigs.SASL_JAAS_CONFIG,
+      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"$password\";"
+    )
+    properties.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, keyStore.toString)
+    properties.put(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG, SecurityTestSupport.StorePassword)
+    properties.put(SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12")
+    properties
