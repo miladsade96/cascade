@@ -266,6 +266,46 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("sheds requests whose principal quota exceeds the maximum throttle") {
+    val directory = Files.createTempDirectory("cascade-request-quota")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory,
+        security = BrokerSecurityConfig(
+          resources = ResourceLimits(
+            requestBytesPerSecond = 1024L,
+            requestBurstBytes = 1L,
+            maxThrottleMillis = 0L
+          )
+        )
+      )
+    )
+    try
+      broker.start()
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        socket.setSoTimeout(5000)
+        val request = ByteWriter()
+          .writeShort(ApiKey.ApiVersions)
+          .writeShort(0)
+          .writeInt(1)
+          .writeNullableString(Some("quota-test"))
+          .result()
+        val output = DataOutputStream(socket.getOutputStream)
+        output.writeInt(request.length)
+        output.write(request)
+        output.flush()
+        assertEquals(socket.getInputStream.read(), -1)
+        assertEquals(broker.requestQuotaSnapshot.rejected, 1L)
+      finally socket.close()
+    finally
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   private def assertSecureAdmin(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Unit =
     val admin = Admin.create(secureSaslProperties(broker, keyStore, password))
     try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)

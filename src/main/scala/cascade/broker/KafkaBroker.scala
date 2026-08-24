@@ -5,7 +5,7 @@ import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.protocol.ProtocolException
-import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, RequestAdmission, RequestAdmissionSnapshot, TlsClientAuth, TlsContextFactory}
+import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
@@ -31,6 +31,11 @@ final class KafkaBroker(
     config.security.resources.maxConnectionsPerIp
   )
   private val requestAdmission = RequestAdmission(config.security.resources.maxInFlightRequests)
+  private val requestQuota = RequestQuota(
+    config.security.resources.requestBytesPerSecond,
+    config.security.resources.requestBurstBytes,
+    config.security.resources.maxThrottleMillis
+  )
   private val registry = TopicRegistry(
     config.dataDirectory,
     config.segmentBytes,
@@ -110,6 +115,8 @@ final class KafkaBroker(
 
   def requestAdmissionSnapshot: RequestAdmissionSnapshot = requestAdmission.snapshot
 
+  def requestQuotaSnapshot: RequestQuotaSnapshot = requestQuota.snapshot
+
   override def close(): Unit = synchronized {
     if closed.compareAndSet(false, true) then
       running.set(false)
@@ -168,18 +175,12 @@ final class KafkaBroker(
             throw ProtocolException(s"invalid request frame size: $size")
           val frame = new Array[Byte](size)
           input.readFully(frame)
-          requestAdmission.tryAcquire() match
-            case None => connected = false
-            case Some(lease) =>
-              try
-                val currentHandler = handler
-                if currentHandler == null then throw IllegalStateException("request handler is not initialized")
-                currentHandler.handle(frame, session).foreach { response =>
-                  output.write(response)
-                  output.flush()
-                }
-                if session.terminateRequested then connected = false
-              finally lease.close()
+          requestQuota.evaluate(session.principal, size + Integer.BYTES) match
+            case QuotaDecision.Rejected(_) => connected = false
+            case QuotaDecision.Throttle(delayMillis) =>
+              Thread.sleep(delayMillis)
+              connected = handleAdmitted(frame, session, output)
+            case QuotaDecision.Allowed => connected = handleAdmitted(frame, session, output)
         catch
           case _: EOFException => connected = false
     catch
@@ -187,6 +188,24 @@ final class KafkaBroker(
       case error: ProtocolException => System.err.println(s"Cascade protocol error: ${error.getMessage}")
       case error: Throwable => System.err.println(s"Cascade connection error: ${error.getMessage}")
     finally socket.close()
+
+  private def handleAdmitted(
+      frame: Array[Byte],
+      session: ConnectionSession,
+      output: DataOutputStream
+  ): Boolean =
+    requestAdmission.tryAcquire() match
+      case None => false
+      case Some(lease) =>
+        try
+          val currentHandler = handler
+          if currentHandler == null then throw IllegalStateException("request handler is not initialized")
+          currentHandler.handle(frame, session).foreach { response =>
+            output.write(response)
+            output.flush()
+          }
+          !session.terminateRequested
+        finally lease.close()
 
   private def connectionSession(socket: Socket): ConnectionSession =
     val transportPrincipal = socket match
