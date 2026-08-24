@@ -34,12 +34,14 @@ final case class OperationsConfig(
   require(structuredLogMaxBytes >= 1024L, "structured log size must be at least 1 KiB")
   require(structuredLogRetainedFiles > 0, "structured log retention must be positive")
   require(readinessMaxPendingFlushBytes >= 0L, "readiness pending-flush threshold cannot be negative")
-  require(
-    port.isEmpty || isLoopback(bindHost) || authenticationToken.nonEmpty,
-    "a non-loopback operations listener requires an authentication token"
-  )
-
   def enabled: Boolean = port.nonEmpty
+
+  def validate(): OperationsConfig =
+    require(
+      port.isEmpty || isLoopback(bindHost) || authenticationToken.nonEmpty,
+      "a non-loopback operations listener requires an authentication token"
+    )
+    this
 
   private def isLoopback(host: String): Boolean =
     Set("127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "localhost").contains(host.toLowerCase)

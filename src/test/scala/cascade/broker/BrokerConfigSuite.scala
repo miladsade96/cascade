@@ -172,3 +172,41 @@ final class BrokerConfigSuite extends FunSuite:
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SSL")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT")))
   }
+
+  test("parses operations, readiness, logging, and capacity settings") {
+    val token = Files.createTempFile("cascade-operations", ".token")
+    Files.writeString(token, "a-secure-operations-token-with-32-characters")
+    try
+      val config = BrokerConfig.parse(
+        Array(
+          "--operations-host", "0.0.0.0",
+          "--operations-port", "9404",
+          "--operations-token-file", token.toString,
+          "--structured-log", "broker.jsonl",
+          "--structured-log-max-bytes", "1048576",
+          "--structured-log-retained-files", "3",
+          "--no-stderr-log",
+          "--readiness-max-pending-flush-bytes", "67108864",
+          "--capacity-alert-interval-ms", "5000",
+          "--capacity-connection-ratio", "0.75",
+          "--capacity-inflight-ratio", "0.80",
+          "--capacity-pending-flush-bytes", "33554432",
+          "--capacity-minimum-free-bytes", "1073741824",
+          "--capacity-alert-repeat-ms", "60000"
+        )
+      )
+      assertEquals(config.operations.bindHost, "0.0.0.0")
+      assertEquals(config.operations.port, Some(9404))
+      assertEquals(config.operations.authenticationToken, Some("a-secure-operations-token-with-32-characters"))
+      assertEquals(config.operations.structuredLogRetainedFiles, 3)
+      assertEquals(config.operations.capacityAlerts.connectionUtilization, 0.75d)
+      assertEquals(config.operations.capacityAlerts.minimumFreeBytes, 1_073_741_824L)
+      assert(!config.operations.logToStderr)
+    finally Files.deleteIfExists(token): Unit
+  }
+
+  test("requires authentication when operations bind beyond loopback") {
+    intercept[IllegalArgumentException] {
+      BrokerConfig.parse(Array("--operations-host", "0.0.0.0", "--operations-port", "9404"))
+    }
+  }

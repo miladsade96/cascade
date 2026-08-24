@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
+import cascade.operations.OperationsConfig
 import cascade.security.*
 import cascade.storage.{CleanupPolicy, FlushPolicy, StorageLifecycleConfig}
 import java.nio.charset.StandardCharsets
@@ -29,6 +30,7 @@ final case class BrokerConfig(
     controllerElectionTimeoutMillis: Int = 1500,
     storageLifecycle: StorageLifecycleConfig = StorageLifecycleConfig(),
     security: BrokerSecurityConfig = BrokerSecurityConfig(),
+    operations: OperationsConfig = OperationsConfig(),
     autoCreateTopics: Boolean = true
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
@@ -149,10 +151,39 @@ object BrokerConfig:
         loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(requestBurstBytes = value.toLong))))
       case "--max-throttle-ms" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxThrottleMillis = value.toLong))))
+      case "--operations-host" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(bindHost = value)))
+      case "--operations-port" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(port = Some(value.toInt))))
+      case "--operations-token-file" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(authenticationToken = Some(readSecret(value)))))
+      case "--structured-log" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(structuredLog = Some(Paths.get(value)))))
+      case "--structured-log-max-bytes" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(structuredLogMaxBytes = value.toLong)))
+      case "--structured-log-retained-files" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(structuredLogRetainedFiles = value.toInt)))
+      case "--no-stderr-log" :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(logToStderr = false)))
+      case "--readiness-max-pending-flush-bytes" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(readinessMaxPendingFlushBytes = value.toLong)))
+      case "--capacity-alert-interval-ms" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(intervalMillis = value.toLong))))
+      case "--capacity-connection-ratio" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(connectionUtilization = value.toDouble))))
+      case "--capacity-inflight-ratio" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(inFlightUtilization = value.toDouble))))
+      case "--capacity-pending-flush-bytes" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(pendingFlushBytes = value.toLong))))
+      case "--capacity-minimum-free-bytes" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(minimumFreeBytes = value.toLong))))
+      case "--capacity-alert-repeat-ms" :: value :: tail =>
+        loop(tail, config.copy(operations = config.operations.copy(capacityAlerts = config.operations.capacityAlerts.copy(repeatIntervalMillis = value.toLong))))
       case "--no-auto-create" :: tail => loop(tail, config.copy(autoCreateTopics = false))
       case option :: _ => throw IllegalArgumentException(s"unknown or incomplete option: $option")
     val parsed = loop(arguments.toList, BrokerConfig())
     parsed.security.validate()
+    parsed.operations.validate()
     parsed
 
   private def readSecret(value: String): String =
