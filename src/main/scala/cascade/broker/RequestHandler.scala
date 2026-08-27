@@ -172,28 +172,58 @@ final class RequestHandler(
   private def saslAuthenticate(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val token = cursor.readByteArray()
     cursor.ensureFullyRead()
-    val authenticated =
-      if !config.security.protocol.sasl || !session.mechanism.contains("PLAIN") then None
-      else parsePlainToken(token).filter { case (user, password) =>
-        try credentials.exists(_.authenticate(user, password))
-        finally Arrays.fill(password, '\u0000')
-      }.map(_._1)
-    Arrays.fill(token, 0.toByte)
+    try
+      if !config.security.protocol.sasl then authenticationFailure(session, Array.emptyByteArray)
+      else
+        session.mechanism.flatMap(value => config.security.authentication.mechanisms.find(_.wireName == value)) match
+          case Some(SaslMechanism.Plain) => authenticatePlain(token, session)
+          case Some(mechanism) if mechanism.scram => authenticateScram(token, session)
+          case _ => authenticationFailure(session, Array.emptyByteArray)
+    finally Arrays.fill(token, 0.toByte)
 
-    val (error, message) = authenticated match
-      case Some(principal) =>
-        session.authenticate(principal)
-        recordAudit("authentication", session, "allowed")
-        (Errors.None, None)
-      case None =>
-        session.rejectAuthentication()
-        recordAudit("authentication", session, "denied")
-        (Errors.SaslAuthenticationFailed, Some("authentication failed"))
+  private def authenticatePlain(token: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
+    val authenticated = parsePlainToken(token).filter { case (user, password) =>
+      try credentials.exists(_.authenticate(user, password))
+      finally Arrays.fill(password, '\u0000')
+    }.map(_._1)
+    authenticated match
+      case Some(principal) => authenticationSuccess(session, principal, Array.emptyByteArray)
+      case None            => authenticationFailure(session, Array.emptyByteArray)
+
+  private def authenticateScram(token: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
+    session.evaluateScram(token) match
+      case Some(ScramChallenge(bytes)) => authenticationResponse(Errors.None, None, bytes)
+      case Some(ScramSuccess(principal, bytes)) => authenticationSuccess(session, principal, bytes)
+      case Some(ScramFailure(_, bytes)) => authenticationFailure(session, bytes)
+      case None => authenticationFailure(session, Array.emptyByteArray)
+
+  private def authenticationSuccess(
+      session: ConnectionSession,
+      principal: String,
+      authenticationBytes: Array[Byte]
+  ): Option[Array[Byte]] =
+    session.authenticate(principal)
+    recordAudit("authentication", session, "allowed")
+    authenticationResponse(Errors.None, None, authenticationBytes)
+
+  private def authenticationFailure(
+      session: ConnectionSession,
+      authenticationBytes: Array[Byte]
+  ): Option[Array[Byte]] =
+    session.rejectAuthentication()
+    recordAudit("authentication", session, "denied")
+    authenticationResponse(Errors.SaslAuthenticationFailed, Some("authentication failed"), authenticationBytes)
+
+  private def authenticationResponse(
+      error: Short,
+      message: Option[String],
+      authenticationBytes: Array[Byte]
+  ): Option[Array[Byte]] =
     Some(
       ByteWriter()
         .writeShort(error)
         .writeNullableString(message)
-        .writeByteArray(Array.emptyByteArray)
+        .writeByteArray(authenticationBytes)
         .writeLong(config.security.authentication.sessionLifetimeMillis)
         .result()
     )
