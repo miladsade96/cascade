@@ -19,7 +19,9 @@ final class ReloadableCredentials(path: Path, reloadIntervalMillis: Long):
     reloadIfDue()
     credentials.get().keySet
 
-  def lastReloadError: Option[String] = reloadError.get()
+  def lastReloadError: Option[String] =
+    reloadIfDue()
+    reloadError.get()
 
   def reloadNow(): Boolean = synchronized {
     try
@@ -36,8 +38,8 @@ final class ReloadableCredentials(path: Path, reloadIntervalMillis: Long):
 
   private def reloadIfDue(): Unit =
     val now = System.nanoTime()
-    if now >= nextReloadNanos.get() && nextReloadNanos.compareAndSet(nextReloadNanos.get(), Long.MaxValue) then
-      reloadNow(): Unit
+    val deadline = nextReloadNanos.get()
+    if now >= deadline && nextReloadNanos.compareAndSet(deadline, Long.MaxValue) then reloadNow(): Unit
 
   private def deadlineFromNow(): Long =
     val intervalNanos = reloadIntervalMillis * 1_000_000L

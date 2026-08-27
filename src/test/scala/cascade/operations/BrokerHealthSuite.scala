@@ -43,6 +43,20 @@ class BrokerHealthSuite extends munit.FunSuite:
     assertEquals(health.failedChecks.head.detail, "invalid peer identity entry")
   }
 
+  test("fails readiness without failing liveness when a credential reload is malformed") {
+    val health = BrokerHealth.evaluate(
+      snapshot(),
+      HealthPolicy(Long.MaxValue, 0L),
+      structuredLogFailure = None,
+      peerIdentityFailure = None,
+      credentialFailure = Some("invalid SCRAM credential")
+    )
+
+    assert(health.live)
+    assert(!health.ready)
+    assertEquals(health.failedChecks.map(_.name), Vector("credential_policy"))
+  }
+
   private def snapshot(
       running: Boolean = true,
       brokerFenced: Boolean = false,

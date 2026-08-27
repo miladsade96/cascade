@@ -40,6 +40,9 @@ final class RequestHandler(
 
   def peerIdentityReloadError: Option[String] = peerAuthenticator.lastReloadError
 
+  def credentialReloadError: Option[String] =
+    credentials.flatMap(_.lastReloadError).orElse(scramCredentials.flatMap(_.lastReloadError))
+
   override def close(): Unit = audit.foreach(_.close())
 
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)

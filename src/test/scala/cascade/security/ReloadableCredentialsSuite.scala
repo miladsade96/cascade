@@ -11,7 +11,7 @@ final class ReloadableCredentialsSuite extends FunSuite:
     val second = "second-password".toCharArray
     try
       Files.writeString(path, s"alice=${CredentialHash.create(first, CredentialHash.MinimumIterations)}\n")
-      val store = ReloadableCredentials(path, reloadIntervalMillis = 60_000L)
+      val store = ReloadableCredentials(path, reloadIntervalMillis = 0L)
       assert(store.authenticate("alice", first))
 
       Files.writeString(path, s"alice=${CredentialHash.create(second, CredentialHash.MinimumIterations)}\n")
@@ -20,7 +20,6 @@ final class ReloadableCredentialsSuite extends FunSuite:
       assert(store.authenticate("alice", second))
 
       Files.writeString(path, "alice=broken\n")
-      assert(!store.reloadNow())
       assert(store.lastReloadError.nonEmpty)
       assert(store.authenticate("alice", second))
     finally

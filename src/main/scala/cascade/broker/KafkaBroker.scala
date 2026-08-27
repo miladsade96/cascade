@@ -240,7 +240,8 @@ final class KafkaBroker(
         math.max(config.storageLifecycle.minimumFreeBytes, config.operations.capacityAlerts.minimumFreeBytes)
       ),
       eventLog.lastFailure,
-      Option(handler).flatMap(_.peerIdentityReloadError)
+      Option(handler).flatMap(_.peerIdentityReloadError),
+      Option(handler).flatMap(_.credentialReloadError)
     )
 
   override def close(): Unit = synchronized {
