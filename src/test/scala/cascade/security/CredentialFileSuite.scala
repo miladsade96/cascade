@@ -1,5 +1,6 @@
 package cascade.security
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.Arrays
 import munit.FunSuite
@@ -42,5 +43,22 @@ final class CredentialFileSuite extends FunSuite:
       assert(CredentialFile.load(path)("operator").verify(password))
     finally
       Arrays.fill(password, '\u0000')
+      Files.deleteIfExists(path): Unit
+  }
+
+  test("credential tool emits directly loadable SCRAM-SHA-256 and SCRAM-SHA-512 verifiers") {
+    val path = Files.createTempFile("cascade-generated-scram", ".conf")
+    val password = "tool-scram-password".toCharArray
+    try
+      val lines = Vector(SaslMechanism.ScramSha256, SaslMechanism.ScramSha512).map { mechanism =>
+        CredentialTool.generateScramLine("operator", password, mechanism, ScramCredential.MinimumIterations)
+      }
+      Files.writeString(path, lines.mkString("\n"), StandardCharsets.UTF_8): Unit
+      val loaded = ScramCredentialFile.load(path)
+      assert(loaded.credential(SaslMechanism.ScramSha256, "operator").nonEmpty)
+      assert(loaded.credential(SaslMechanism.ScramSha512, "operator").nonEmpty)
+      assert(!Files.readString(path).contains("tool-scram-password"))
+    finally
+      java.util.Arrays.fill(password, '\u0000')
       Files.deleteIfExists(path): Unit
   }
