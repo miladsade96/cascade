@@ -236,6 +236,15 @@ final class SecurityIntegrationSuite extends FunSuite:
             .writeNullableString(Some("raw-scram")).writeInt(-1).writeBoolean(false).result()
         )
         assertEquals(metadata.readInt(), 13)
+
+        val renegotiation = exchange(
+          input,
+          output,
+          ByteWriter().writeShort(ApiKey.SaslHandshake).writeShort(1).writeInt(14)
+            .writeNullableString(Some("raw-scram")).writeString("SCRAM-SHA-256").result()
+        )
+        assertEquals(renegotiation.readInt(), 14)
+        assertEquals(renegotiation.readShort(), Errors.IllegalSaslState)
       finally socket.close()
     finally
       java.util.Arrays.fill(password, '\u0000')

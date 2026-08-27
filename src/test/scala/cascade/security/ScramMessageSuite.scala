@@ -41,3 +41,18 @@ final class ScramMessageSuite extends munit.FunSuite:
       "c=biws,r=nonce,p=dGVzdA==,p=dGVzdA=="
     ).foreach(value => intercept[IllegalArgumentException](ScramMessage.parseClientFinal(value.getBytes(StandardCharsets.UTF_8))))
   }
+
+  test("bounds remote message, identity, nonce, and attribute sizes") {
+    intercept[IllegalArgumentException](ScramMessage.parseClientFirst(new Array[Byte](ScramMessage.MaximumMessageBytes + 1)))
+    intercept[IllegalArgumentException](
+      ScramMessage.parseClientFirst(s"n,,n=${"a" * (ScramIdentity.MaximumChars + 1)},r=nonce".getBytes(StandardCharsets.UTF_8))
+    )
+    intercept[IllegalArgumentException](
+      ScramMessage.parseClientFirst(s"n,,n=alice,r=${"n" * (ScramMessage.MaximumNonceChars + 1)}".getBytes(StandardCharsets.UTF_8))
+    )
+    val attributes = (0 until ScramMessage.MaximumAttributes).map(index => s"x=value$index").mkString(",")
+    intercept[IllegalArgumentException](
+      ScramMessage.parseClientFirst(s"n,,n=alice,r=nonce,$attributes".getBytes(StandardCharsets.UTF_8))
+    )
+    intercept[IllegalArgumentException](ScramIdentity.validate("álîce"))
+  }

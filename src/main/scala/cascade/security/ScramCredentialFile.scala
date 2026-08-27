@@ -34,7 +34,9 @@ object ScramCredentialFile:
             catch case error: IllegalArgumentException => throw invalid(path, index + 1, error)
           if !mechanism.scram then throw invalid(path, index + 1)
           val user = line.substring(mechanismSeparator + 1, valueSeparator).trim
-          if user.isEmpty || user.exists(_.isWhitespace) || user.contains('=') then throw invalid(path, index + 1)
+          try ScramIdentity.validate(user)
+          catch case error: IllegalArgumentException => throw invalid(path, index + 1, error)
+          if user.contains('=') then throw invalid(path, index + 1)
           val key = mechanism -> user
           if current.contains(key) then
             throw IllegalArgumentException(s"duplicate ${mechanism.wireName} credential for '$user'")
@@ -44,7 +46,8 @@ object ScramCredentialFile:
 
   def encode(mechanism: SaslMechanism, user: String, credential: ScramCredential): String =
     require(mechanism.scram && credential.mechanism == mechanism, "SCRAM mechanism does not match credential")
-    require(user.nonEmpty && !user.exists(_.isWhitespace) && !user.contains('='), "invalid SCRAM user name")
+    ScramIdentity.validate(user)
+    require(!user.contains('='), "invalid SCRAM user name")
     val encoder = Base64.getEncoder
     Vector(
       s"${mechanism.wireName} $user=${algorithm(mechanism)}",

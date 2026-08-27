@@ -14,7 +14,12 @@ final case class ScramClientFinal(
 )
 
 object ScramMessage:
+  val MaximumMessageBytes = 16 * 1024
+  val MaximumNonceChars = 512
+  val MaximumAttributes = 16
+
   def parseClientFirst(bytes: Array[Byte]): ScramClientFirst =
+    validateSize(bytes)
     val message = decodeUtf8(bytes)
     val firstComma = message.indexOf(',')
     val secondComma = if firstComma < 0 then -1 else message.indexOf(',', firstComma + 1)
@@ -29,11 +34,12 @@ object ScramMessage:
     if attributes.contains('m') then invalid("SCRAM mandatory extensions are not supported")
     val user = attributes.get('n').map(decodeName).getOrElse(invalid("SCRAM user is missing"))
     val nonce = attributes.getOrElse('r', invalid("SCRAM nonce is missing"))
-    if user.isEmpty || user.exists(character => Character.isISOControl(character)) then invalid("SCRAM user is invalid")
+    ScramIdentity.validate(user)
     validateNonce(nonce)
     ScramClientFirst(user, nonce, bare, gs2Header)
 
   def parseClientFinal(bytes: Array[Byte]): ScramClientFinal =
+    validateSize(bytes)
     val message = decodeUtf8(bytes)
     val proofMarker = message.lastIndexOf(",p=")
     if proofMarker <= 0 || message.indexOf(",p=") != proofMarker || message.substring(proofMarker + 3).contains(',') then
@@ -69,7 +75,9 @@ object ScramMessage:
 
   private def parseAttributes(value: String): Map[Char, String] =
     if value.isEmpty then invalid("SCRAM attributes are empty")
-    value.split(",", -1).foldLeft(Map.empty[Char, String]) { (attributes, part) =>
+    val parts = value.split(",", -1)
+    if parts.length > MaximumAttributes then invalid("SCRAM message has too many attributes")
+    parts.foldLeft(Map.empty[Char, String]) { (attributes, part) =>
       if part.length < 3 || part.charAt(1) != '=' then invalid("SCRAM attribute is malformed")
       val key = part.charAt(0)
       if !key.isLetter || attributes.contains(key) then invalid("SCRAM attribute is invalid or duplicated")
@@ -77,8 +85,13 @@ object ScramMessage:
     }
 
   private def validateNonce(value: String): Unit =
-    if value.isEmpty || value.exists(character => character == ',' || character < 0x21 || character > 0x7e) then
+    if value.isEmpty || value.length > MaximumNonceChars ||
+        value.exists(character => character == ',' || character < 0x21 || character > 0x7e)
+    then
       invalid("SCRAM nonce contains invalid characters")
+
+  private def validateSize(bytes: Array[Byte]): Unit =
+    if bytes.isEmpty || bytes.length > MaximumMessageBytes then invalid("SCRAM message size is outside policy")
 
   private def decodeUtf8(bytes: Array[Byte]): String =
     try
@@ -90,3 +103,12 @@ object ScramMessage:
     catch case _: java.nio.charset.CharacterCodingException => invalid("SCRAM message is not valid UTF-8")
 
   private def invalid(message: String): Nothing = throw IllegalArgumentException(message)
+
+object ScramIdentity:
+  val MaximumChars = 255
+
+  def validate(value: String): Unit =
+    require(
+      value.nonEmpty && value.length <= MaximumChars && value.forall(character => character >= 0x21 && character <= 0x7e),
+      "SCRAM user must contain 1-255 visible ASCII characters"
+    )

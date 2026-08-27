@@ -154,7 +154,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val enabled = config.security.authentication.mechanisms
     val error =
-      if !config.security.protocol.sasl then Errors.IllegalSaslState
+      if !config.security.protocol.sasl || session.authenticated then Errors.IllegalSaslState
       else
         enabled.find(_.wireName == mechanism) match
           case None => Errors.UnsupportedSaslMechanism
@@ -177,7 +177,9 @@ final class RequestHandler(
     val token = cursor.readByteArray()
     cursor.ensureFullyRead()
     try
-      if !config.security.protocol.sasl then authenticationFailure(session, Array.emptyByteArray)
+      if !config.security.protocol.sasl || session.authenticated then
+        session.terminateAfterResponse()
+        authenticationResponse(Errors.IllegalSaslState, Some("SASL authentication is not in progress"), Array.emptyByteArray)
       else
         session.mechanism.flatMap(value => config.security.authentication.mechanisms.find(_.wireName == value)) match
           case Some(SaslMechanism.Plain) => authenticatePlain(token, session)
