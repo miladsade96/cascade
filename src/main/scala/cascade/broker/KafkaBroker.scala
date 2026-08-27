@@ -4,7 +4,7 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.{BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics}
+import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
 import cascade.storage.{FlushStatistics, TopicRegistry}
@@ -38,6 +38,7 @@ final class KafkaBroker(
   private val operationalEventsEnabled = config.operations.enabled || config.operations.structuredLog.nonEmpty
   private val trafficMetrics = TrafficMetrics()
   private val peerSecurityMetrics = PeerSecurityMetrics()
+  private val authenticationMetrics = AuthenticationMetrics()
   private val startedAtNanos = AtomicLong(0L)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
@@ -120,7 +121,17 @@ final class KafkaBroker(
     replicationManager = replication
     deliveryCoordinator = delivery
     coordinatorStateMachine = coordinatorState.orNull
-    handler = RequestHandler(config, registry, groupCoordinator, cluster, replication, delivery, advertisedPort, peerSecurityMetrics)
+    handler = RequestHandler(
+      config,
+      registry,
+      groupCoordinator,
+      cluster,
+      replication,
+      delivery,
+      advertisedPort,
+      peerSecurityMetrics,
+      authenticationMetrics
+    )
     val operations = config.operations.port.map { _ =>
       OperationsServer(
         config.operations,
@@ -217,7 +228,8 @@ final class KafkaBroker(
       totalDiskBytes = fileStore.getTotalSpace,
       heapUsedBytes = runtime.totalMemory() - runtime.freeMemory(),
       heapMaxBytes = runtime.maxMemory(),
-      peerSecurity = peerSecurityMetrics.snapshot
+      peerSecurity = peerSecurityMetrics.snapshot,
+      authentication = authenticationMetrics.snapshot
     )
 
   def healthSnapshot: BrokerHealth =

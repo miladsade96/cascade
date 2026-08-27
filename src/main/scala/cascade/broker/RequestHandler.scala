@@ -5,7 +5,7 @@ import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
 import cascade.security.*
-import cascade.operations.PeerSecurityMetrics
+import cascade.operations.{AuthenticationMetrics, PeerSecurityMetrics}
 import cascade.storage.TopicRegistry
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
@@ -19,7 +19,8 @@ final class RequestHandler(
     replicationManager: ReplicationManager,
     deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int,
-    peerSecurityMetrics: PeerSecurityMetrics = PeerSecurityMetrics()
+    peerSecurityMetrics: PeerSecurityMetrics = PeerSecurityMetrics(),
+    authenticationMetrics: AuthenticationMetrics = AuthenticationMetrics()
 ) extends AutoCloseable:
   private val credentials = config.security.authentication.credentialsFile.map { path =>
     ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
@@ -203,6 +204,7 @@ final class RequestHandler(
       authenticationBytes: Array[Byte]
   ): Option[Array[Byte]] =
     session.authenticate(principal)
+    authenticationMetrics.recordSuccess(session.mechanism)
     recordAudit("authentication", session, "allowed", mechanism = session.mechanism)
     authenticationResponse(Errors.None, None, authenticationBytes)
 
@@ -211,6 +213,7 @@ final class RequestHandler(
       authenticationBytes: Array[Byte]
   ): Option[Array[Byte]] =
     val mechanism = session.mechanism
+    authenticationMetrics.recordFailure(mechanism)
     session.rejectAuthentication()
     recordAudit("authentication", session, "denied", mechanism = mechanism)
     authenticationResponse(Errors.SaslAuthenticationFailed, Some("authentication failed"), authenticationBytes)
