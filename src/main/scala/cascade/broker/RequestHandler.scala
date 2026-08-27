@@ -24,6 +24,9 @@ final class RequestHandler(
   private val credentials = config.security.authentication.credentialsFile.map { path =>
     ReloadableCredentials(path, config.security.authentication.reloadIntervalMillis)
   }
+  private val scramCredentials = config.security.authentication.scramCredentialsFile.map { path =>
+    ReloadableScramCredentials(path, config.security.authentication.reloadIntervalMillis)
+  }
   private val authorizer = config.security.authorization.aclFile.map { path =>
     ReloadableAuthorizer(path, config.security.authorization.superUsers, config.security.authorization.reloadIntervalMillis)
   }
@@ -145,15 +148,25 @@ final class RequestHandler(
   private def saslHandshake(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val mechanism = cursor.readString()
     cursor.ensureFullyRead()
+    val enabled = config.security.authentication.mechanisms
     val error =
       if !config.security.protocol.sasl then Errors.IllegalSaslState
-      else if mechanism != "PLAIN" then Errors.UnsupportedSaslMechanism
       else
-        session.selectMechanism(mechanism)
-        Errors.None
+        enabled.find(_.wireName == mechanism) match
+          case None => Errors.UnsupportedSaslMechanism
+          case Some(SaslMechanism.Plain) =>
+            session.selectMechanism(mechanism)
+            Errors.None
+          case Some(selected) =>
+            val exchange = ScramServerSession(
+              selected,
+              user => scramCredentials.flatMap(_.credential(selected, user))
+            )
+            session.selectScramMechanism(selected, exchange)
+            Errors.None
     if error != Errors.None then session.terminateAfterResponse()
     val writer = ByteWriter().writeShort(error)
-    writer.writeArray(Vector("PLAIN"))(writer.writeString)
+    writer.writeArray(enabled.map(_.wireName))(writer.writeString)
     Some(writer.result())
 
   private def saslAuthenticate(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =

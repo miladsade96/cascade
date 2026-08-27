@@ -95,6 +95,67 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("advertises only the configured PLAIN and SCRAM mechanisms") {
+    val directory = Files.createTempDirectory("cascade-sasl-mechanisms")
+    val credentials = directory.resolve("users.conf")
+    val scramCredentials = directory.resolve("scram-users.conf")
+    val password = "mechanism-password".toCharArray
+    Files.writeString(credentials, s"alice=${CredentialHash.create(password, CredentialHash.MinimumIterations)}\n")
+    Files.writeString(
+      scramCredentials,
+      CredentialTool.generateScramLine(
+        "alice",
+        password,
+        SaslMechanism.ScramSha256,
+        ScramCredential.MinimumIterations
+      ) + "\n"
+    )
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(
+            credentialsFile = Some(credentials),
+            scramCredentialsFile = Some(scramCredentials),
+            mechanisms = Vector(SaslMechanism.ScramSha256, SaslMechanism.Plain)
+          )
+        )
+      )
+    )
+    try
+      broker.start()
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        val request = ByteWriter()
+          .writeShort(ApiKey.SaslHandshake)
+          .writeShort(1)
+          .writeInt(8)
+          .writeNullableString(Some("mechanism-test"))
+          .writeString("SCRAM-SHA-256")
+          .result()
+        output.writeInt(request.length)
+        output.write(request)
+        output.flush()
+        val response = new Array[Byte](input.readInt())
+        input.readFully(response)
+        val cursor = ByteCursor(response)
+        assertEquals(cursor.readInt(), 8)
+        assertEquals(cursor.readShort(), Errors.None)
+        assertEquals(cursor.readArray(cursor.readString()), Vector("SCRAM-SHA-256", "PLAIN"))
+        cursor.ensureFullyRead()
+      finally socket.close()
+    finally
+      java.util.Arrays.fill(password, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   test("authenticates Apache Kafka clients with framed SASL PLAIN") {
     val directory = Files.createTempDirectory("cascade-sasl-client")
     val credentials = directory.resolve("users.conf")
