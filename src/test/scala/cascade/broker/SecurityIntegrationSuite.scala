@@ -156,6 +156,93 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("completes a Kafka-framed SCRAM challenge before admitting requests") {
+    val directory = Files.createTempDirectory("cascade-scram-framing")
+    val scramCredentials = directory.resolve("scram-users.conf")
+    val password = "raw-scram-password".toCharArray
+    Files.writeString(
+      scramCredentials,
+      CredentialTool.generateScramLine(
+        "alice",
+        password,
+        SaslMechanism.ScramSha256,
+        ScramCredential.MinimumIterations
+      ) + "\n"
+    )
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(
+            scramCredentialsFile = Some(scramCredentials),
+            mechanisms = Vector(SaslMechanism.ScramSha256)
+          )
+        )
+      )
+    )
+    try
+      broker.start()
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        val handshake = exchange(
+          input,
+          output,
+          ByteWriter().writeShort(ApiKey.SaslHandshake).writeShort(1).writeInt(10)
+            .writeNullableString(Some("raw-scram")).writeString("SCRAM-SHA-256").result()
+        )
+        assertEquals(handshake.readInt(), 10)
+        assertEquals(handshake.readShort(), Errors.None)
+        assertEquals(handshake.readArray(handshake.readString()), Vector("SCRAM-SHA-256"))
+        handshake.ensureFullyRead()
+
+        val firstBare = "n=alice,r=CLIENTNONCE"
+        val challenge = exchange(
+          input,
+          output,
+          ByteWriter().writeShort(ApiKey.SaslAuthenticate).writeShort(1).writeInt(11)
+            .writeNullableString(Some("raw-scram")).writeByteArray(s"n,,$firstBare".getBytes()).result()
+        )
+        assertEquals(challenge.readInt(), 11)
+        assertEquals(challenge.readShort(), Errors.None)
+        assertEquals(challenge.readNullableString(), None)
+        val serverFirst = String(challenge.readByteArray())
+        challenge.readLong()
+        challenge.ensureFullyRead()
+
+        val response = ScramTestClient.respond(SaslMechanism.ScramSha256, password, firstBare, serverFirst)
+        val completed = exchange(
+          input,
+          output,
+          ByteWriter().writeShort(ApiKey.SaslAuthenticate).writeShort(1).writeInt(12)
+            .writeNullableString(Some("raw-scram")).writeByteArray(response.clientFinal.getBytes()).result()
+        )
+        assertEquals(completed.readInt(), 12)
+        assertEquals(completed.readShort(), Errors.None)
+        assertEquals(completed.readNullableString(), None)
+        assertEquals(String(completed.readByteArray()), response.expectedServerFinal)
+        completed.readLong()
+        completed.ensureFullyRead()
+
+        val metadata = exchange(
+          input,
+          output,
+          ByteWriter().writeShort(ApiKey.Metadata).writeShort(4).writeInt(13)
+            .writeNullableString(Some("raw-scram")).writeInt(-1).writeBoolean(false).result()
+        )
+        assertEquals(metadata.readInt(), 13)
+      finally socket.close()
+    finally
+      java.util.Arrays.fill(password, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   test("authenticates Apache Kafka clients with framed SASL PLAIN") {
     val directory = Files.createTempDirectory("cascade-sasl-client")
     val credentials = directory.resolve("users.conf")
@@ -439,6 +526,14 @@ final class SecurityIntegrationSuite extends FunSuite:
       "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"acl-rotation-password\";"
     )
     properties
+
+  private def exchange(input: DataInputStream, output: DataOutputStream, request: Array[Byte]): ByteCursor =
+    output.writeInt(request.length)
+    output.write(request)
+    output.flush()
+    val response = new Array[Byte](input.readInt())
+    input.readFully(response)
+    ByteCursor(response)
 
   private def assertSecureAdmin(broker: KafkaBroker, keyStore: java.nio.file.Path, password: String): Unit =
     val admin = Admin.create(secureSaslProperties(broker, keyStore, password))
