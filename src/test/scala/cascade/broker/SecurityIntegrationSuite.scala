@@ -243,6 +243,61 @@ final class SecurityIntegrationSuite extends FunSuite:
       SecurityTestSupport.deleteTree(directory)
   }
 
+  test("authenticates the Kafka Admin client with SCRAM-SHA-256") {
+    val directory = Files.createTempDirectory("cascade-kafka-scram-256")
+    val scramCredentials = directory.resolve("scram-users.conf")
+    val audit = directory.resolve("audit.jsonl")
+    val password = "kafka-scram-256-password".toCharArray
+    Files.writeString(
+      scramCredentials,
+      CredentialTool.generateScramLine(
+        "alice",
+        password,
+        SaslMechanism.ScramSha256,
+        ScramCredential.MinimumIterations
+      ) + "\n"
+    )
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory.resolve("data"),
+        security = BrokerSecurityConfig(
+          protocol = SecurityProtocol.SaslPlaintext,
+          authentication = AuthenticationConfig(
+            scramCredentialsFile = Some(scramCredentials),
+            mechanisms = Vector(SaslMechanism.ScramSha256)
+          ),
+          audit = AuditConfig(Some(audit))
+        )
+      )
+    )
+    try
+      broker.start()
+      val properties = Properties()
+      properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+      properties.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_PLAINTEXT")
+      properties.put(SaslConfigs.SASL_MECHANISM, "SCRAM-SHA-256")
+      properties.put(
+        SaslConfigs.SASL_JAAS_CONFIG,
+        "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"alice\" password=\"kafka-scram-256-password\";"
+      )
+      val admin = Admin.create(properties)
+      try assertEquals(admin.describeMetadataQuorum().quorumInfo().get(10, TimeUnit.SECONDS).leaderId(), 1)
+      finally admin.close(Duration.ofSeconds(5))
+
+      val authentication = broker.metricsSnapshot.authentication
+      assert(authentication.mechanisms.find(_.mechanism == "SCRAM-SHA-256").exists(_.successes > 0L))
+      val events = Files.readString(audit)
+      assert(events.contains("\"mechanism\":\"SCRAM-SHA-256\""))
+      assert(events.contains("\"decision\":\"allowed\""))
+    finally
+      java.util.Arrays.fill(password, '\u0000')
+      broker.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   test("authenticates Apache Kafka clients with framed SASL PLAIN") {
     val directory = Files.createTempDirectory("cascade-sasl-client")
     val credentials = directory.resolve("users.conf")
