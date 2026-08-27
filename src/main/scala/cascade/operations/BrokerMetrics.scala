@@ -101,6 +101,11 @@ object PrometheusMetrics:
     counter(builder, "cascade_peer_authentications_total", "Internal peer requests accepted by identity policy.", snapshot.peerSecurity.authenticated.toDouble, labels)
     counter(builder, "cascade_peer_tls_authentications_total", "Internal peer requests accepted over mutually authenticated TLS.", snapshot.peerSecurity.tlsAuthenticated.toDouble, labels)
     counter(builder, "cascade_peer_authentication_rejections_total", "Internal peer requests rejected by peer authentication.", snapshot.peerSecurity.rejected.toDouble, labels)
+    snapshot.authentication.mechanisms.foreach { mechanism =>
+      val mechanismLabels = labels.updated("mechanism", mechanism.mechanism)
+      counter(builder, "cascade_sasl_authentication_successes_total", "Successful SASL authentications.", mechanism.successes.toDouble, mechanismLabels)
+      counter(builder, "cascade_sasl_authentication_failures_total", "Failed SASL authentications.", mechanism.failures.toDouble, mechanismLabels)
+    }
     gauge(builder, "cascade_quota_principals", "Principals with active request quota buckets.", snapshot.quotaPrincipals.toDouble, labels)
     counter(builder, "cascade_quota_throttled_requests_total", "Requests delayed by principal quotas.", snapshot.quotaThrottledRequests.toDouble, labels)
     counter(builder, "cascade_quota_rejected_requests_total", "Requests shed because required quota delay was too large.", snapshot.quotaRejectedRequests.toDouble, labels)

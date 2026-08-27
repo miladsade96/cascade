@@ -11,7 +11,9 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_request_processing_seconds_total{node_id=\"7\"} 1.5\n"))
     assert(output.contains("cascade_peer_tls_authentications_total{node_id=\"7\"} 29.0\n"))
     assert(output.contains("cascade_peer_authentication_rejections_total{node_id=\"7\"} 30.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 36)
+    assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"SCRAM-SHA-256\",node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 44)
   }
 
   private val snapshot = BrokerMetricsSnapshot(
@@ -44,5 +46,13 @@ final class PrometheusMetricsSuite extends FunSuite:
     totalDiskBytes = 25L,
     heapUsedBytes = 26L,
     heapMaxBytes = 27L,
-    peerSecurity = PeerSecuritySnapshot(28L, 29L, 30L)
+    peerSecurity = PeerSecuritySnapshot(28L, 29L, 30L),
+    authentication = AuthenticationSnapshot(
+      Vector(
+        MechanismAuthenticationSnapshot("PLAIN", 1L, 4L),
+        MechanismAuthenticationSnapshot("SCRAM-SHA-256", 2L, 5L),
+        MechanismAuthenticationSnapshot("SCRAM-SHA-512", 3L, 6L),
+        MechanismAuthenticationSnapshot("UNKNOWN", 0L, 7L)
+      )
+    )
   )

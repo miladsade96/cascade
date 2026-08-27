@@ -33,6 +33,8 @@ class OperationsServerSuite extends munit.FunSuite:
       assert(status.body().contains("\"node_id\":7"))
       assert(status.body().contains("\"peer_authentications\":0"))
       assert(status.body().contains("\"peer_authentication_rejections\":0"))
+      assert(status.body().contains("\"sasl_authentication_successes\":0"))
+      assert(status.body().contains("\"sasl_authentication_failures\":0"))
       assertEquals(status.headers().firstValue("Cache-Control").orElse(""), "no-store")
     finally server.close()
   }
