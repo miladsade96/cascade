@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, crash-safe storage lifecycle management, TLS, Kafka SASL/PLAIN, resource ACLs, security auditing, live credential/policy rotation, hostname-verified mutual TLS and certificate-bound identities between brokers, broker admission controls, Prometheus metrics, health/readiness checks, structured events, Kafka Admin configuration visibility, capacity alerts, and verified offline backup/restore.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, crash-safe storage lifecycle management, TLS, Kafka SASL/PLAIN and SCRAM-SHA-256/512, resource ACLs, security auditing, live credential/policy rotation, hostname-verified mutual TLS and certificate-bound identities between brokers, broker admission controls, Prometheus metrics, health/readiness checks, structured events, Kafka Admin configuration visibility, capacity alerts, and verified offline backup/restore.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I now authenticate and encrypt broker-to-broker RPCs with hostname-verified mutual TLS, bind node claims to reloadable certificate policy, audit peer decisions, and expose peer security health and metrics. I have tested encrypted RF=3 replication and quorum failover with Kafka 4.3.1 clients. Additional SASL mechanisms, TLS key-store hot reload, physical power/device-loss qualification, rolling-version compatibility, long multi-tenant soak tests, and per-topic lifecycle policy are still release blockers.
+> Cascade isn't a production Kafka replacement yet. I support Kafka-compatible PLAIN, SCRAM-SHA-256, and SCRAM-SHA-512 client authentication, plus hostname-verified mutual TLS and certificate-bound broker identities. I have tested SCRAM over TLS, live verifier rotation, encrypted RF=3 replication, and quorum failover with Kafka 4.3.1 clients. OAuth/OIDC, TLS key-store hot reload, physical power/device-loss qualification, rolling-version compatibility, long multi-tenant soak tests, and per-topic lifecycle policy are still release blockers.
 
 ## Performance I measured
 
@@ -21,6 +21,7 @@ I measured this on my Windows development machine with Java 21, eight partitions
 
 | Workload | Produce | Consume | Exact verification |
 | --- | ---: | ---: | ---: |
+| 10,000,000 records, SCRAM milestone regression | **333,835 records/s** / **326.0 MiB/s** | **349,851 records/s** / **341.7 MiB/s** | **10,000,000 / 10,000,000** |
 | 10,000,000 records, secure-peer milestone regression | **350,319 records/s** / **342.1 MiB/s** | **329,303 records/s** / **321.6 MiB/s** | **10,000,000 / 10,000,000** |
 | 10,000,000 records, sustained | **182,285 records/s** / **178.0 MiB/s** | **473,058 records/s** | **10,000,000 / 10,000,000** |
 | 1,000,000 records, calibration | **614,413 records/s** / **600.0 MiB/s** | **556,232 records/s** / **543.2 MiB/s** | **1,000,000 / 1,000,000** |
@@ -33,6 +34,8 @@ I measured this on my Windows development machine with Java 21, eight partitions
 After I fixed the background-flush path, sustained ten-million-record production went from 57,400 to 182,285 records/s: a **3.18x improvement**. The write phase dropped from 174.2 to 54.9 seconds. That run forced 9.58 GiB in 47.6 cumulative seconds, so the drive was the main limit on this machine.
 
 After the secure-peer milestone, I reran all ten million records on 2026-08-24. Produce finished in 28.545 seconds at 350,319 records/s and consume finished in 30.367 seconds at 329,303 records/s. The run stored 9.86 GiB, forced 9.67 GiB during production, reached 3,636.325 ms maximum acknowledgement latency, and used 5,336.7 MiB peak heap. The load harness is single-node plaintext, so I use this result as an exactness and default-data-path regression gate rather than a benchmark of TLS or replicated capacity.
+
+After the SCRAM milestone, I ran the same ten-million-record workload on 2026-08-27. Produce finished in 29.955 seconds at 333,835 records/s and consume finished in 28.584 seconds at 349,851 records/s. It verified every record, stored 9.86 GiB, forced 9.45 GiB during production, reached 3,989.008 ms maximum acknowledgement latency, and used 5,387.4 MiB peak heap. This harness still uses the default single-node plaintext listener, so it qualifies exactness and catches inactive-authentication regressions; it does not measure SCRAM, TLS, or replicated-cluster capacity.
 
 The one-million test is much shorter and benefits a lot from the filesystem cache. I don't present either result as production capacity. The [full heavy-load report](docs/performance/2026-08-05-heavy-load.md) includes the machine, workload, latency, CPU, GC, heap, storage, and test method.
 
@@ -49,7 +52,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
 | Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
-| Security and isolation | TLS 1.2/1.3, Kafka SASL/PLAIN, PBKDF2 credentials, deny-by-default ACLs, JSONL audit events, hostname-verified peer mTLS, certificate-bound node identities, live identity/credential/ACL rotation, connection/request caps, principal ingress quotas, and overload shedding |
+| Security and isolation | TLS 1.2/1.3, Kafka SASL/PLAIN and SCRAM-SHA-256/512, offline password verifiers, deny-by-default ACLs, JSONL audit events, hostname-verified peer mTLS, certificate-bound node identities, live identity/credential/ACL rotation, connection/request caps, principal ingress quotas, and overload shedding |
 | Operations and recovery | Separate health/readiness/status endpoints, Prometheus 0.0.4 metrics, rotating structured events, deduplicated capacity alerts, Kafka `DescribeConfigs` v2, and atomic checksummed offline backup/restore |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
@@ -61,7 +64,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 - Hard request-size bounds and version validation before request handling.
 - `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` listeners with TLS 1.2/1.3 and optional client-certificate verification.
 - Internal controller, metadata, replication, and recovery requests can require hostname-verified mutual TLS plus a certificate subject assigned to the claimed node ID.
-- Kafka-framed `SaslHandshake` v1 and `SaslAuthenticate` v1 with SASL/PLAIN identities scoped to one connection.
+- Kafka-framed `SaslHandshake` v1 and `SaslAuthenticate` v1 with PLAIN, SCRAM-SHA-256, and SCRAM-SHA-512 identities scoped to one connection.
 - Global/per-IP connection caps, a bounded global in-flight request gate, and per-principal request-byte token buckets.
 - Correlation IDs preserved in every response.
 - Ordered processing within a connection and Java 21 virtual-thread isolation between connections.
@@ -244,13 +247,13 @@ The backup directory and restore target must not already exist. I use the [backu
 
 ### Protect a client listener
 
-I use `SASL_SSL` for password authentication because SASL/PLAIN sends the password inside the TLS tunnel. I keep the key-store password in a separate file instead of a command-line argument.
+I use `SASL_SSL` because SASL authenticates the client but does not encrypt application traffic. I prefer SCRAM-SHA-512 for password authentication and keep the key-store password in a separate file instead of a command-line argument.
 
-I generate a salted PBKDF2-SHA-256 credential line like this, then copy the final `alice=pbkdf2-sha256$...` line into `users.conf`:
+I generate an offline salted SCRAM verifier like this, then copy the final `SCRAM-SHA-512 alice=scram-sha-512$...` line into `scram-users.conf`. Cascade never needs the cleartext password:
 
 ```powershell
-Set-Content -NoNewline alice.password "replace-with-a-long-random-secret"
-.\sbt.bat "runMain cascade.security.CredentialTool alice --password-file alice.password"
+[IO.File]::WriteAllText('alice.password', 'replace-with-a-long-random-secret', [Text.UTF8Encoding]::new($false))
+.\sbt.bat "runMain cascade.security.CredentialTool alice --password-file alice.password --mechanism SCRAM-SHA-512"
 Remove-Item -LiteralPath alice.password
 ```
 
@@ -269,7 +272,7 @@ deny alice Write Topic orders-private
 I start the protected listener with a PKCS12 or JKS key store:
 
 ```powershell
-.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --credentials-file users.conf --acl-file acls.conf --audit-log security-audit.jsonl --max-connections 10000 --max-connections-per-ip 1000 --max-inflight-requests 10000 --request-bytes-per-second 104857600 --request-burst-bytes 209715200 --max-throttle-ms 1000"
+.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --sasl-mechanisms SCRAM-SHA-512 --scram-credentials-file scram-users.conf --acl-file acls.conf --audit-log security-audit.jsonl --max-connections 10000 --max-connections-per-ip 1000 --max-inflight-requests 10000 --request-bytes-per-second 104857600 --request-burst-bytes 209715200 --max-throttle-ms 1000"
 ```
 
 The matching Kafka client properties are:
@@ -277,15 +280,15 @@ The matching Kafka client properties are:
 ```properties
 bootstrap.servers=broker.example.com:9093
 security.protocol=SASL_SSL
-sasl.mechanism=PLAIN
-sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="alice" password="replace-with-a-long-random-secret";
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="alice" password="replace-with-a-long-random-secret";
 ssl.truststore.location=cluster-ca.p12
 ssl.truststore.password=replace-with-the-truststore-password
 ssl.truststore.type=PKCS12
 group.protocol=classic
 ```
 
-Credential, ACL, and peer-identity snapshots reload on their configured interval. A malformed replacement never replaces the last valid in-memory snapshot. TLS key material is loaded at startup, so I still use a rolling restart to rotate a listener or broker certificate.
+I can enable a migration set such as `--sasl-mechanisms PLAIN,SCRAM-SHA-256,SCRAM-SHA-512`; in that case I provide both `--credentials-file` and `--scram-credentials-file`. Credential, ACL, and peer-identity snapshots reload on their configured interval. A malformed replacement never replaces the last valid in-memory snapshot, and `credential_policy` fails readiness until I repair the file. TLS key material is loaded at startup, so I still use a rolling restart to rotate a listener or broker certificate. My [SCRAM authentication runbook](docs/scram-authentication.md) covers verifier generation, migration, rotation, metrics, and limitations.
 
 ### Protect broker-to-broker traffic
 
@@ -351,7 +354,7 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | Heartbeat | 12 | 3 | Session liveness and generation validation |
 | LeaveGroup | 13 | 2 | Explicit departure and rebalance initiation |
 | SyncGroup | 14 | 3 | Leader assignments and follower synchronization |
-| SaslHandshake | 17 | 1 | Negotiate the `PLAIN` mechanism before authentication |
+| SaslHandshake | 17 | 1 | Negotiate `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512` before authentication |
 | ApiVersions | 18 | 0-4 | Legacy and flexible encodings with tagged fields |
 | CreateTopics | 19 | 2 | Validation and quorum-committed topic metadata |
 | InitProducerId | 22 | 1 | Durable producer IDs, epoch allocation, and fencing |
@@ -360,7 +363,7 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
 | TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
 | DescribeConfigs | 32 | 2 | Read-only non-sensitive broker and effective topic configuration for Kafka Admin |
-| SaslAuthenticate | 36 | 1 | Kafka-framed SASL/PLAIN exchange and session lifetime |
+| SaslAuthenticate | 36 | 1 | Kafka-framed PLAIN or multi-step SCRAM exchange and session lifetime |
 | AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
 | ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
 | DescribeQuorum | 55 | 0-2 | Metadata leader, epoch, high watermark, voter identities, and endpoints |
@@ -461,6 +464,8 @@ After adding the operations and offline-recovery milestone, I ran the full suite
 
 After adding secure broker-to-broker transport, I fixed an interruption-close race found by the clean suite and finished with **200/200** passing tests. I then ran all **10,000,000** records on 2026-08-24 and consumed exactly **10,000,000 / 10,000,000** at **350,319 produced records/s** (**342.1 MiB/s**) and **329,303 consumed records/s** (**321.6 MiB/s**). Produce took 28.545 seconds, consume took 30.367 seconds, maximum acknowledgement latency was 3,636.325 ms, and peak heap was 5,336.7 MiB. The run stored 9,862.3 MiB and forced 9,674.0 MiB in 235 operations during production. Because this harness remains single-node plaintext, I use it as an exactness and inactive-security hot-path guard rather than a peer TLS capacity claim.
 
+After adding Kafka-compatible SCRAM-SHA-256/512, strict bounded exchanges, offline verifiers, live atomic rotation, per-mechanism telemetry, and readiness integration, I finished with **221/221** passing tests. I reran all **10,000,000** records on 2026-08-27 and consumed exactly **10,000,000 / 10,000,000** at **333,835 produced records/s** (**326.0 MiB/s**) and **349,851 consumed records/s** (**341.7 MiB/s**). Produce took 29.955 seconds, consume took 28.584 seconds, maximum acknowledgement latency was 3,989.008 ms, and peak heap was 5,387.4 MiB. The run stored 9,862.3 MiB and forced 9,675.9 MiB in 247 operations during production. I use this single-node plaintext run as an exactness and inactive-authentication regression gate, not as authenticated or replicated capacity.
+
 ### Reproduce the load test
 
 ```bash
@@ -481,11 +486,11 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current test suite passes **200/200 tests** in four layers:
+The current test suite passes **221/221 tests** in four layers:
 
-- Unit tests for binary codecs, record batches, storage and coordinator recovery, delivery semantics, cluster metadata, peer identity policy, TLS trust/hostname rejection, security metrics, health/readiness, capacity evaluation, structured-log rotation, backup manifests, checksum validation, and maintenance command parsing.
-- TCP integration tests for discovery, Produce/Fetch, idempotence, flexible voter/config framing, TLS and SASL, peer certificate impersonation rejection, live identity/credential/ACL rotation, auditing, admission/quotas, and operational HTTP authentication and state.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, `DescribeConfigs`, client `SASL_SSL` + ACLs, encrypted RF=3 peer replication and quorum failover, consumer groups, reassignment, dynamic voters, transactions, coordinator failover, and exact Kafka-visible data after backup restore.
+- Unit tests for binary codecs, record batches, storage and coordinator recovery, delivery semantics, cluster metadata, SCRAM derivation/message validation, credential files, peer identity policy, TLS trust/hostname rejection, security metrics, health/readiness, capacity evaluation, structured-log rotation, backup manifests, checksum validation, and maintenance command parsing.
+- TCP integration tests for discovery, Produce/Fetch, idempotence, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, malformed and oversized authentication exchanges, peer certificate impersonation rejection, live identity/credential/ACL rotation, auditing, admission/quotas, and operational HTTP authentication and state.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, `DescribeConfigs`, SCRAM-SHA-256, SCRAM-SHA-512 with `SASL_SSL` + ACLs, live verifier rotation, encrypted RF=3 peer replication and quorum failover, consumer groups, reassignment, dynamic voters, transactions, coordinator failover, and exact Kafka-visible data after backup restore.
 - Qualification tests that force-kill real broker JVMs, interrupt durable-store shutdown, corrupt persisted tails, partition stable and joint quorums, exercise retention and low-disk rejection, tamper with backup contents, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
 
 The load harness separately checks the exact record count at one million and ten million records.
@@ -494,7 +499,7 @@ The load harness separately checks the exact record count at one million and ten
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Security hardening | SCRAM/OAuth, TLS key-store hot reload, Kafka ACL Admin APIs, egress/distributed quotas, and multi-tenant soak tests |
+| 1 | Security hardening | OAuth/OIDC, TLS key-store hot reload, Kafka ACL Admin APIs, egress/distributed quotas, and multi-tenant soak tests |
 | 2 | Compatibility | New Kafka consumer protocol, static-member fencing, more API versions, malformed-frame/fuzz testing, multiple client languages, and rolling upgrade/downgrade testing |
 | 3 | Qualification | Physical power loss, disk loss/full/corruption, arbitrary packet delay/reordering, multi-day soak, restore drills, and dedicated-host replicated-cluster benchmarks |
 | 4 | Coordinator scale | Sharded coordinator state with high-cardinality and failover benchmarks |
@@ -510,7 +515,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - Coordinator failover uses one full quorum image and one elected writer. The local journals are bounded and offsets expire, but I still need sharding and high-cardinality scale tests before treating it like Kafka's partitioned internal topics.
 - Lifecycle settings are broker-wide. I still need durable per-topic policies and Kafka configuration APIs.
 - Key compaction is deliberately batch-conservative: compressed, keyless, control, transactional, and partially superseded batches stay intact, and tombstone grace-period deletion is not implemented.
-- Broker-to-broker traffic supports hostname-verified mTLS and certificate-bound node claims, but I still need SCRAM/OAuth mechanisms and hot reload of TLS key/trust stores; peer authorization policy already reloads atomically.
+- Client authentication supports PLAIN, SCRAM-SHA-256, and SCRAM-SHA-512 with atomic verifier reload, but I still need OAuth/OIDC and hot reload of TLS key/trust stores; peer authorization policy already reloads atomically.
 - ACL files are local operator-managed policy, not the Kafka ACL Admin APIs. Topic data paths return Kafka authorization errors, while some denied control APIs currently close the connection.
 - The current quota measures inbound request bytes per principal. I still need response/egress, produce/fetch-specific, and cluster-wide distributed quotas plus multi-tenant soak qualification.
 - The built-in operations listener is HTTP, so I still require an external TLS/mTLS boundary for non-loopback deployments. I also still need standard dashboards, Alertmanager integration, online cluster-consistent snapshots, scheduled backup retention, and repeated restore drills.
@@ -561,7 +566,9 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--peer-security-protocol` | `PLAINTEXT` | `SSL` enables hostname-verified mTLS for internal RPCs and requires an SSL listener, trust store, client-certificate verification, and identity file |
 | `--peer-identity-file` | Empty | Node-ID-to-X.500-subject policy required by peer `SSL` |
 | `--peer-identity-reload-ms` | `1000` | Interval for atomic peer identity policy reload; the last valid policy survives a malformed replacement |
-| `--credentials-file` | Empty | PBKDF2 credential file required by SASL listeners |
+| `--credentials-file` | Empty | PBKDF2 credential file required when `PLAIN` is enabled |
+| `--scram-credentials-file` | Empty | Offline SCRAM verifier file required when either SCRAM mechanism is enabled |
+| `--sasl-mechanisms` | `PLAIN` | Comma-separated `PLAIN`, `SCRAM-SHA-256`, and/or `SCRAM-SHA-512` mechanisms advertised by the listener |
 | `--credential-reload-ms` | `1000` | Interval for atomic credential snapshot reload |
 | `--sasl-session-lifetime-ms` | `0` | Session lifetime reported by `SaslAuthenticate`; zero disables reauthentication expiry |
 | `--acl-file` | Empty | Deny-by-default resource ACL file; no file leaves authorization disabled |
@@ -594,6 +601,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## More documentation
 
 - [Production-readiness gates](docs/production-readiness.md)
+- [SCRAM authentication runbook](docs/scram-authentication.md)
 - [Broker-to-broker security runbook](docs/peer-security.md)
 - [Operations runbook](docs/operations.md)
 - [Backup and restore runbook](docs/backup-restore.md)
