@@ -16,7 +16,8 @@ final case class AuditEvent(
     decision: String,
     operation: Option[String] = None,
     resourceType: Option[String] = None,
-    resource: Option[String] = None
+    resource: Option[String] = None,
+    mechanism: Option[String] = None
 )
 
 final class AuditLog private (channel: FileChannel, forceEachEvent: Boolean) extends AutoCloseable:
@@ -32,7 +33,8 @@ final class AuditLog private (channel: FileChannel, forceEachEvent: Boolean) ext
       "secure" -> event.secure.toString,
       "decision" -> event.decision
     ) ++ event.operation.map("operation" -> _) ++
-      event.resourceType.map("resource_type" -> _) ++ event.resource.map("resource" -> _)
+      event.resourceType.map("resource_type" -> _) ++ event.resource.map("resource" -> _) ++
+      event.mechanism.map("mechanism" -> _)
     val json = fields.map { case (key, value) => s"\"${escape(key)}\":\"${escape(value)}\"" }.mkString("{", ",", "}\n")
     val bytes = ByteBuffer.wrap(json.getBytes(StandardCharsets.UTF_8))
     while bytes.hasRemaining do channel.write(bytes): Unit

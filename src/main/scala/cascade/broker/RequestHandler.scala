@@ -203,15 +203,16 @@ final class RequestHandler(
       authenticationBytes: Array[Byte]
   ): Option[Array[Byte]] =
     session.authenticate(principal)
-    recordAudit("authentication", session, "allowed")
+    recordAudit("authentication", session, "allowed", mechanism = session.mechanism)
     authenticationResponse(Errors.None, None, authenticationBytes)
 
   private def authenticationFailure(
       session: ConnectionSession,
       authenticationBytes: Array[Byte]
   ): Option[Array[Byte]] =
+    val mechanism = session.mechanism
     session.rejectAuthentication()
-    recordAudit("authentication", session, "denied")
+    recordAudit("authentication", session, "denied", mechanism = mechanism)
     authenticationResponse(Errors.SaslAuthenticationFailed, Some("authentication failed"), authenticationBytes)
 
   private def authenticationResponse(
@@ -1131,11 +1132,22 @@ final class RequestHandler(
       decision: String,
       operation: Option[String] = None,
       resourceType: Option[String] = None,
-      resource: Option[String] = None
+      resource: Option[String] = None,
+      mechanism: Option[String] = None
   ): Unit =
     audit.foreach(
       _.record(
-        AuditEvent(eventType, session.principal, session.remoteAddress, session.secure, decision, operation, resourceType, resource)
+        AuditEvent(
+          eventType,
+          session.principal,
+          session.remoteAddress,
+          session.secure,
+          decision,
+          operation,
+          resourceType,
+          resource,
+          mechanism
+        )
       )
     )
 

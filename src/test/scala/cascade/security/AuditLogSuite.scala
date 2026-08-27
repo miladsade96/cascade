@@ -18,13 +18,15 @@ final class AuditLogSuite extends FunSuite:
           "denied",
           Some("Write"),
           Some("Topic"),
-          Some("private")
+          Some("private"),
+          Some("SCRAM-SHA-256")
         )
       )
       val content = Files.readString(path)
       assert(content.endsWith("\n"))
       assert(content.contains("\"event\":\"authorization\""))
       assert(content.contains("alice\\\"\\nadmin"))
+      assert(content.contains("\"mechanism\":\"SCRAM-SHA-256\""))
       assertEquals(content.lines().count(), 1L)
     finally
       audit.close()
