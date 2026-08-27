@@ -27,3 +27,18 @@ final class ConnectionSessionSuite extends FunSuite:
     assert(session.authenticated)
     assertEquals(session.principal, "CN=client")
   }
+
+  test("keeps an in-progress SCRAM exchange scoped to one connection and clears it on success") {
+    val first = ConnectionSession("client-a", secure = true, authenticationRequired = true)
+    val second = ConnectionSession("client-b", secure = true, authenticationRequired = true)
+    val exchange = ScramServerSession(SaslMechanism.ScramSha256, _ => None)
+
+    first.selectScramMechanism(SaslMechanism.ScramSha256, exchange)
+    assertEquals(first.mechanism, Some("SCRAM-SHA-256"))
+    assert(first.evaluateScram("n,,n=alice,r=nonce".getBytes).exists(_.isInstanceOf[ScramChallenge]))
+    assertEquals(second.evaluateScram(Array.emptyByteArray), None)
+
+    first.authenticate("alice")
+    assertEquals(first.evaluateScram(Array.emptyByteArray), None)
+    assert(first.authenticated)
+  }
