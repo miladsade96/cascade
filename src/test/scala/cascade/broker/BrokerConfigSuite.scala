@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.storage.{CleanupPolicy, FlushPolicy}
-import cascade.security.{PeerSecurityProtocol, SecurityProtocol, TlsClientAuth}
+import cascade.security.{PeerSecurityProtocol, SaslMechanism, SecurityProtocol, TlsClientAuth}
 import java.nio.file.Files
 import munit.FunSuite
 
@@ -140,6 +140,8 @@ final class BrokerConfigSuite extends FunSuite:
           "--peer-identity-file", "peers.conf",
           "--peer-identity-reload-ms", "400",
           "--credentials-file", "users.conf",
+          "--scram-credentials-file", "scram-users.conf",
+          "--sasl-mechanisms", "PLAIN,SCRAM-SHA-256,SCRAM-SHA-512",
           "--credential-reload-ms", "250",
           "--sasl-session-lifetime-ms", "3600000",
           "--acl-file", "acls.conf",
@@ -164,6 +166,11 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.peer.protocol, PeerSecurityProtocol.Ssl)
       assertEquals(config.security.peer.identityFile.map(_.toString), Some("peers.conf"))
       assertEquals(config.security.peer.identityReloadIntervalMillis, 400L)
+      assertEquals(
+        config.security.authentication.mechanisms,
+        Vector(SaslMechanism.Plain, SaslMechanism.ScramSha256, SaslMechanism.ScramSha512)
+      )
+      assertEquals(config.security.authentication.scramCredentialsFile.map(_.toString), Some("scram-users.conf"))
       assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
       assertEquals(config.security.resources.maxConnections, 500)
       assertEquals(config.security.resources.requestBytesPerSecond, 1_048_576L)
@@ -177,6 +184,10 @@ final class BrokerConfigSuite extends FunSuite:
   test("validates TLS and SASL dependencies after all options are parsed") {
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SSL")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT")))
+    intercept[IllegalArgumentException](
+      BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT", "--sasl-mechanisms", "SCRAM-SHA-256"))
+    )
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--sasl-mechanisms", "UNKNOWN")))
     intercept[IllegalArgumentException](
       BrokerConfig.parse(Array("--peer-security-protocol", "SSL", "--peer-identity-file", "peers.conf"))
     )

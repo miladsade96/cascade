@@ -131,6 +131,10 @@ object BrokerConfig:
         loop(tail, config.copy(security = config.security.copy(peer = config.security.peer.copy(identityReloadIntervalMillis = value.toLong))))
       case "--credentials-file" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(credentialsFile = Some(Paths.get(value))))))
+      case "--scram-credentials-file" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(scramCredentialsFile = Some(Paths.get(value))))))
+      case "--sasl-mechanisms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(mechanisms = splitCsv(value).map(SaslMechanism.parse)))))
       case "--credential-reload-ms" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(reloadIntervalMillis = value.toLong))))
       case "--sasl-session-lifetime-ms" :: value :: tail =>

@@ -16,6 +16,19 @@ object SecurityProtocol:
     case "SASL_SSL"       => SecurityProtocol.SaslSsl
     case other             => throw IllegalArgumentException(s"unsupported security protocol: $other")
 
+enum SaslMechanism(val wireName: String, val scram: Boolean):
+  case Plain extends SaslMechanism("PLAIN", false)
+  case ScramSha256 extends SaslMechanism("SCRAM-SHA-256", true)
+  case ScramSha512 extends SaslMechanism("SCRAM-SHA-512", true)
+
+object SaslMechanism:
+  val Supported: Vector[SaslMechanism] = Vector(Plain, ScramSha256, ScramSha512)
+
+  def parse(value: String): SaslMechanism =
+    Supported.find(_.wireName == value.trim.toUpperCase).getOrElse {
+      throw IllegalArgumentException(s"unsupported SASL mechanism: ${value.trim}")
+    }
+
 enum TlsClientAuth:
   case None, Requested, Required
 
@@ -48,9 +61,13 @@ final case class TlsConfig(
 
 final case class AuthenticationConfig(
     credentialsFile: Option[Path] = None,
+    scramCredentialsFile: Option[Path] = None,
+    mechanisms: Vector[SaslMechanism] = Vector(SaslMechanism.Plain),
     reloadIntervalMillis: Long = 1000L,
     sessionLifetimeMillis: Long = 0L
 ):
+  require(mechanisms.nonEmpty, "at least one SASL mechanism must be enabled")
+  require(mechanisms.distinct.size == mechanisms.size, "SASL mechanisms must be unique")
   require(reloadIntervalMillis >= 0L, "credential reload interval cannot be negative")
   require(sessionLifetimeMillis >= 0L, "SASL session lifetime cannot be negative")
 
@@ -109,7 +126,14 @@ final case class BrokerSecurityConfig(
   def validate(): BrokerSecurityConfig =
     require(!protocol.tls || tls.keyStore.nonEmpty, "TLS requires a key store")
     require(!protocol.tls || tls.keyStorePassword.nonEmpty, "TLS requires a key-store password")
-    require(!protocol.sasl || authentication.credentialsFile.nonEmpty, "SASL requires a credentials file")
+    require(
+      !protocol.sasl || !authentication.mechanisms.contains(SaslMechanism.Plain) || authentication.credentialsFile.nonEmpty,
+      "SASL PLAIN requires a credentials file"
+    )
+    require(
+      !protocol.sasl || !authentication.mechanisms.exists(_.scram) || authentication.scramCredentialsFile.nonEmpty,
+      "SASL SCRAM requires a SCRAM credentials file"
+    )
     require(
       tls.clientAuth == TlsClientAuth.None || tls.trustStore.nonEmpty,
       "TLS client authentication requires a trust store"
