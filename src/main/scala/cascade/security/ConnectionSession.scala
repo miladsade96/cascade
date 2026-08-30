@@ -10,11 +10,14 @@ final class ConnectionSession(
   @volatile private var authenticatedState = !authenticationRequired
   @volatile private var mechanismState: Option[String] = None
   @volatile private var scramState: Option[ScramServerSession] = None
+  @volatile private var authenticationExpiresAtMillis = Long.MaxValue
   @volatile private var terminateState = false
 
   def principal: String = currentPrincipal
 
-  def authenticated: Boolean = authenticatedState
+  def authenticated: Boolean =
+    expireAuthenticationIfNecessary()
+    authenticatedState
 
   def mechanism: Option[String] = mechanismState
 
@@ -33,22 +36,39 @@ final class ConnectionSession(
 
   def evaluateScram(token: Array[Byte]): Option[ScramStep] = synchronized(scramState.map(_.evaluate(token)))
 
-  def authenticate(principal: String): Unit = synchronized {
+  def authenticate(principal: String, expiresAtEpochMillis: Long = Long.MaxValue): Unit = synchronized {
     require(principal.nonEmpty, "authenticated principal cannot be empty")
+    require(expiresAtEpochMillis > System.currentTimeMillis(), "authentication expiry must be in the future")
     currentPrincipal = principal
     authenticatedState = true
+    authenticationExpiresAtMillis = expiresAtEpochMillis
     scramState = None
   }
 
   def rejectAuthentication(): Unit = synchronized {
     currentPrincipal = "ANONYMOUS"
     authenticatedState = false
+    authenticationExpiresAtMillis = Long.MaxValue
     mechanismState = None
     scramState = None
     terminateState = true
   }
 
   def terminateAfterResponse(): Unit = terminateState = true
+
+  private def expireAuthenticationIfNecessary(): Unit =
+    if authenticatedState && authenticationExpiresAtMillis != Long.MaxValue &&
+        System.currentTimeMillis() >= authenticationExpiresAtMillis
+    then synchronized {
+      if authenticatedState && authenticationExpiresAtMillis != Long.MaxValue &&
+          System.currentTimeMillis() >= authenticationExpiresAtMillis
+      then
+        currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
+        authenticatedState = false
+        authenticationExpiresAtMillis = Long.MaxValue
+        mechanismState = None
+        scramState = None
+    }
 
 object ConnectionSession:
   val LocalAnonymous: ConnectionSession = ConnectionSession("local", secure = false, authenticationRequired = false)
