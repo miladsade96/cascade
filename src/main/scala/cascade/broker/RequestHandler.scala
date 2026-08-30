@@ -28,6 +28,11 @@ final class RequestHandler(
   private val scramCredentials = config.security.authentication.scramCredentialsFile.map { path =>
     ReloadableScramCredentials(path, config.security.authentication.reloadIntervalMillis)
   }
+  private val oauthJwks = Option.when(config.security.authentication.mechanisms.exists(_.oauth)) {
+    ReloadableJwks(config.security.authentication.oauth)
+  }
+  private val oauthValidator = oauthJwks.map(JwtValidator(config.security.authentication.oauth, _))
+  private val oauthAuthenticator = oauthValidator.map(OAuthBearerAuthenticator(config.security.authentication.oauth, _))
   private val authorizer = config.security.authorization.aclFile.map { path =>
     ReloadableAuthorizer(path, config.security.authorization.superUsers, config.security.authorization.reloadIntervalMillis)
   }
@@ -41,9 +46,13 @@ final class RequestHandler(
   def peerIdentityReloadError: Option[String] = peerAuthenticator.lastReloadError
 
   def credentialReloadError: Option[String] =
-    credentials.flatMap(_.lastReloadError).orElse(scramCredentials.flatMap(_.lastReloadError))
+    credentials.flatMap(_.lastReloadError)
+      .orElse(scramCredentials.flatMap(_.lastReloadError))
+      .orElse(oauthJwks.flatMap(_.lastReloadError))
 
-  override def close(): Unit = audit.foreach(_.close())
+  override def close(): Unit =
+    oauthJwks.foreach(_.close())
+    audit.foreach(_.close())
 
   def handle(frame: Array[Byte]): Option[Array[Byte]] = handle(frame, ConnectionSession.LocalAnonymous)
 
@@ -161,13 +170,17 @@ final class RequestHandler(
           case Some(SaslMechanism.Plain) =>
             session.selectMechanism(mechanism)
             Errors.None
-          case Some(selected) =>
+          case Some(selected) if selected.scram =>
             val exchange = ScramServerSession(
               selected,
               user => scramCredentials.flatMap(_.credential(selected, user))
             )
             session.selectScramMechanism(selected, exchange)
             Errors.None
+          case Some(SaslMechanism.OAuthBearer) =>
+            session.selectMechanism(mechanism)
+            Errors.None
+          case Some(_) => Errors.UnsupportedSaslMechanism
     if error != Errors.None then session.terminateAfterResponse()
     val writer = ByteWriter().writeShort(error)
     writer.writeArray(enabled.map(_.wireName))(writer.writeString)
@@ -184,6 +197,7 @@ final class RequestHandler(
         session.mechanism.flatMap(value => config.security.authentication.mechanisms.find(_.wireName == value)) match
           case Some(SaslMechanism.Plain) => authenticatePlain(token, session)
           case Some(mechanism) if mechanism.scram => authenticateScram(token, session)
+          case Some(SaslMechanism.OAuthBearer) => authenticateOAuth(token, session)
           case _ => authenticationFailure(session, Array.emptyByteArray)
     finally Arrays.fill(token, 0.toByte)
 
@@ -203,15 +217,30 @@ final class RequestHandler(
       case Some(ScramFailure(_, bytes)) => authenticationFailure(session, bytes)
       case None => authenticationFailure(session, Array.emptyByteArray)
 
+  private def authenticateOAuth(token: Array[Byte], session: ConnectionSession): Option[Array[Byte]] =
+    val authenticated = oauthAuthenticator.flatMap(_.authenticate(token))
+    authenticated match
+      case Some(identity) =>
+        authenticationSuccess(
+          session,
+          identity.principal,
+          Array.emptyByteArray,
+          expiresAtEpochMillis = identity.expiresAtEpochMillis,
+          reportedSessionLifetimeMillis = 0L
+        )
+      case None => authenticationFailure(session, Array.emptyByteArray)
+
   private def authenticationSuccess(
       session: ConnectionSession,
       principal: String,
-      authenticationBytes: Array[Byte]
+      authenticationBytes: Array[Byte],
+      expiresAtEpochMillis: Long = Long.MaxValue,
+      reportedSessionLifetimeMillis: Long = config.security.authentication.sessionLifetimeMillis
   ): Option[Array[Byte]] =
-    session.authenticate(principal)
+    session.authenticate(principal, expiresAtEpochMillis)
     authenticationMetrics.recordSuccess(session.mechanism)
     recordAudit("authentication", session, "allowed", mechanism = session.mechanism)
-    authenticationResponse(Errors.None, None, authenticationBytes)
+    authenticationResponse(Errors.None, None, authenticationBytes, reportedSessionLifetimeMillis)
 
   private def authenticationFailure(
       session: ConnectionSession,
@@ -226,14 +255,15 @@ final class RequestHandler(
   private def authenticationResponse(
       error: Short,
       message: Option[String],
-      authenticationBytes: Array[Byte]
+      authenticationBytes: Array[Byte],
+      sessionLifetimeMillis: Long = config.security.authentication.sessionLifetimeMillis
   ): Option[Array[Byte]] =
     Some(
       ByteWriter()
         .writeShort(error)
         .writeNullableString(message)
         .writeByteArray(authenticationBytes)
-        .writeLong(config.security.authentication.sessionLifetimeMillis)
+        .writeLong(sessionLifetimeMillis)
         .result()
     )
 
