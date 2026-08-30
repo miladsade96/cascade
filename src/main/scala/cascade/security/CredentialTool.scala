@@ -12,8 +12,9 @@ object CredentialTool:
       val line = options.mechanism match
         case SaslMechanism.Plain =>
           generateLine(options.user, password, options.iterations.getOrElse(CredentialHash.RecommendedIterations))
-        case mechanism =>
+        case mechanism if mechanism.scram =>
           generateScramLine(options.user, password, mechanism, options.iterations.getOrElse(ScramCredential.RecommendedIterations))
+        case mechanism => throw IllegalArgumentException(s"${mechanism.wireName} does not use a stored password verifier")
       println(line)
     finally Arrays.fill(password, '\u0000')
 
