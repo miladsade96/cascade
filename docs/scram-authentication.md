@@ -58,7 +58,7 @@ Prometheus exposes these bounded-cardinality counters with `node_id` and `mechan
 - `cascade_sasl_authentication_successes_total`
 - `cascade_sasl_authentication_failures_total`
 
-The mechanism label is one of `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, or `UNKNOWN`. `/v1/status` also reports aggregate `sasl_authentication_successes` and `sasl_authentication_failures`. I alert on a sustained failure increase, investigate unexpected `UNKNOWN` traffic, and correlate it with the forced JSONL authentication audit. Audit entries include the negotiated mechanism but never the password, client proof, stored key, or server key.
+The mechanism label is one of `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `UNKNOWN`. `/v1/status` also reports aggregate `sasl_authentication_successes` and `sasl_authentication_failures`. I alert on a sustained failure increase, investigate unexpected `UNKNOWN` traffic, and correlate it with the forced JSONL authentication audit. Audit entries include the negotiated mechanism but never the password, client proof, stored key, or server key.
 
 ## Bounds and compatibility
 
@@ -68,4 +68,4 @@ I test both mechanisms with Kafka 4.3.1 clients. The end-to-end suite covers SCR
 
 ## Current limitations
 
-I do not yet implement SCRAM channel binding, OAuth/OIDC, Kafka `AlterUserScramCredentials`, or TLS key/trust-store hot reload. Verifier management is currently an operator-owned file workflow. I use filesystem permissions and encrypted secret distribution for the verifier file, TLS key material, password inputs, and backup copies, and I track the remaining release gates in my [production-readiness checklist](production-readiness.md).
+I do not yet implement SCRAM channel binding, Kafka `AlterUserScramCredentials`, or TLS key/trust-store hot reload. I support signed OAuth/OIDC JWTs as a separate client mechanism. SCRAM verifier management is currently an operator-owned file workflow. I use filesystem permissions and encrypted secret distribution for the verifier file, TLS key material, password inputs, and backup copies, and I track the remaining release gates in my [production-readiness checklist](production-readiness.md).
