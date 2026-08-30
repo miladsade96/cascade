@@ -1,5 +1,6 @@
 package cascade.security
 
+import java.net.URI
 import java.nio.file.Path
 
 enum SecurityProtocol(val tls: Boolean, val sasl: Boolean):
@@ -20,9 +21,12 @@ enum SaslMechanism(val wireName: String, val scram: Boolean):
   case Plain extends SaslMechanism("PLAIN", false)
   case ScramSha256 extends SaslMechanism("SCRAM-SHA-256", true)
   case ScramSha512 extends SaslMechanism("SCRAM-SHA-512", true)
+  case OAuthBearer extends SaslMechanism("OAUTHBEARER", false)
+
+  def oauth: Boolean = this == SaslMechanism.OAuthBearer
 
 object SaslMechanism:
-  val Supported: Vector[SaslMechanism] = Vector(Plain, ScramSha256, ScramSha512)
+  val Supported: Vector[SaslMechanism] = Vector(Plain, ScramSha256, ScramSha512, OAuthBearer)
 
   def parse(value: String): SaslMechanism =
     Supported.find(_.wireName == value.trim.toUpperCase).getOrElse {
@@ -59,10 +63,57 @@ final case class TlsConfig(
     enabledProtocols: Vector[String] = Vector("TLSv1.3", "TLSv1.2")
 )
 
+enum JwtAlgorithm(val jwtName: String, val signatureName: String):
+  case Rs256 extends JwtAlgorithm("RS256", "SHA256withRSA")
+  case Rs384 extends JwtAlgorithm("RS384", "SHA384withRSA")
+  case Rs512 extends JwtAlgorithm("RS512", "SHA512withRSA")
+
+object JwtAlgorithm:
+  val Supported: Vector[JwtAlgorithm] = Vector(Rs256, Rs384, Rs512)
+
+  def parse(value: String): JwtAlgorithm =
+    Supported.find(_.jwtName == value.trim.toUpperCase).getOrElse {
+      throw IllegalArgumentException(s"unsupported JWT algorithm: ${value.trim}")
+    }
+
+final case class OAuthConfig(
+    jwksUri: Option[URI] = None,
+    issuer: Option[String] = None,
+    audience: Option[String] = None,
+    principalClaim: String = "sub",
+    scopeClaim: String = "scope",
+    requiredScopes: Set[String] = Set.empty,
+    allowedAlgorithms: Set[JwtAlgorithm] = Set(JwtAlgorithm.Rs256),
+    clockSkewSeconds: Long = 30L,
+    jwksRefreshMillis: Long = 300000L,
+    httpTimeoutMillis: Int = 5000,
+    maximumTokenBytes: Int = 16 * 1024
+):
+  require(issuer.forall(value => value.nonEmpty && value.length <= 2048 && !value.exists(_.isControl)), "OAuth issuer is invalid")
+  require(audience.forall(value => value.nonEmpty && value.length <= 512 && !value.exists(_.isControl)), "OAuth audience is invalid")
+  require(principalClaim.nonEmpty && principalClaim.length <= 128, "OAuth principal claim must contain 1-128 characters")
+  require(scopeClaim.nonEmpty && scopeClaim.length <= 128, "OAuth scope claim must contain 1-128 characters")
+  require(requiredScopes.forall(scope => scope.nonEmpty && scope.length <= 256 && !scope.exists(_.isWhitespace)), "OAuth scopes are invalid")
+  require(allowedAlgorithms.nonEmpty, "at least one JWT algorithm must be allowed")
+  require(clockSkewSeconds >= 0L && clockSkewSeconds <= 300L, "OAuth clock skew must be between 0 and 300 seconds")
+  require(jwksRefreshMillis >= 0L, "JWKS refresh interval cannot be negative")
+  require(httpTimeoutMillis >= 100 && httpTimeoutMillis <= 60000, "OAuth HTTP timeout must be between 100 and 60000 milliseconds")
+  require(maximumTokenBytes >= 1024 && maximumTokenBytes <= 1024 * 1024, "OAuth token limit must be between 1 KiB and 1 MiB")
+  jwksUri.foreach { uri =>
+    require(uri.isAbsolute, "OAuth JWKS URI must be absolute")
+    val scheme = Option(uri.getScheme).map(_.toLowerCase).orNull
+    require(Set("file", "https").contains(scheme), "OAuth JWKS URI must use file or https")
+    require(uri.getFragment == null && uri.getUserInfo == null, "OAuth JWKS URI cannot contain user info or a fragment")
+    if scheme == "file" then
+      require(uri.getAuthority == null && uri.getQuery == null, "OAuth file JWKS URI cannot contain an authority or query")
+    else require(Option(uri.getHost).exists(_.nonEmpty), "OAuth HTTPS JWKS URI must contain a host")
+  }
+
 final case class AuthenticationConfig(
     credentialsFile: Option[Path] = None,
     scramCredentialsFile: Option[Path] = None,
     mechanisms: Vector[SaslMechanism] = Vector(SaslMechanism.Plain),
+    oauth: OAuthConfig = OAuthConfig(),
     reloadIntervalMillis: Long = 1000L,
     sessionLifetimeMillis: Long = 0L
 ):
@@ -134,6 +185,11 @@ final case class BrokerSecurityConfig(
       !protocol.sasl || !authentication.mechanisms.exists(_.scram) || authentication.scramCredentialsFile.nonEmpty,
       "SASL SCRAM requires a SCRAM credentials file"
     )
+    val oauthEnabled = protocol.sasl && authentication.mechanisms.exists(_.oauth)
+    require(!oauthEnabled || protocol == SecurityProtocol.SaslSsl, "SASL OAUTHBEARER requires SASL_SSL")
+    require(!oauthEnabled || authentication.oauth.jwksUri.nonEmpty, "SASL OAUTHBEARER requires a JWKS URI")
+    require(!oauthEnabled || authentication.oauth.issuer.exists(_.nonEmpty), "SASL OAUTHBEARER requires an issuer")
+    require(!oauthEnabled || authentication.oauth.audience.exists(_.nonEmpty), "SASL OAUTHBEARER requires an audience")
     require(
       tls.clientAuth == TlsClientAuth.None || tls.trustStore.nonEmpty,
       "TLS client authentication requires a trust store"
