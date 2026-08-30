@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.storage.{CleanupPolicy, FlushPolicy}
-import cascade.security.{PeerSecurityProtocol, SaslMechanism, SecurityProtocol, TlsClientAuth}
+import cascade.security.{JwtAlgorithm, PeerSecurityProtocol, SaslMechanism, SecurityProtocol, TlsClientAuth}
 import java.nio.file.Files
 import munit.FunSuite
 
@@ -141,7 +141,18 @@ final class BrokerConfigSuite extends FunSuite:
           "--peer-identity-reload-ms", "400",
           "--credentials-file", "users.conf",
           "--scram-credentials-file", "scram-users.conf",
-          "--sasl-mechanisms", "PLAIN,SCRAM-SHA-256,SCRAM-SHA-512",
+          "--sasl-mechanisms", "PLAIN,SCRAM-SHA-256,SCRAM-SHA-512,OAUTHBEARER",
+          "--oauth-jwks-uri", "file:///jwks.json",
+          "--oauth-issuer", "https://issuer.example",
+          "--oauth-audience", "cascade",
+          "--oauth-principal-claim", "preferred_username",
+          "--oauth-scope-claim", "scp",
+          "--oauth-required-scopes", "cascade.read,cascade.write",
+          "--oauth-allowed-algorithms", "RS256,RS512",
+          "--oauth-clock-skew-seconds", "45",
+          "--oauth-jwks-refresh-ms", "60000",
+          "--oauth-http-timeout-ms", "3000",
+          "--oauth-max-token-bytes", "32768",
           "--credential-reload-ms", "250",
           "--sasl-session-lifetime-ms", "3600000",
           "--acl-file", "acls.conf",
@@ -168,9 +179,16 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.peer.identityReloadIntervalMillis, 400L)
       assertEquals(
         config.security.authentication.mechanisms,
-        Vector(SaslMechanism.Plain, SaslMechanism.ScramSha256, SaslMechanism.ScramSha512)
+        Vector(SaslMechanism.Plain, SaslMechanism.ScramSha256, SaslMechanism.ScramSha512, SaslMechanism.OAuthBearer)
       )
       assertEquals(config.security.authentication.scramCredentialsFile.map(_.toString), Some("scram-users.conf"))
+      assertEquals(config.security.authentication.oauth.issuer, Some("https://issuer.example"))
+      assertEquals(config.security.authentication.oauth.audience, Some("cascade"))
+      assertEquals(config.security.authentication.oauth.principalClaim, "preferred_username")
+      assertEquals(config.security.authentication.oauth.scopeClaim, "scp")
+      assertEquals(config.security.authentication.oauth.requiredScopes, Set("cascade.read", "cascade.write"))
+      assertEquals(config.security.authentication.oauth.allowedAlgorithms, Set(JwtAlgorithm.Rs256, JwtAlgorithm.Rs512))
+      assertEquals(config.security.authentication.oauth.maximumTokenBytes, 32768)
       assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
       assertEquals(config.security.resources.maxConnections, 500)
       assertEquals(config.security.resources.requestBytesPerSecond, 1_048_576L)
@@ -188,6 +206,27 @@ final class BrokerConfigSuite extends FunSuite:
       BrokerConfig.parse(Array("--security-protocol", "SASL_PLAINTEXT", "--sasl-mechanisms", "SCRAM-SHA-256"))
     )
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--sasl-mechanisms", "UNKNOWN")))
+    intercept[IllegalArgumentException](
+      BrokerConfig.parse(
+        Array(
+          "--security-protocol", "SASL_PLAINTEXT",
+          "--sasl-mechanisms", "OAUTHBEARER",
+          "--oauth-jwks-uri", "file:///jwks.json",
+          "--oauth-issuer", "https://issuer.example",
+          "--oauth-audience", "cascade"
+        )
+      )
+    )
+    intercept[IllegalArgumentException](
+      BrokerConfig.parse(
+        Array(
+          "--security-protocol", "SASL_SSL",
+          "--ssl-keystore", "broker.p12",
+          "--ssl-keystore-password-file", createSecret("password").toString,
+          "--sasl-mechanisms", "OAUTHBEARER"
+        )
+      )
+    )
     intercept[IllegalArgumentException](
       BrokerConfig.parse(Array("--peer-security-protocol", "SSL", "--peer-identity-file", "peers.conf"))
     )
@@ -230,3 +269,9 @@ final class BrokerConfigSuite extends FunSuite:
       BrokerConfig.parse(Array("--operations-host", "0.0.0.0", "--operations-port", "9404"))
     }
   }
+
+  private def createSecret(value: String): java.nio.file.Path =
+    val path = Files.createTempFile("cascade-config", ".secret")
+    Files.writeString(path, value)
+    path.toFile.deleteOnExit()
+    path
