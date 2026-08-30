@@ -112,19 +112,19 @@ object ScramCredential:
   private[security] def keyBytes(mechanism: SaslMechanism): Int = mechanism match
     case SaslMechanism.ScramSha256 => 32
     case SaslMechanism.ScramSha512 => 64
-    case SaslMechanism.Plain       => throw IllegalArgumentException("PLAIN does not use SCRAM keys")
+    case mechanism                 => throw IllegalArgumentException(s"${mechanism.wireName} does not use SCRAM keys")
 
   private def digestAlgorithm(mechanism: SaslMechanism): String = mechanism match
     case SaslMechanism.ScramSha256 => "SHA-256"
     case SaslMechanism.ScramSha512 => "SHA-512"
-    case SaslMechanism.Plain       => throw IllegalArgumentException("PLAIN does not use a SCRAM digest")
+    case mechanism                 => throw IllegalArgumentException(s"${mechanism.wireName} does not use a SCRAM digest")
 
   private def hmacAlgorithm(mechanism: SaslMechanism): String = mechanism match
     case SaslMechanism.ScramSha256 => "HmacSHA256"
     case SaslMechanism.ScramSha512 => "HmacSHA512"
-    case SaslMechanism.Plain       => throw IllegalArgumentException("PLAIN does not use a SCRAM HMAC")
+    case mechanism                 => throw IllegalArgumentException(s"${mechanism.wireName} does not use a SCRAM HMAC")
 
   private def pbkdf2Algorithm(mechanism: SaslMechanism): String = mechanism match
     case SaslMechanism.ScramSha256 => "PBKDF2WithHmacSHA256"
     case SaslMechanism.ScramSha512 => "PBKDF2WithHmacSHA512"
-    case SaslMechanism.Plain       => throw IllegalArgumentException("PLAIN does not use SCRAM PBKDF2")
+    case mechanism                 => throw IllegalArgumentException(s"${mechanism.wireName} does not use SCRAM PBKDF2")
