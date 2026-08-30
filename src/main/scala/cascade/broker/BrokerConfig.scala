@@ -4,6 +4,7 @@ import cascade.cluster.ClusterNode
 import cascade.operations.OperationsConfig
 import cascade.security.*
 import cascade.storage.{CleanupPolicy, FlushPolicy, StorageLifecycleConfig}
+import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 
@@ -135,6 +136,28 @@ object BrokerConfig:
         loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(scramCredentialsFile = Some(Paths.get(value))))))
       case "--sasl-mechanisms" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(mechanisms = splitCsv(value).map(SaslMechanism.parse)))))
+      case "--oauth-jwks-uri" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(jwksUri = Some(URI.create(value)))))
+      case "--oauth-issuer" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(issuer = Some(value))))
+      case "--oauth-audience" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(audience = Some(value))))
+      case "--oauth-principal-claim" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(principalClaim = value)))
+      case "--oauth-scope-claim" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(scopeClaim = value)))
+      case "--oauth-required-scopes" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(requiredScopes = splitCsv(value).toSet)))
+      case "--oauth-allowed-algorithms" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(allowedAlgorithms = splitCsv(value).map(JwtAlgorithm.parse).toSet)))
+      case "--oauth-clock-skew-seconds" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(clockSkewSeconds = value.toLong)))
+      case "--oauth-jwks-refresh-ms" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(jwksRefreshMillis = value.toLong)))
+      case "--oauth-http-timeout-ms" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(httpTimeoutMillis = value.toInt)))
+      case "--oauth-max-token-bytes" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(maximumTokenBytes = value.toInt)))
       case "--credential-reload-ms" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(authentication = config.security.authentication.copy(reloadIntervalMillis = value.toLong))))
       case "--sasl-session-lifetime-ms" :: value :: tail =>
@@ -201,3 +224,7 @@ object BrokerConfig:
 
   private def splitCsv(value: String): Vector[String] =
     value.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
+
+  private def updateOAuth(config: BrokerConfig)(update: OAuthConfig => OAuthConfig): BrokerConfig =
+    val authentication = config.security.authentication
+    config.copy(security = config.security.copy(authentication = authentication.copy(oauth = update(authentication.oauth))))
