@@ -78,7 +78,7 @@ object ScramCredentialFile:
   private def algorithm(mechanism: SaslMechanism): String = mechanism match
     case SaslMechanism.ScramSha256 => "scram-sha-256"
     case SaslMechanism.ScramSha512 => "scram-sha-512"
-    case SaslMechanism.Plain       => throw IllegalArgumentException("PLAIN is not a SCRAM credential")
+    case mechanism                 => throw IllegalArgumentException(s"${mechanism.wireName} is not a SCRAM credential")
 
   private def invalid(path: Path, line: Int, cause: Throwable | Null = null): IllegalArgumentException =
     IllegalArgumentException(s"invalid SCRAM credential at ${path.getFileName}:$line", cause)
