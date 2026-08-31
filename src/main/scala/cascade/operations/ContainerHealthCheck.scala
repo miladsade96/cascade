@@ -11,7 +11,8 @@ final case class ContainerHealthCheckConfig(
     host: String,
     port: Int,
     timeoutMillis: Int,
-    tokenFile: Option[Path]
+    tokenFile: Option[Path],
+    path: String = "/ready"
 )
 
 object ContainerHealthCheck:
@@ -22,7 +23,8 @@ object ContainerHealthCheck:
   def main(arguments: Array[String]): Unit =
     val result =
       for
-        config <- parseEnvironment(sys.env)
+        path <- probePath(arguments.headOption.getOrElse("/ready"))
+        config <- parseEnvironment(sys.env).map(_.copy(path = path))
         _ <- probe(config)
       yield ()
     result.left.foreach { message =>
@@ -52,7 +54,7 @@ object ContainerHealthCheck:
       val timeout = Duration.ofMillis(config.timeoutMillis.toLong)
       val client = HttpClient.newBuilder().connectTimeout(timeout).build()
       val requestBuilder = HttpRequest
-        .newBuilder(URI("http", null, config.host, config.port, "/ready", null, null))
+        .newBuilder(URI("http", null, config.host, config.port, config.path, null, null))
         .timeout(timeout)
         .GET()
       config.tokenFile.foreach { path =>
@@ -73,3 +75,6 @@ object ContainerHealthCheck:
     value.toIntOption.filter(number => number >= minimum && number <= maximum).toRight(
       s"$description must be an integer from $minimum through $maximum"
     )
+
+  private[operations] def probePath(value: String): Either[String, String] =
+    Either.cond(Set("/live", "/ready").contains(value), value, "health-check path must be /live or /ready")

@@ -19,6 +19,8 @@ class ContainerHealthCheckSuite extends munit.FunSuite:
     )
     assert(ContainerHealthCheck.parseEnvironment(Map("CASCADE_OPERATIONS_PORT" -> "0")).isLeft)
     assert(ContainerHealthCheck.parseEnvironment(Map("CASCADE_HEALTHCHECK_TIMEOUT_MS" -> "99")).isLeft)
+    assertEquals(ContainerHealthCheck.probePath("/live"), Right("/live"))
+    assert(ContainerHealthCheck.probePath("/metrics").isLeft)
   }
 
   test("probes public and bearer-protected readiness endpoints") {
