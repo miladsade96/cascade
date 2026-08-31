@@ -1,5 +1,9 @@
 package cascade.storage
 
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.charset.StandardCharsets
+import java.nio.file.StandardOpenOption.{TRUNCATE_EXISTING, WRITE}
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledExecutorService, TimeUnit}
@@ -24,10 +28,12 @@ final class TopicRegistry(
   require(flushBytes > 0, "flush bytes must be positive")
 
   private val topics = ConcurrentHashMap[String, Vector[PartitionLog]]()
+  private val topicPolicies = ConcurrentHashMap[String, TopicLifecyclePolicy]()
   private val closed = AtomicBoolean(false)
   private val flushQueued = AtomicBoolean(false)
   private val backgroundFailure = AtomicReference[Throwable]()
   private val PartitionDirectory = "partition-([0-9]+)".r
+  private val policyPath = dataDirectory.resolve(".cascade").resolve("topic-lifecycle.conf")
   private val flusher: Option[ScheduledExecutorService] = flushPolicy match
     case FlushPolicy.Periodic =>
       Some(Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-log-flusher").factory()))
@@ -36,6 +42,7 @@ final class TopicRegistry(
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-storage-lifecycle").factory())
 
   Files.createDirectories(dataDirectory)
+  loadTopicPolicies()
   discoverTopics()
   startPeriodicFlusher()
   startLifecycleScheduler()
@@ -50,6 +57,32 @@ final class TopicRegistry(
 
   def partition(topic: String, index: Int): Option[PartitionLog] =
     partitions(topic).flatMap(_.lift(index))
+
+  def effectiveLifecyclePolicy(topic: String): Option[TopicLifecyclePolicy] =
+    Option.when(topics.containsKey(topic)) {
+      Option(topicPolicies.get(topic)).getOrElse(TopicLifecyclePolicy.from(lifecycleConfig))
+    }
+
+  def configuredLifecyclePolicy(topic: String): Option[TopicLifecyclePolicy] = Option(topicPolicies.get(topic))
+
+  def configureLifecycle(topic: String, policy: TopicLifecyclePolicy): Either[String, Unit] = synchronized {
+    ensureHealthy()
+    Option(topics.get(topic)) match
+      case None => Left("topic does not exist")
+      case Some(logs) if Option(topicPolicies.get(topic)).contains(policy) =>
+        val effective = policy.applyTo(lifecycleConfig)
+        logs.foreach(_.updateLifecycleConfig(effective))
+        Right(())
+      case Some(logs) =>
+        try
+          val next = topicPolicies.asScala.toMap.updated(topic, policy)
+          persistTopicPolicies(next)
+          topicPolicies.put(topic, policy)
+          val effective = policy.applyTo(lifecycleConfig)
+          logs.foreach(_.updateLifecycleConfig(effective))
+          Right(())
+        catch case error: Throwable => Left(Option(error.getMessage).getOrElse(error.getClass.getSimpleName))
+  }
 
   def validateTopicName(name: String): Boolean = validTopicName(name)
 
@@ -130,8 +163,44 @@ final class TopicRegistry(
       flushIntervalMillis,
       flushBytes,
       requestFlush,
-      lifecycleConfig
+      Option(topicPolicies.get(topic)).map(_.applyTo(lifecycleConfig)).getOrElse(lifecycleConfig)
     )
+
+  private def loadTopicPolicies(): Unit =
+    if Files.exists(policyPath) then
+      val parsed = Files.readAllLines(policyPath, StandardCharsets.UTF_8).asScala.iterator.zipWithIndex.flatMap { case (raw, index) =>
+        val line = raw.trim
+        if line.isEmpty || line.startsWith("#") then None
+        else
+          val fields = line.split("\\s+", -1)
+          if fields.length != 4 || !validTopicName(fields(0)) then
+            throw IllegalArgumentException(s"invalid topic lifecycle policy at ${policyPath.getFileName}:${index + 1}")
+          Some(fields(0) -> TopicLifecyclePolicy(CleanupPolicy.parse(fields(1)), fields(2).toLong, fields(3).toLong))
+      }.toVector
+      if parsed.map(_._1).distinct.size != parsed.size then throw IllegalArgumentException("duplicate topic lifecycle policy")
+      parsed.foreach { case (topic, policy) => topicPolicies.put(topic, policy): Unit }
+
+  private def persistTopicPolicies(policies: Map[String, TopicLifecyclePolicy]): Unit =
+    val parent = policyPath.getParent
+    Files.createDirectories(parent)
+    val temporary = Files.createTempFile(parent, policyPath.getFileName.toString + ".", ".tmp")
+    try
+      val content = policies.toVector.sortBy(_._1).map { case (topic, policy) =>
+        s"$topic ${cleanupPolicyName(policy.cleanupPolicy)} ${policy.retentionMillis} ${policy.retentionBytes}"
+      }.mkString("", System.lineSeparator(), System.lineSeparator())
+      val channel = FileChannel.open(temporary, WRITE, TRUNCATE_EXISTING)
+      try
+        val bytes = ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8))
+        while bytes.hasRemaining do channel.write(bytes): Unit
+        channel.force(true)
+      finally channel.close()
+      AtomicFileLifecycle.replace(temporary, policyPath)
+    finally Files.deleteIfExists(temporary): Unit
+
+  private def cleanupPolicyName(policy: CleanupPolicy): String = policy match
+    case CleanupPolicy.Delete        => "delete"
+    case CleanupPolicy.Compact       => "compact"
+    case CleanupPolicy.CompactDelete => "compact,delete"
 
   private def startPeriodicFlusher(): Unit =
     flusher.foreach { executor =>

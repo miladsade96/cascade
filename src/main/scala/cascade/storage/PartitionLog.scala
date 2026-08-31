@@ -100,6 +100,7 @@ final class PartitionLog(
   private var reclaimedBytes = 0L
   private var compactedBatches = 0L
   private var rejectedAppends = 0L
+  private var currentLifecycleConfig = lifecycleConfig
 
   def highWatermark: Long = synchronized(committedOffset)
 
@@ -107,6 +108,10 @@ final class PartitionLog(
 
   def logStartOffset: Long = synchronized {
     segments.iterator.flatMap(_.index.headOption).map(_.baseOffset).nextOption().getOrElse(nextOffset)
+  }
+
+  private[storage] def updateLifecycleConfig(config: StorageLifecycleConfig): Unit = synchronized {
+    currentLifecycleConfig = config
   }
 
   def append(recordSet: Array[Byte]): AppendResult = appendInternal(recordSet, commitImmediately = true)
@@ -339,6 +344,7 @@ final class PartitionLog(
   }
 
   private[storage] def runLifecycle(nowMillis: Long = System.currentTimeMillis()): LifecycleStatistics = synchronized {
+    val lifecycleConfig = currentLifecycleConfig
     lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
     if lifecycleConfig.cleanupPolicy.compactEnabled then compactClosedSegments()
     if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
@@ -451,8 +457,8 @@ final class PartitionLog(
     unflushedBytes = Math.addExact(unflushedBytes, bytes.toLong)
 
   private def ensureDiskCapacity(incomingBytes: Int): Unit =
-    if lifecycleConfig.minimumFreeBytes > 0L then
-      val required = Math.addExact(lifecycleConfig.minimumFreeBytes, incomingBytes.toLong)
+    if currentLifecycleConfig.minimumFreeBytes > 0L then
+      val required = Math.addExact(currentLifecycleConfig.minimumFreeBytes, incomingBytes.toLong)
       val available = usableSpace.fold(Files.getFileStore(directory).getUsableSpace)(value => value())
       if available < required then
         rejectedAppends = Math.addExact(rejectedAppends, 1L)

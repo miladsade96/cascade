@@ -29,6 +29,21 @@ final case class StorageLifecycleConfig(
   require(offsetRetentionMillis == -1L || offsetRetentionMillis > 0L, "offset retention must be -1 or positive")
   require(journalCompactionBytes >= 1024L, "journal compaction threshold must be at least 1 KiB")
 
+final case class TopicLifecyclePolicy(
+    cleanupPolicy: CleanupPolicy,
+    retentionMillis: Long,
+    retentionBytes: Long
+):
+  require(retentionMillis == -1L || retentionMillis > 0L, "topic retention time must be -1 or positive")
+  require(retentionBytes == -1L || retentionBytes > 0L, "topic retention bytes must be -1 or positive")
+
+  def applyTo(defaults: StorageLifecycleConfig): StorageLifecycleConfig =
+    defaults.copy(cleanupPolicy = cleanupPolicy, retentionMillis = retentionMillis, retentionBytes = retentionBytes)
+
+object TopicLifecyclePolicy:
+  def from(config: StorageLifecycleConfig): TopicLifecyclePolicy =
+    TopicLifecyclePolicy(config.cleanupPolicy, config.retentionMillis, config.retentionBytes)
+
 final case class LifecycleStatistics(
     runs: Long,
     retiredSegments: Long,
