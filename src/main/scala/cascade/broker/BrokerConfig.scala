@@ -108,6 +108,10 @@ object BrokerConfig:
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(offsetRetentionMillis = value.toLong)))
       case "--journal-compaction-bytes" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(journalCompactionBytes = value.toLong)))
+      case "--delete-retention-ms" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(deleteRetentionMillis = value.toLong)))
+      case "--compaction-max-bytes-per-second" :: value :: tail =>
+        loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(compactionMaxBytesPerSecond = value.toLong)))
       case "--security-protocol" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(protocol = SecurityProtocol.parse(value))))
       case "--ssl-keystore" :: value :: tail =>
