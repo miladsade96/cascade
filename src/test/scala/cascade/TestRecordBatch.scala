@@ -1,6 +1,8 @@
 package cascade
 
 import java.nio.{ByteBuffer, ByteOrder}
+import java.io.ByteArrayOutputStream
+import java.util.zip.{CRC32C, GZIPOutputStream}
 
 object TestRecordBatch:
   final case class Record(key: Option[Array[Byte]], value: Option[Array[Byte]], timestamp: Long)
@@ -73,6 +75,23 @@ object TestRecordBatch:
     buffer.putInt(records.size)
     buffer.put(encoded)
     buffer.array()
+
+  def gzipKeyed(records: Vector[Record], baseOffset: Long = 0L): Array[Byte] =
+    val plain = keyed(records, baseOffset)
+    val compressed = ByteArrayOutputStream()
+    val gzip = GZIPOutputStream(compressed)
+    try gzip.write(plain, 61, plain.length - 61)
+    finally gzip.close()
+    val payload = compressed.toByteArray
+    val batch = java.util.Arrays.copyOf(plain, 61 + payload.length)
+    System.arraycopy(payload, 0, batch, 61, payload.length)
+    val buffer = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
+    buffer.putInt(8, batch.length - 12)
+    buffer.putShort(21, (buffer.getShort(21) | 1).toShort)
+    val crc = CRC32C()
+    crc.update(batch, 21, batch.length - 21)
+    buffer.putInt(17, crc.getValue.toInt)
+    batch
 
   private def encodeNullableBytes(value: Option[Array[Byte]]): Vector[Byte] =
     value match
