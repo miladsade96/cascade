@@ -38,17 +38,19 @@ private[group] final case class StoredGroup(
 private[group] final case class GroupImage(
     version: Long,
     groups: Vector[StoredGroup],
-    offsets: Vector[OffsetCommitValue]
+    offsets: Vector[OffsetCommitValue],
+    consumerGroups: Vector[StoredConsumerGroup] = Vector.empty
 )
 
 private[group] object GroupImage:
-  val Empty: GroupImage = GroupImage(0L, Vector.empty, Vector.empty)
+  val Empty: GroupImage = GroupImage(0L, Vector.empty, Vector.empty, Vector.empty)
 
 private[group] object GroupCodec:
-  private val FormatVersion: Short = 1
+  private val FormatVersion: Short = 2
 
   def encode(image: GroupImage): Array[Byte] =
-    val writer = ByteWriter().writeShort(FormatVersion).writeLong(image.version)
+    val format: Short = if image.consumerGroups.isEmpty then 1 else FormatVersion
+    val writer = ByteWriter().writeShort(format).writeLong(image.version)
     writer.writeArray(image.groups) { group =>
       writer.writeString(group.groupId)
       writer.writeByte(group.status.id)
@@ -83,12 +85,30 @@ private[group] object GroupCodec:
       writer.writeNullableString(entry.value.metadata)
       writer.writeLong(entry.value.committedAtMillis): Unit
     }
+    if format >= 2 then
+      writer.writeArray(image.consumerGroups) { group =>
+        writer.writeString(group.groupId).writeInt(group.groupEpoch)
+        writer.writeArray(group.members) { member =>
+          writer.writeString(member.memberId)
+          writer.writeNullableString(member.instanceId)
+          writer.writeNullableString(member.rackId)
+          writer.writeInt(member.rebalanceTimeoutMillis)
+          writer.writeArray(member.subscriptions)(writer.writeString)
+          writer.writeString(member.serverAssignor)
+          writer.writeInt(member.memberEpoch)
+          writer.writeLong(member.lastHeartbeatMillis)
+          writer.writeArray(member.assignment) { topic =>
+            writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
+            writer.writeArray(topic.partitions)(writer.writeInt): Unit
+          }: Unit
+        }: Unit
+      }
     writer.result()
 
   def decode(bytes: Array[Byte]): GroupImage =
     val cursor = ByteCursor(bytes)
     val format = cursor.readShort()
-    if format != FormatVersion then throw ProtocolException(s"unsupported group-state format: $format")
+    if format < 1 || format > FormatVersion then throw ProtocolException(s"unsupported group-state format: $format")
     val version = cursor.readLong()
     val groups = cursor.readArray {
       val groupId = cursor.readString()
@@ -130,5 +150,28 @@ private[group] object GroupCodec:
       val value = CommittedOffset(cursor.readLong(), cursor.readInt(), cursor.readNullableString(), cursor.readLong())
       OffsetCommitValue(key, value)
     }
+    val consumerGroups =
+      if format >= 2 then cursor.readArray {
+        val groupId = cursor.readString()
+        val groupEpoch = cursor.readInt()
+        val members = cursor.readArray {
+          StoredConsumerMember(
+            cursor.readString(),
+            cursor.readNullableString(),
+            cursor.readNullableString(),
+            cursor.readInt(),
+            cursor.readArray(cursor.readString()),
+            cursor.readString(),
+            cursor.readInt(),
+            cursor.readLong(),
+            cursor.readArray {
+              val (high, low) = cursor.readUuid()
+              ConsumerTopicPartitions(ConsumerTopicId(high, low), cursor.readArray(cursor.readInt()))
+            }
+          )
+        }
+        StoredConsumerGroup(groupId, groupEpoch, members)
+      }
+      else Vector.empty
     cursor.ensureFullyRead()
-    GroupImage(version, groups, offsets)
+    GroupImage(version, groups, offsets, consumerGroups)
