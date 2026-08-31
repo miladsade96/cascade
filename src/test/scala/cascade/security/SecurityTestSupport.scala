@@ -1,6 +1,8 @@
 package cascade.security
 
+import java.security.KeyStore
 import java.nio.file.{Files, Path}
+import java.util.Arrays
 
 object SecurityTestSupport:
   val StorePassword = "cascade-test-password"
@@ -87,6 +89,31 @@ object SecurityTestSupport:
       trustStore,
       nodeIds.map(nodeId => nodeId -> s"CN=broker-$nodeId,OU=Test,O=Cascade").toMap
     )
+
+  def combineTrustStores(directory: Path, name: String, sources: Vector[Path]): Path =
+    require(sources.nonEmpty, "at least one trust store is required")
+    val password = StorePassword.toCharArray
+    val combined = KeyStore.getInstance("PKCS12")
+    try
+      combined.load(null, password)
+      sources.zipWithIndex.foreach { case (source, index) =>
+        val inputStore = KeyStore.getInstance("PKCS12")
+        val input = Files.newInputStream(source)
+        try inputStore.load(input, password)
+        finally input.close()
+        val aliases = inputStore.aliases()
+        while aliases.hasMoreElements do
+          val alias = aliases.nextElement()
+          Option(inputStore.getCertificate(alias)).foreach { certificate =>
+            combined.setCertificateEntry(s"source-$index-$alias", certificate)
+          }
+      }
+      val path = directory.resolve(name)
+      val output = Files.newOutputStream(path)
+      try combined.store(output, password)
+      finally output.close()
+      path
+    finally Arrays.fill(password, '\u0000')
 
   def deleteTree(root: Path): Unit =
     if Files.exists(root) then
