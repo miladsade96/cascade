@@ -4,6 +4,8 @@ import cascade.protocol.ProtocolException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.util.zip.{CRC32C, GZIPInputStream, GZIPOutputStream}
 
 final case class PreparedBatch(baseOffset: Long, lastOffset: Long, bytes: Array[Byte])
 final case class RecordBatchMetadata(
@@ -21,9 +23,11 @@ final case class RecordBatchMetadata(
 )
 
 final case class IndexedRecord(offset: Long, timestamp: Long, key: Option[Vector[Byte]], tombstone: Boolean)
+private final case class EncodedRecord(indexed: IndexedRecord, bytes: Array[Byte])
 
 object RecordBatch:
   private val MinimumSize = 61
+  private val MaximumDecodedBatchBytes = 128 * 1024 * 1024
 
   /** Splits a Kafka record set, validates batch envelopes, and assigns broker offsets. */
   def prepare(recordSet: Array[Byte], firstOffset: Long): Vector[PreparedBatch] =
@@ -87,53 +91,114 @@ object RecordBatch:
       compressionType = attributes & 0x07
     )
 
-  /** Decodes keys from an uncompressed magic-v2 batch; compressed or malformed batches stay opaque. */
+  /** Decodes keys from uncompressed and gzip magic-v2 batches; unsupported codecs stay opaque. */
   def indexedRecords(bytes: Array[Byte]): Option[Vector[IndexedRecord]] =
     try
       val metadata = RecordBatch.metadata(bytes)
-      if metadata.compressionType != 0 then None
-      else
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-        buffer.position(MinimumSize)
-        val baseTimestamp = buffer.getLong(27)
-        val records = Vector.newBuilder[IndexedRecord]
-        var count = 0
-        while count < metadata.recordCount do
-          val recordLength = readVarInt(buffer)
-          if recordLength < 0 || recordLength > buffer.remaining() then
-            throw ProtocolException(s"invalid record length: $recordLength")
-          val recordEnd = Math.addExact(buffer.position(), recordLength)
-          buffer.get()
-          val timestampDelta = readVarLong(buffer)
-          val offsetDelta = readVarInt(buffer)
-          if offsetDelta < 0 then throw ProtocolException(s"negative record offset delta: $offsetDelta")
-          val key = readNullableBytes(buffer)
-          val value = readNullableBytes(buffer)
-          val headers = readVarInt(buffer)
-          if headers < 0 then throw ProtocolException(s"negative record header count: $headers")
-          var header = 0
-          while header < headers do
-            val headerKeyLength = readVarInt(buffer)
-            if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
-              throw ProtocolException(s"invalid record header key length: $headerKeyLength")
-            buffer.position(buffer.position() + headerKeyLength)
-            readNullableBytes(buffer)
-            header += 1
-          if buffer.position() != recordEnd then throw ProtocolException("record length does not match its contents")
-          records += IndexedRecord(
-            Math.addExact(metadata.baseOffset, offsetDelta.toLong),
-            Math.addExact(baseTimestamp, timestampDelta),
-            key,
-            value.isEmpty
-          )
-          count += 1
-        if buffer.hasRemaining then throw ProtocolException("record batch contains trailing bytes")
-        Some(records.result())
+      decodedRecords(bytes, metadata).map(_.map(_.indexed))
     catch case _: Throwable => None
+
+  /** Returns a rewritten batch, the original batch, or None when every compactable record is obsolete. */
+  def compact(
+      bytes: Array[Byte],
+      latestOffsets: Map[Vector[Byte], Long],
+      deleteTombstonesBeforeMillis: Long
+  ): Option[Array[Byte]] =
+    try
+      val metadata = RecordBatch.metadata(bytes)
+      if metadata.transactional || metadata.control then Some(bytes)
+      else decodedRecords(bytes, metadata) match
+        case None => Some(bytes)
+        case Some(records) =>
+          val retained = records.filter { record =>
+            record.indexed.key match
+              case None => true
+              case Some(key) =>
+                latestOffsets.get(key).contains(record.indexed.offset) &&
+                  (!record.indexed.tombstone || record.indexed.timestamp >= deleteTombstonesBeforeMillis)
+          }
+          if retained.size == records.size then Some(bytes)
+          else if retained.isEmpty then None
+          else Some(rebuild(bytes, metadata, retained))
+    catch case _: Throwable => Some(bytes)
 
   def totalSize(prefix: Array[Byte]): Int =
     if prefix.length < 12 then throw ProtocolException("record batch prefix is too short")
     Math.addExact(ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN).getInt(8), 12)
+
+  private def decodedRecords(bytes: Array[Byte], metadata: RecordBatchMetadata): Option[Vector[EncodedRecord]] =
+    val payload = Arrays.copyOfRange(bytes, MinimumSize, bytes.length)
+    val decoded = metadata.compressionType match
+      case 0 => payload
+      case 1 => gunzip(payload)
+      case _ => return None
+    val buffer = ByteBuffer.wrap(decoded).order(ByteOrder.BIG_ENDIAN)
+    val baseTimestamp = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(27)
+    val records = Vector.newBuilder[EncodedRecord]
+    var count = 0
+    while count < metadata.recordCount do
+      val recordStart = buffer.position()
+      val recordLength = readVarInt(buffer)
+      if recordLength < 0 || recordLength > buffer.remaining() then
+        throw ProtocolException(s"invalid record length: $recordLength")
+      val recordEnd = Math.addExact(buffer.position(), recordLength)
+      buffer.get()
+      val timestampDelta = readVarLong(buffer)
+      val offsetDelta = readVarInt(buffer)
+      if offsetDelta < 0 then throw ProtocolException(s"negative record offset delta: $offsetDelta")
+      val key = readNullableBytes(buffer)
+      val value = readNullableBytes(buffer)
+      val headers = readVarInt(buffer)
+      if headers < 0 then throw ProtocolException(s"negative record header count: $headers")
+      var header = 0
+      while header < headers do
+        val headerKeyLength = readVarInt(buffer)
+        if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
+          throw ProtocolException(s"invalid record header key length: $headerKeyLength")
+        buffer.position(buffer.position() + headerKeyLength)
+        readNullableBytes(buffer)
+        header += 1
+      if buffer.position() != recordEnd then throw ProtocolException("record length does not match its contents")
+      records += EncodedRecord(
+        IndexedRecord(
+          Math.addExact(metadata.baseOffset, offsetDelta.toLong),
+          Math.addExact(baseTimestamp, timestampDelta),
+          key,
+          value.isEmpty
+        ),
+        Arrays.copyOfRange(decoded, recordStart, recordEnd)
+      )
+      count += 1
+    if buffer.hasRemaining then throw ProtocolException("record batch contains trailing bytes")
+    Some(records.result())
+
+  private def rebuild(original: Array[Byte], metadata: RecordBatchMetadata, records: Vector[EncodedRecord]): Array[Byte] =
+    val plain = records.iterator.flatMap(_.bytes).toArray
+    val payload = if metadata.compressionType == 1 then gzip(plain) else plain
+    val rebuilt = Arrays.copyOf(original, MinimumSize + payload.length)
+    System.arraycopy(payload, 0, rebuilt, MinimumSize, payload.length)
+    val buffer = ByteBuffer.wrap(rebuilt).order(ByteOrder.BIG_ENDIAN)
+    buffer.putInt(8, rebuilt.length - 12)
+    buffer.putInt(57, records.size)
+    val crc = CRC32C()
+    crc.update(rebuilt, 21, rebuilt.length - 21)
+    buffer.putInt(17, crc.getValue.toInt)
+    rebuilt
+
+  private def gunzip(value: Array[Byte]): Array[Byte] =
+    val input = GZIPInputStream(ByteArrayInputStream(value))
+    try
+      val decoded = input.readNBytes(MaximumDecodedBatchBytes + 1)
+      if decoded.length > MaximumDecodedBatchBytes then throw ProtocolException("decompressed record batch exceeds 128 MiB")
+      decoded
+    finally input.close()
+
+  private def gzip(value: Array[Byte]): Array[Byte] =
+    val output = ByteArrayOutputStream()
+    val gzip = GZIPOutputStream(output)
+    try gzip.write(value)
+    finally gzip.close()
+    output.toByteArray
 
   private def readNullableBytes(buffer: ByteBuffer): Option[Vector[Byte]] =
     val length = readVarInt(buffer)
