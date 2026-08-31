@@ -57,6 +57,20 @@ class BrokerHealthSuite extends munit.FunSuite:
     assertEquals(health.failedChecks.map(_.name), Vector("credential_policy"))
   }
 
+  test("keeps serving the last valid context while a bad TLS rotation fails readiness") {
+    val health = BrokerHealth.evaluate(
+      snapshot(),
+      HealthPolicy(Long.MaxValue, 0L),
+      structuredLogFailure = None,
+      tlsMaterialFailure = Some("invalid replacement key store")
+    )
+
+    assert(health.live)
+    assert(!health.ready)
+    assertEquals(health.failedChecks.map(_.name), Vector("tls_material"))
+    assertEquals(health.failedChecks.head.detail, "invalid replacement key store")
+  }
+
   private def snapshot(
       running: Boolean = true,
       brokerFenced: Boolean = false,
