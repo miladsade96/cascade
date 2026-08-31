@@ -1,0 +1,146 @@
+# Container deployment
+
+I publish Cascade as `miladsade96/cascade` and keep the image contract deliberately small: the entry point is the broker, every broker option remains a normal command argument, `/var/lib/cascade` is the persistent data root, port 9092 is the Kafka listener, and port 9404 is reserved for operations.
+
+## Image design
+
+I build the application and its Scala runtime dependencies in a JDK 21 stage, create a module-limited Java runtime with `jlink`, and copy only that runtime plus three application/runtime jars into a distroless Debian image. The final image:
+
+- runs as numeric UID and GID 65532 rather than root;
+- has no shell or package manager;
+- starts the JVM directly so SIGTERM reaches Cascade's shutdown hook;
+- uses cgroup-aware JVM percentage limits and exits on an out-of-memory error;
+- includes an internal Java readiness probe against `/ready`;
+- declares `/var/lib/cascade` as the durable volume;
+- carries OCI source, version, revision, creation-time, and license labels; and
+- is built for `linux/amd64` and `linux/arm64` with SBOM and provenance attestations in the release workflow.
+
+The default operations listener stays on `127.0.0.1` inside the container. Docker can therefore evaluate readiness without exposing an unauthenticated HTTP endpoint. When I need remote metrics, I bind operations explicitly to `0.0.0.0`, mount a token file, set `CASCADE_HEALTHCHECK_TOKEN_FILE` to the same file, and put TLS or mTLS in front of port 9404.
+
+## Pull and run one broker
+
+```bash
+docker pull miladsade96/cascade:latest
+docker volume create cascade-data
+docker run --detach \
+  --name cascade \
+  --init \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1777,nosuid,nodev,noexec \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --ulimit nofile=100000:100000 \
+  --memory 4g \
+  --publish 9092:9092 \
+  --mount type=volume,source=cascade-data,target=/var/lib/cascade \
+  miladsade96/cascade:latest \
+  --host 0.0.0.0 \
+  --port 9092 \
+  --advertised-host localhost \
+  --advertised-port 9092 \
+  --data-dir /var/lib/cascade \
+  --operations-port 9404
+```
+
+I wait for `docker inspect --format '{{.State.Health.Status}}' cascade` to report `healthy`, then connect a Kafka client to `localhost:9092`. I replace `localhost` with a DNS name or address reachable by every client in a remote deployment. The advertised address is client-facing; Docker service names belong only in `--cluster-nodes`.
+
+I stop with enough time for dirty segments and journals to be forced:
+
+```bash
+docker stop --timeout 120 cascade
+docker rm cascade
+```
+
+Removing the container does not remove `cascade-data`. I delete that named volume only when I intentionally want to destroy the broker's durable state.
+
+## Docker Compose
+
+For one development broker I use:
+
+```bash
+docker compose up --build --detach
+docker compose ps
+docker compose logs --follow broker
+```
+
+`compose.yaml` builds `cascade:local`, publishes port 9092, enables the internal health check, drops Linux capabilities, uses a read-only root filesystem, and persists data in `cascade-data`. `docker compose down` performs a graceful stop and preserves the volume.
+
+For a three-broker development cluster I use:
+
+```bash
+docker compose -f compose.cluster.yaml up --build --detach
+docker compose -f compose.cluster.yaml ps
+```
+
+The brokers are available to host clients at `localhost:19092`, `localhost:19093`, and `localhost:19094`. The three development processes share one Docker network namespace so those same localhost endpoints work for peer discovery and for clients outside Docker, while their processes and named data volumes remain separate. The file assigns a replication factor of three and requires two in-sync replicas. This is a local qualification topology, not a substitute for a production orchestrator, separate network and machine failure domains, TLS, resource reservations, or durable storage classes.
+
+On Linux, a bind-mounted data directory must be writable by UID 65532. I prefer a named volume unless I have already provisioned and permissioned the host directory. I also size the container memory above the expected heap plus direct buffers, thread stacks, native TLS state, and page cache; `MaxRAMPercentage` governs only the JVM heap.
+
+## Authenticated remote operations
+
+I create the token outside the image, restrict its permissions, and mount it read-only. I then add these environment and broker settings to my deployment:
+
+```yaml
+ports:
+  - "9404:9404"
+environment:
+  CASCADE_HEALTHCHECK_TOKEN_FILE: /run/secrets/operations-token
+volumes:
+  - ./secrets/operations.token:/run/secrets/operations-token:ro
+command:
+  - --host
+  - 0.0.0.0
+  - --port
+  - "9092"
+  - --advertised-host
+  - broker.example.com
+  - --data-dir
+  - /var/lib/cascade
+  - --operations-host
+  - 0.0.0.0
+  - --operations-port
+  - "9404"
+  - --operations-token-file
+  - /run/secrets/operations-token
+```
+
+The built-in operations transport is HTTP. I never publish port 9404 beyond a protected network without a TLS/mTLS reverse proxy or service mesh.
+
+## Build and qualify locally
+
+```bash
+docker build --check .
+docker build --tag cascade:local .
+docker compose up --detach
+./sbt "Test/runMain cascade.e2e.ExternalBrokerSmokeTest localhost:9092"
+docker compose down
+```
+
+The smoke test uses the official Kafka Java client to discover the broker, initialize a non-transactional idempotent producer, produce 25 exact records with `acks=all`, consume them from the beginning, and compare every key and value. My GitHub workflow restarts the container and verifies the same records from the persistent volume, and it runs the complete Scala suite before it is allowed to publish an image.
+
+On 2026-08-30 I built both `linux/amd64` and `linux/arm64` targets and scanned the final local amd64 image with Docker Scout. It indexed 15 packages and reported zero critical, high, medium, or low vulnerabilities. That is a point-in-time result, so I scan every release again instead of treating it as a permanent property of the base image.
+
+## Publish to Docker Hub
+
+For a manual release I authenticate with a scoped Docker Hub access token and never put that token in the repository or command history:
+
+```bash
+docker login --username YOUR_DOCKERHUB_USERNAME
+docker buildx create --name cascade-release --driver docker-container --use
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg VERSION=1.0.0 \
+  --build-arg REVISION=GIT_COMMIT_SHA \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.0.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:latest \
+  --provenance=mode=max \
+  --sbom=true \
+  --push \
+  .
+docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.0.0
+```
+
+The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes build and smoke-test without publishing. A `v*` tag publishes semantic-version, Git-SHA, and `latest` tags; a manual workflow run publishes `manual` and Git-SHA tags. The release job does not run unless the complete test and container smoke jobs pass.
+
+I treat image tags as release pointers, not backups. I deploy immutable image digests, retain the matching source tag and provenance, scan the resulting SBOM, and practice restoring the broker data volume independently of the image.
