@@ -29,3 +29,11 @@ final class RequestQuotaSuite extends FunSuite:
     assertEquals(quota.evaluate("alice", Int.MaxValue), QuotaDecision.Allowed)
     assertEquals(quota.snapshot.principals, 0)
   }
+
+  test("bounds egress backpressure without rejecting an acknowledged response") {
+    val quota = RequestQuota(1000L, 1L, 25L, () => 0L)
+    assertEquals(quota.evaluate("alice", 1000, rejectExcess = false), QuotaDecision.Throttle(25L))
+    assertEquals(quota.snapshot.throttled, 1L)
+    assertEquals(quota.snapshot.rejected, 0L)
+    assertEquals(quota.snapshot.throttleMillis, 25L)
+  }

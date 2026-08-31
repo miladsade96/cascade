@@ -188,6 +188,18 @@ object BrokerConfig:
         loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(requestBytesPerSecond = value.toLong))))
       case "--request-burst-bytes" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(requestBurstBytes = value.toLong))))
+      case "--response-bytes-per-second" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(responseBytesPerSecond = value.toLong))))
+      case "--response-burst-bytes" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(responseBurstBytes = value.toLong))))
+      case "--produce-bytes-per-second" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(produceBytesPerSecond = value.toLong))))
+      case "--produce-burst-bytes" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(produceBurstBytes = value.toLong))))
+      case "--fetch-bytes-per-second" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(fetchBytesPerSecond = value.toLong))))
+      case "--fetch-burst-bytes" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(fetchBurstBytes = value.toLong))))
       case "--max-throttle-ms" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(resources = config.security.resources.copy(maxThrottleMillis = value.toLong))))
       case "--operations-host" :: value :: tail =>

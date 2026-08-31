@@ -178,6 +178,12 @@ final case class ResourceLimits(
     maxInFlightRequests: Int = 10000,
     requestBytesPerSecond: Long = 0L,
     requestBurstBytes: Long = 0L,
+    responseBytesPerSecond: Long = 0L,
+    responseBurstBytes: Long = 0L,
+    produceBytesPerSecond: Long = 0L,
+    produceBurstBytes: Long = 0L,
+    fetchBytesPerSecond: Long = 0L,
+    fetchBurstBytes: Long = 0L,
     maxThrottleMillis: Long = 1000L
 ):
   require(maxConnections > 0, "maximum connections must be positive")
@@ -185,7 +191,17 @@ final case class ResourceLimits(
   require(maxInFlightRequests > 0, "maximum in-flight requests must be positive")
   require(requestBytesPerSecond >= 0L, "request quota cannot be negative")
   require(requestBurstBytes >= 0L, "request quota burst cannot be negative")
+  require(responseBytesPerSecond >= 0L, "response quota cannot be negative")
+  require(responseBurstBytes >= 0L, "response quota burst cannot be negative")
+  require(produceBytesPerSecond >= 0L, "produce quota cannot be negative")
+  require(produceBurstBytes >= 0L, "produce quota burst cannot be negative")
+  require(fetchBytesPerSecond >= 0L, "fetch quota cannot be negative")
+  require(fetchBurstBytes >= 0L, "fetch quota burst cannot be negative")
   require(maxThrottleMillis >= 0L, "maximum throttle cannot be negative")
+  require(
+    maxThrottleMillis > 0L || responseBytesPerSecond == 0L && fetchBytesPerSecond == 0L,
+    "egress quotas require a positive maximum throttle"
+  )
 
 final case class BrokerSecurityConfig(
     protocol: SecurityProtocol = SecurityProtocol.Plaintext,

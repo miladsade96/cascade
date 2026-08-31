@@ -168,6 +168,12 @@ final class BrokerConfigSuite extends FunSuite:
           "--max-inflight-requests", "250",
           "--request-bytes-per-second", "1048576",
           "--request-burst-bytes", "2097152",
+          "--response-bytes-per-second", "3145728",
+          "--response-burst-bytes", "4194304",
+          "--produce-bytes-per-second", "5242880",
+          "--produce-burst-bytes", "6291456",
+          "--fetch-bytes-per-second", "7340032",
+          "--fetch-burst-bytes", "8388608",
           "--max-throttle-ms", "750"
         )
       )
@@ -198,6 +204,12 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
       assertEquals(config.security.resources.maxConnections, 500)
       assertEquals(config.security.resources.requestBytesPerSecond, 1_048_576L)
+      assertEquals(config.security.resources.responseBytesPerSecond, 3_145_728L)
+      assertEquals(config.security.resources.responseBurstBytes, 4_194_304L)
+      assertEquals(config.security.resources.produceBytesPerSecond, 5_242_880L)
+      assertEquals(config.security.resources.produceBurstBytes, 6_291_456L)
+      assertEquals(config.security.resources.fetchBytesPerSecond, 7_340_032L)
+      assertEquals(config.security.resources.fetchBurstBytes, 8_388_608L)
       assert(!config.security.audit.forceEachEvent)
     finally
       Files.deleteIfExists(password): Unit

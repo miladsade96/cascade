@@ -10,6 +10,9 @@ enum QuotaDecision:
 
 final case class RequestQuotaSnapshot(throttled: Long, rejected: Long, throttleMillis: Long, principals: Int)
 
+object RequestQuotaSnapshot:
+  val Empty: RequestQuotaSnapshot = RequestQuotaSnapshot(0L, 0L, 0L, 0)
+
 final class RequestQuota(
     bytesPerSecond: Long,
     configuredBurstBytes: Long,
@@ -26,11 +29,11 @@ final class RequestQuota(
   private val rejected = AtomicLong(0L)
   private val totalThrottleMillis = AtomicLong(0L)
 
-  def evaluate(principal: String, bytes: Int): QuotaDecision =
+  def evaluate(principal: String, bytes: Int, rejectExcess: Boolean = true): QuotaDecision =
     if bytesPerSecond == 0L || bytes <= 0 then QuotaDecision.Allowed
     else
       val bucket = buckets.computeIfAbsent(principal, _ => TokenBucket(bytesPerSecond, burstBytes, nanoTime))
-      bucket.reserve(bytes.toLong, maxThrottleMillis) match
+      bucket.reserve(bytes.toLong, maxThrottleMillis, rejectExcess) match
         case decision @ QuotaDecision.Throttle(delay) =>
           throttled.incrementAndGet(): Unit
           totalThrottleMillis.addAndGet(delay): Unit
@@ -47,7 +50,7 @@ private final class TokenBucket(rate: Long, burst: Long, nanoTime: () => Long):
   private var tokens = burst.toDouble
   private var lastRefillNanos = nanoTime()
 
-  def reserve(bytes: Long, maxThrottleMillis: Long): QuotaDecision = synchronized {
+  def reserve(bytes: Long, maxThrottleMillis: Long, rejectExcess: Boolean): QuotaDecision = synchronized {
     val now = nanoTime()
     val elapsed = math.max(0L, now - lastRefillNanos)
     tokens = math.min(burst.toDouble, tokens + elapsed.toDouble * rate.toDouble / 1_000_000_000d)
@@ -56,8 +59,8 @@ private final class TokenBucket(rate: Long, burst: Long, nanoTime: () => Long):
     if tokens >= 0d then QuotaDecision.Allowed
     else
       val requiredMillis = math.max(1L, math.ceil((-tokens * 1000d) / rate.toDouble).toLong)
-      if requiredMillis > maxThrottleMillis then
+      if requiredMillis > maxThrottleMillis && rejectExcess then
         tokens += bytes.toDouble
         QuotaDecision.Rejected(requiredMillis)
-      else QuotaDecision.Throttle(requiredMillis)
+      else QuotaDecision.Throttle(math.min(requiredMillis, maxThrottleMillis))
   }
