@@ -6,12 +6,11 @@ import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics}
 import cascade.protocol.ProtocolException
-import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth, TlsContextFactory}
+import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import java.nio.file.Files
-import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.{SSLPeerUnverifiedException, SSLSocket}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
@@ -42,9 +41,8 @@ final class KafkaBroker(
   private val startedAtNanos = AtomicLong(0L)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
-  private val server: ServerSocket =
-    if config.security.protocol.tls then TlsContextFactory.create(config.security.tls).getServerSocketFactory.createServerSocket()
-    else ServerSocket()
+  private val tlsContext = Option.when(config.security.protocol.tls)(ReloadableTlsContext(config.security.tls))
+  private val server = ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val connectionAdmission = ConnectionAdmission(
     config.security.resources.maxConnections,
@@ -92,14 +90,6 @@ final class KafkaBroker(
     if operationalEventsEnabled then
       eventLog.info("broker_starting", brokerFields ++ Map("recovery_mode" -> recoveryMode.toString.toLowerCase))
     server.setReuseAddress(true)
-    server match
-      case tlsServer: SSLServerSocket =>
-        tlsServer.setEnabledProtocols(config.security.tls.enabledProtocols.toArray)
-        config.security.tls.clientAuth match
-          case TlsClientAuth.None      => ()
-          case TlsClientAuth.Requested => tlsServer.setWantClientAuth(true)
-          case TlsClientAuth.Required  => tlsServer.setNeedClientAuth(true)
-      case _ => ()
     server.bind(InetSocketAddress(config.bindHost, config.port))
     val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
     val peers = peerTransportFactory(localNode)
@@ -259,6 +249,7 @@ final class KafkaBroker(
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
       Option(peerClient).foreach(_.close())
+      tlsContext.foreach(_.close())
       Option(deliveryCoordinator).foreach(_.close())
       groupCoordinator.close()
       registry.close()
@@ -270,7 +261,7 @@ final class KafkaBroker(
   private def acceptLoop(): Unit =
     while running.get() do
       try
-        val socket = server.accept()
+        val socket = secureClientSocket(server.accept())
         val remoteAddress = socket.getInetAddress.getHostAddress
         connectionAdmission.tryAcquire(remoteAddress) match
           case None => socket.close()
@@ -361,6 +352,27 @@ final class KafkaBroker(
       authenticationRequired = config.security.protocol.sasl,
       transportPrincipal = transportPrincipal
     )
+
+  private def secureClientSocket(socket: Socket): Socket =
+    tlsContext match
+      case None => socket
+      case Some(reloader) =>
+        try
+          val context = reloader.current.context
+          val secure = context.getSocketFactory
+            .createSocket(socket, socket.getInetAddress.getHostAddress, socket.getPort, true)
+            .asInstanceOf[SSLSocket]
+          secure.setUseClientMode(false)
+          secure.setEnabledProtocols(config.security.tls.enabledProtocols.toArray)
+          config.security.tls.clientAuth match
+            case TlsClientAuth.None      => ()
+            case TlsClientAuth.Requested => secure.setWantClientAuth(true)
+            case TlsClientAuth.Required  => secure.setNeedClientAuth(true)
+          secure
+        catch
+          case error: Throwable =>
+            socket.close()
+            throw error
 
   private def brokerFields: Map[String, String] = Map(
     "node_id" -> config.nodeId.toString,
