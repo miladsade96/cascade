@@ -10,10 +10,10 @@ I built Cascade around the Kafka wire protocol so existing Kafka clients can con
 
 The broker itself only needs Scala and the JDK. I use Apache Kafka's Java client in the test suite as an independent compatibility check; it isn't a runtime dependency.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, crash-safe storage lifecycle management, TLS, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER authentication, signed OAuth/OIDC JWT validation, resource ACLs, security auditing, live TLS/credential/key/policy rotation, hostname-verified mutual TLS and certificate-bound identities between brokers, broker admission controls, Prometheus metrics, health/readiness checks, structured events, Kafka Admin configuration visibility, capacity alerts, and verified offline backup/restore.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, consumer coordination with static-member fencing, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, coordinator failover, online partition reassignment, dynamic broker/voter membership, crash-safe storage lifecycle management with quorum-committed per-topic policy, TLS, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER authentication, RSA/ECDSA/Ed25519 JWT validation and approved claim-to-role mapping, Kafka ACL Admin APIs, security auditing, live TLS/credential/key/policy rotation, hostname-verified mutual TLS and certificate-bound identities between brokers, directional per-principal traffic quotas, Prometheus metrics, health/readiness checks, structured events, Kubernetes deployment and monitoring artifacts, capacity alerts, and verified offline backup/restore.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. I support Kafka-compatible PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER client authentication, including issuer/audience/scope validation and reloadable HTTPS or file JWKS. I have tested OAuth and SCRAM over TLS, live TLS/signing-key/verifier rotation, encrypted RF=3 replication, and quorum failover with Kafka 4.3.1 clients. Physical power/device-loss qualification, rolling-version compatibility, long multi-tenant soak tests, Kafka ACL Admin APIs, and per-topic lifecycle policy are still release blockers.
+> Cascade isn't a production Kafka replacement yet. The automated suite now covers Kafka Java 4.3.1, KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0. The remaining blockers are rolling upgrade/downgrade compatibility, coordinator sharding and high-cardinality qualification, the new consumer protocol, online cluster-consistent snapshots, compressed-record/tombstone compaction, distributed quotas, multi-day multi-tenant soak tests, and physical power/device-loss qualification.
 
 ## Performance I measured
 
@@ -31,6 +31,7 @@ I measured this on my Windows development machine with Java 21, eight partitions
 | 1,000,000 records, storage-lifecycle regression | **423,662 records/s** / **413.7 MiB/s** | **477,368 records/s** / **466.2 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, security/isolation regression | **544,611 records/s** / **531.8 MiB/s** | **291,753 records/s** / **284.9 MiB/s** | **1,000,000 / 1,000,000** |
 | 1,000,000 records, operations/recovery regression | **533,937 records/s** / **521.4 MiB/s** | **263,944 records/s** / **257.8 MiB/s** | **1,000,000 / 1,000,000** |
+| 1,000,000 records, compatibility/release regression | **441,383 records/s** / **431.0 MiB/s** | **489,195 records/s** / **477.7 MiB/s** | **1,000,000 / 1,000,000** |
 
 After I fixed the background-flush path, sustained ten-million-record production went from 57,400 to 182,285 records/s: a **3.18x improvement**. The write phase dropped from 174.2 to 54.9 seconds. That run forced 9.58 GiB in 47.6 cumulative seconds, so the drive was the main limit on this machine.
 
@@ -39,6 +40,8 @@ After the secure-peer milestone, I reran all ten million records on 2026-08-24. 
 After the SCRAM milestone, I ran the same ten-million-record workload on 2026-08-27. Produce finished in 29.955 seconds at 333,835 records/s and consume finished in 28.584 seconds at 349,851 records/s. It verified every record, stored 9.86 GiB, forced 9.45 GiB during production, reached 3,989.008 ms maximum acknowledgement latency, and used 5,387.4 MiB peak heap. This harness still uses the default single-node plaintext listener, so it qualifies exactness and catches inactive-authentication regressions; it does not measure SCRAM, TLS, or replicated-cluster capacity.
 
 After the OAuth/OIDC milestone, I repeated all ten million records on 2026-08-30. Produce finished in 27.145 seconds at 368,387 records/s and consume finished in 28.427 seconds at 351,784 records/s. It verified every record, stored 9.86 GiB, forced 9.48 GiB during production, reached 3,213.600 ms maximum acknowledgement latency, and used 5,391.9 MiB peak heap. This remains a single-node plaintext default-path regression, not an OAuth, TLS, or replicated-cluster capacity measurement.
+
+After closing the multi-language compatibility gate, I ran the one-million regression on 2026-08-31. It produced 441,383 records/s, consumed 489,195 records/s, and verified exactly 1,000,000 / 1,000,000 records. Maximum acknowledgement latency was 741.467 ms, 749.3 MiB was forced in 11 operations during production, and peak heap was 1,702.6 MiB. I use this short cache-assisted run as an exactness and default-path regression check.
 
 The one-million test is much shorter and benefits a lot from the filesystem cache. I don't present either result as production capacity. The [full heavy-load report](docs/performance/2026-08-05-heavy-load.md) includes the machine, workload, latency, CPU, GC, heap, storage, and test method.
 
@@ -55,8 +58,8 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
 | Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
-| Security and isolation | TLS 1.2/1.3, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER, offline password verifiers, signed OAuth/OIDC JWT and JWKS validation, deny-by-default ACLs, JSONL audit events, hostname-verified peer mTLS, certificate-bound node identities, atomic TLS/identity/credential/key/ACL rotation, connection/request caps, principal ingress quotas, and overload shedding |
-| Operations and recovery | Separate health/readiness/status endpoints, Prometheus 0.0.4 metrics, rotating structured events, deduplicated capacity alerts, Kafka `DescribeConfigs` v2, and atomic checksummed offline backup/restore |
+| Security and isolation | TLS 1.2/1.3, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER, offline password verifiers, RSA/EC/Ed25519 JWKS validation, approved role mapping, deny-by-default ACLs and Kafka ACL Admin APIs, JSONL audit events, hostname-verified peer mTLS, atomic secret/policy rotation, connection/request caps, directional principal quotas, and overload shedding |
+| Operations and recovery | Separate health/readiness/status endpoints, Prometheus 0.0.4 metrics, rotating structured events, deduplicated capacity alerts, mutable per-topic Kafka configuration, checksummed offline backup/restore, hardened containers, Kubernetes StatefulSets, NetworkPolicies, disruption budgets, Prometheus rules, and a Grafana dashboard |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
 ## What works now
@@ -69,13 +72,14 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 - Atomic key/trust-store reload for new client handshakes plus generation-aware peer reconnection; bad replacements preserve the last valid context and fail readiness.
 - Internal controller, metadata, replication, and recovery requests can require hostname-verified mutual TLS plus a certificate subject assigned to the claimed node ID.
 - Kafka-framed `SaslHandshake` v1 and `SaslAuthenticate` v1 with PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, and OAUTHBEARER identities scoped to one connection.
-- Global/per-IP connection caps, a bounded global in-flight request gate, and per-principal request-byte token buckets.
+- Global/per-IP connection caps, a bounded global in-flight request gate, and independent per-principal ingress, egress, Produce, and Fetch token buckets with Kafka throttle fields.
 - Correlation IDs preserved in every response.
 - Ordered processing within a connection and Java 21 virtual-thread isolation between connections.
 - Explicitly advertised API keys and versions rather than a broad, unverified compatibility claim.
 - Kafka 4.3.1 Admin, Producer, transactional Producer, explicit Consumer, and subscribed Consumer interoperability tests.
+- External exact-delivery tests for KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0.
 
-Any language can connect if its client speaks one of the supported Kafka protocol versions. For now, my automated end-to-end tests use the Kafka Java client. I still need to add proper client matrices for Python, Go, .NET, and other languages.
+Any language can connect if its client speaks one of the supported Kafka protocol versions. I run the external [client compatibility matrix](compatibility/README.md) independently of the Scala test process and fail CI if any client sees the wrong records, cannot commit offsets, or causes a broker-side protocol error.
 
 ### Storage and durability
 
@@ -96,6 +100,7 @@ Any language can connect if its client speaks one of the supported Kafka protoco
 - Offset expiry is committed through the same local or quorum coordinator checkpoint as ordinary offset changes.
 - Offset, delivery, and cluster-metadata journals compact to their latest checksum-protected image after a configurable byte threshold.
 - A configurable free-space reserve rejects an append before its log end changes and returns Kafka error 56 (`KAFKA_STORAGE_ERROR`).
+- Per-topic cleanup and retention policy is committed through the metadata quorum, changed through `IncrementalAlterConfigs` v0, and restored after controller loss.
 
 Kafka acknowledgements and local disk forcing are separate settings. In single-node periodic mode, `acks=1` and `acks=all` acknowledge a local append before the next scheduled force. A process, OS, or power failure before that force can lose those records. In cluster mode, `acks=all` requires the configured minimum ISR and waits for every current ISR member to append before the committed high watermark advances.
 
@@ -127,6 +132,7 @@ In cluster mode I commit producer registration, fencing epochs, active transacti
 - Transactional offset staging and commit through `TxnOffsetCommit`.
 - Quorum snapshots of group generations, members, assignments, pending identities, and committed offsets.
 - Controller-term ownership, stale-image rejection, and Kafka-client continuation after coordinator failover.
+- Static `group.instance.id` ownership with duplicate-instance fencing across joins and heartbeats.
 
 If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic` for now.
 
@@ -176,8 +182,9 @@ The configured node list bootstraps the first committed voter set and gives obse
 - Prometheus output uses bounded broker-level labels and includes traffic, request duration, connection/admission, quota, flush, lifecycle, disk, and JVM heap measurements.
 - My JSONL operational events rotate by size and include broker lifecycle, protocol/connection failures, storage failures, and capacity alert/resolution events.
 - Capacity checks cover connection and in-flight request utilization, pending flush bytes, and usable disk. I deduplicate an active alert until its repeat interval and emit a resolution when it clears.
-- Kafka Admin can call `describeConfigs` for broker and topic resources. I expose only non-sensitive, read-only effective values because mutation is not implemented yet.
+- Kafka Admin can read broker/topic configuration and atomically alter supported per-topic cleanup and retention values through `IncrementalAlterConfigs` v0.
 - My maintenance commands create, verify, and restore an offline backup with an exact manifest, SHA-256 per file, forced destination files, and atomic publication. The restore refuses an existing target and verifies every copied file before publication.
+- My Kubernetes manifests provide a three-broker StatefulSet topology, headless/client/operations services, pod anti-affinity, a disruption budget, default-deny network policy, secret-backed monitoring authentication, a ServiceMonitor, Prometheus alert rules, and a Grafana dashboard.
 
 I keep the operations listener on loopback unless a protected monitoring network or TLS-terminating proxy is in front of it. A bearer token authenticates a remote listener, but the built-in HTTP listener does not encrypt that token. I keep backups offline because this milestone does not implement a cluster-wide online snapshot barrier. The [operations runbook](docs/operations.md) and [backup/restore runbook](docs/backup-restore.md) contain the deployment and recovery procedure.
 
@@ -307,10 +314,10 @@ I can enable a migration set such as `--sasl-mechanisms PLAIN,SCRAM-SHA-256,SCRA
 
 ### Authenticate with OAuth or OIDC
 
-For service identities, I can require signed JWT access tokens issued by an OAuth 2.0 or OpenID Connect provider. Cascade requires TLS, fetches an explicit JWKS over verified HTTPS (or reads an atomically managed `file:` URI), and validates the RSA signature, `kid`, algorithm allowlist, issuer, audience, expiry, activation time, principal, and required scopes:
+For service identities, I can require signed JWT access tokens issued by an OAuth 2.0 or OpenID Connect provider. Cascade requires TLS, fetches an explicit JWKS over verified HTTPS (or reads an atomically managed `file:` URI), and validates RSA, ECDSA, or Ed25519 signatures, `kid`, algorithm allowlist, issuer, audience, expiry, activation time, principal, required scopes, and optional operator-approved role mappings:
 
 ```powershell
-.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --sasl-mechanisms OAUTHBEARER --oauth-jwks-uri https://identity.example.com/oauth2/keys --oauth-issuer https://identity.example.com --oauth-audience cascade --oauth-required-scopes cascade.read,cascade.write --oauth-allowed-algorithms RS256 --acl-file acls.conf --audit-log security-audit.jsonl"
+.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --sasl-mechanisms OAUTHBEARER --oauth-jwks-uri https://identity.example.com/oauth2/keys --oauth-issuer https://identity.example.com --oauth-audience cascade --oauth-required-scopes cascade.read,cascade.write --oauth-allowed-algorithms RS256,ES256,EdDSA --oauth-role-claim roles --oauth-role-map orders-writer=orders-write,orders-reader=orders-read --acl-file acls.conf --audit-log security-audit.jsonl"
 ```
 
 Kafka 4.3.1 clients can use `OAuthBearerLoginModule` with their provider's token endpoint, built-in JWT retriever, or a custom login callback. Cascade never receives the client secret; it receives only the bearer token inside TLS. A bad JWKS refresh preserves the last valid keys and fails `credential_policy` readiness. My [OAuth and OIDC runbook](docs/oauth-oidc.md) documents the provider contract, Kafka client settings, overlapping key rotation, monitoring, bounds, and current limitations.
@@ -372,8 +379,8 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | Fetch | 1 | 6 | `read_uncommitted`/`read_committed`, high watermark, last stable offset, batch-aligned limits |
 | ListOffsets | 2 | 2 | Isolation-aware earliest (`-2`) and latest (`-1`) offsets |
 | Metadata | 3 | 4 | Broker/topic/partition discovery and optional auto-creation |
-| OffsetCommit | 8 | 7 | Generation validation and durable multi-partition commits |
-| OffsetFetch | 9 | 5 | Requested or all committed group offsets |
+| OffsetCommit | 8 | 5-7 | Generation/static-member validation, leader epochs where present, and durable multi-partition commits |
+| OffsetFetch | 9 | 4-5 | Requested or all committed group offsets with version-correct leader-epoch fields |
 | FindCoordinator | 10 | 2 | Classic group and transaction coordinator discovery |
 | JoinGroup | 11 | 5 | Classic membership, protocol selection, and leader election |
 | Heartbeat | 12 | 3 | Session liveness and generation validation |
@@ -387,8 +394,12 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | AddOffsetsToTxn | 25 | 1 | Consumer-group enrollment in a transaction |
 | EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
 | TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
+| DescribeAcls | 29 | 1 | List exact, prefix, wildcard, allow, and deny ACL bindings |
+| CreateAcls | 30 | 1 | Atomically persist and activate Kafka ACL bindings |
+| DeleteAcls | 31 | 1 | Filter, remove, persist, and report matching ACL bindings |
 | DescribeConfigs | 32 | 2 | Read-only non-sensitive broker and effective topic configuration for Kafka Admin |
 | SaslAuthenticate | 36 | 1 | Kafka-framed PLAIN, multi-step SCRAM, or RFC 7628 OAUTHBEARER exchange and session lifetime |
+| IncrementalAlterConfigs | 44 | 0 | Quorum-commit supported per-topic cleanup and retention changes |
 | AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
 | ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
 | DescribeQuorum | 55 | 0-2 | Metadata leader, epoch, high watermark, voter identities, and endpoints |
@@ -497,6 +508,8 @@ After adding the production container path, I finished a clean **247/247** suite
 
 After adding atomic TLS key/trust-store reload, last-known-good recovery, readiness/events/metrics, and generation-aware peer reconnection, I ran a clean **255/255** suite on 2026-08-31. Real Kafka clients kept established sessions through listener certificate and mutual-trust replacement, fresh clients proved the new material, and stale trust/client certificates were rejected. The RF=3 test moved from the old CA through overlapping trust and three live leaf rotations to the new CA, kept exact `acks=all` traffic moving, then removed the original controller and consumed all 25 committed records from the majority. I did not rerun the ten-million plaintext load harness for this milestone because the new work is active only on TLS connections; the published OAuth-milestone run remains my latest default-path measurement.
 
+After the security, quota, per-topic policy, static-member, fuzz, deployment, and client-matrix work, I ran a clean **290/290** suite on 2026-08-31. I also built the 1.0.0 distroless image, verified its non-root read-only runtime, crossed the container boundary with Java, JavaScript, Python, Go, and .NET clients, found no broker protocol errors, restarted it, and recovered the exact Java smoke records from the same volume. KafkaJS exposed an OffsetCommit v5/OffsetFetch v4 compatibility defect during this gate; the broker now supports both version shapes and the 1.0.0 protocol-contract test prevents an accidental API-range reduction.
+
 ### Reproduce the load test
 
 ```bash
@@ -517,25 +530,27 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current test suite passes **255/255 tests** in four layers:
+The current test suite passes **290/290 tests** in five layers:
 
-- Unit tests for binary codecs, record batches, storage and coordinator recovery, delivery semantics, Kafka's non-transactional idempotence timeout sentinel, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA JWT validation, OAuth claim/time/scope policy, concurrent verification, credential files, peer identity policy, bounded TLS store loading/reload recovery, TLS trust/hostname rejection, security metrics, container health probing, health/readiness, capacity evaluation, structured-log rotation, backup manifests, checksum validation, and maintenance command parsing.
-- TCP integration tests for discovery, Produce/Fetch, idempotence, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, OAUTHBEARER, malformed and oversized authentication exchanges, peer certificate impersonation rejection, live TLS/identity/credential/key/ACL rotation, auditing, admission/quotas, and operational HTTP authentication and state.
-- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, `DescribeConfigs`, SCRAM-SHA-256, SCRAM-SHA-512 and OAUTHBEARER with `SASL_SSL` + ACLs, listener certificate and mutual-trust rotation, live verifier/JWKS rotation, wrong-token denial, encrypted RF=3 peer PKI rotation/replication/quorum failover, consumer groups, reassignment, dynamic voters, transactions, coordinator failover, and exact Kafka-visible data after backup restore.
+- Unit tests for binary codecs, the frozen 1.0.0 API contract, record batches, storage/coordinator recovery, delivery semantics, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA/EC/Ed25519 JWT validation, role mapping, credential and peer policy, TLS reload/rejection, quotas, metrics, health/readiness, capacity evaluation, structured-log rotation, backup integrity, deployment artifacts, and maintenance commands.
+- TCP integration tests for discovery, Produce/Fetch, idempotence, OffsetCommit v5-v7 and OffsetFetch v4-v5, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, OAUTHBEARER, malformed exchanges, peer impersonation rejection, live TLS/identity/credential/key/ACL rotation, auditing, directional quotas, and operational HTTP state.
+- Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, ACL administration, per-topic configuration, static-member fencing, SCRAM and OAUTHBEARER with `SASL_SSL`, listener and peer PKI rotation, encrypted RF=3 failover, consumer groups, reassignment, dynamic voters, transactions, coordinator failover, and exact restored data.
 - Qualification tests that force-kill real broker JVMs, interrupt durable-store shutdown, corrupt persisted tails, partition stable and joint quorums, exercise retention and low-disk rejection, tamper with backup contents, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
+- External process tests for KafkaJS, confluent-kafka Python, franz-go, and Confluent.Kafka .NET, each with exact 25/25 record validation and broker-side protocol-error rejection.
 
-The load harness separately checks the exact record count at one million and ten million records. The container workflow separately builds the image, enforces its non-root metadata, crosses the Docker boundary with a real Kafka client, restarts the broker, and verifies exact recovery from the same named volume.
+The load harness separately checks exact record counts at one million and ten million records. The container workflow builds the image, enforces its non-root metadata, crosses the Docker boundary with real clients, restarts the broker, and verifies exact recovery from the same named volume. CI also renders every Kubernetes resource and parses the Grafana dashboard.
 
 ## What I plan to build next
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Security hardening | Kafka ACL Admin APIs, egress/distributed quotas, claim-to-role policy, broader OAuth key/token formats, and multi-tenant soak tests |
-| 2 | Compatibility | New Kafka consumer protocol, static-member fencing, more API versions, malformed-frame/fuzz testing, multiple client languages, and rolling upgrade/downgrade testing |
-| 3 | Qualification | Physical power loss, disk loss/full/corruption, arbitrary packet delay/reordering, multi-day soak, restore drills, and dedicated-host replicated-cluster benchmarks |
-| 4 | Coordinator scale | Sharded coordinator state with high-cardinality and failover benchmarks |
-| 5 | Storage lifecycle follow-up | Per-topic policies, compressed-batch record compaction, tombstone grace periods, deletion throttles, and replicated retention coordination |
-| 6 | Profile-driven optimization | Zero-copy Fetch with `FileChannel.transferTo`, selector/worker pools, multi-device log placement, and further changes justified by profiling |
+| 1 | Rolling safety | Internal feature negotiation plus automated mixed-version upgrade and downgrade tests |
+| 2 | Coordinator scale | Sharded coordinator state with high-cardinality, churn, and failover benchmarks |
+| 3 | Qualification | Physical power/device loss, disk corruption, arbitrary packet impairment, multi-day multi-tenant soak, restore drills, and dedicated-host RF=3 benchmarks |
+| 4 | Consumer groups | Kafka's new consumer protocol and administrative group APIs |
+| 5 | Storage lifecycle | Compressed-record compaction, tombstone grace periods, deletion throttles, and replicated retention coordination |
+| 6 | Operations/security | Online cluster-consistent snapshots, scheduled backup retention, opaque-token introspection, OIDC discovery, and a built-in or documented external TLS boundary for operations |
+| 7 | Profile-driven optimization | Zero-copy Fetch, selector/worker pools, multi-device log placement, and further changes justified by profiling |
 
 I track the release gates in [docs/production-readiness.md](docs/production-readiness.md). I won't call Cascade a production Kafka replacement until every blocking gate passes on the deployment topology I document.
 
@@ -544,14 +559,12 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - Dynamic membership is implemented and deterministic stable/joint partition tests pass, but automatic broker registration, rolling version negotiation, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
 - Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
 - Coordinator failover uses one full quorum image and one elected writer. The local journals are bounded and offsets expire, but I still need sharding and high-cardinality scale tests before treating it like Kafka's partitioned internal topics.
-- Lifecycle settings are broker-wide. I still need durable per-topic policies and Kafka configuration APIs.
 - Key compaction is deliberately batch-conservative: compressed, keyless, control, transactional, and partially superseded batches stay intact, and tombstone grace-period deletion is not implemented.
-- Client authentication supports PLAIN, SCRAM-SHA-256/512, and signed OAUTHBEARER JWTs with atomic TLS/verifier/JWKS reload. I still need opaque-token introspection, automatic OIDC discovery, EC/EdDSA keys, claim-to-role mapping, and Kafka ACL Admin APIs.
-- ACL files are local operator-managed policy, not the Kafka ACL Admin APIs. Topic data paths return Kafka authorization errors, while some denied control APIs currently close the connection.
-- The current quota measures inbound request bytes per principal. I still need response/egress, produce/fetch-specific, and cluster-wide distributed quotas plus multi-tenant soak qualification.
-- The built-in operations listener is HTTP, so I still require an external TLS/mTLS boundary for non-loopback deployments. I also still need standard dashboards, Alertmanager integration, online cluster-consistent snapshots, scheduled backup retention, and repeated restore drills.
+- Client authentication supports PLAIN, SCRAM-SHA-256/512, and signed OAUTHBEARER JWTs with RSA, EC, and Ed25519 keys plus approved claim-to-role mapping. I still need opaque-token introspection, automatic OIDC discovery, and revocation integration.
+- Directional per-principal quotas are broker-local. I still need cluster-wide distributed quota accounting and long multi-tenant soak qualification.
+- The built-in operations listener is HTTP, so I still require an external TLS/mTLS boundary for non-loopback deployments. Kubernetes monitoring, Prometheus rules, and a Grafana dashboard are present; online cluster-consistent snapshots, scheduled backup retention, and repeated restore drills remain.
 - Only the classic consumer group protocol is supported.
-- The automated client matrix currently uses Kafka Java client 4.3.1.
+- The automated client matrix covers one pinned release each of Java, JavaScript, Python, Go, and .NET; broader version matrices and rolling broker-version tests remain.
 - The performance figures are single-node, shared-JVM development-machine measurements; replicated-cluster capacity has not been benchmarked.
 - The forced-kill harness validates process loss and torn tails, but it does not yet simulate lost devices, disk-full errors, controller-host power loss, or filesystem/controller write reordering.
 
@@ -569,9 +582,9 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--flush-policy` | `periodic` | Batched background forcing or strict per-append `sync` |
 | `--flush-interval-ms` | `1000` | Maximum periodic dirty age |
 | `--flush-bytes` | `67108864` | Per-partition dirty-byte threshold that schedules a force |
-| `--cleanup-policy` | `delete` | Broker-wide `delete`, `compact`, or combined `delete,compact` lifecycle policy |
-| `--retention-ms` | `604800000` | Age limit for closed committed segments; `-1` disables time retention |
-| `--retention-bytes` | `-1` | Per-partition byte budget; `-1` disables size retention |
+| `--cleanup-policy` | `delete` | Default `delete`, `compact`, or combined `delete,compact` lifecycle policy; topic overrides are quorum committed |
+| `--retention-ms` | `604800000` | Default age limit for closed committed segments; `-1` disables time retention |
+| `--retention-bytes` | `-1` | Default per-partition byte budget; `-1` disables size retention |
 | `--lifecycle-interval-ms` | `300000` | Interval between lifecycle maintenance passes |
 | `--minimum-free-bytes` | `0` | Free-space reserve below which Cascade rejects new appends before writing |
 | `--offset-retention-ms` | `604800000` | Age limit for committed consumer offsets; `-1` disables expiry |
@@ -606,8 +619,10 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--oauth-audience` | Empty | Required audience that must occur in JWT `aud` |
 | `--oauth-principal-claim` | `sub` | JWT string claim used as the ACL principal |
 | `--oauth-scope-claim` | `scope` | JWT string or string-array claim containing scopes |
+| `--oauth-role-claim` | Empty | Optional JWT string or string-array claim whose approved values become local roles |
+| `--oauth-role-map` | Empty | Comma-separated `claim-value=local-role` allowlist; required with a role claim |
 | `--oauth-required-scopes` | Empty | Comma-separated scopes every token must contain |
-| `--oauth-allowed-algorithms` | `RS256` | Comma-separated allowlist of `RS256`, `RS384`, and `RS512` |
+| `--oauth-allowed-algorithms` | `RS256` | Comma-separated allowlist of `RS256/384/512`, `ES256/384/512`, and `EdDSA` |
 | `--oauth-clock-skew-seconds` | `30` | JWT time-claim allowance from 0 through 300 seconds |
 | `--oauth-jwks-refresh-ms` | `300000` | Background JWKS refresh interval; zero refreshes on access |
 | `--oauth-http-timeout-ms` | `5000` | HTTPS JWKS connection/request timeout from 100 through 60000 ms |
@@ -624,6 +639,12 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--max-inflight-requests` | `10000` | Global request permits before overload shedding closes a connection |
 | `--request-bytes-per-second` | `0` | Per-principal ingress quota; zero disables quota work |
 | `--request-burst-bytes` | Quota rate | Per-principal token-bucket burst size |
+| `--response-bytes-per-second` | `0` | Per-principal egress quota; zero disables it |
+| `--response-burst-bytes` | Quota rate | Per-principal egress burst size |
+| `--produce-bytes-per-second` | `0` | Additional per-principal Produce ingress quota |
+| `--produce-burst-bytes` | Quota rate | Produce-specific burst size |
+| `--fetch-bytes-per-second` | `0` | Additional per-principal Fetch egress quota |
+| `--fetch-burst-bytes` | Quota rate | Fetch-specific burst size |
 | `--max-throttle-ms` | `1000` | Maximum quota delay; larger required delays shed the request connection |
 | `--operations-host` | `127.0.0.1` | Separate HTTP operations bind host |
 | `--operations-port` | Empty | Enable the operations listener; `0` selects a free test port |
@@ -644,6 +665,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## More documentation
 
 - [Production-readiness gates](docs/production-readiness.md)
+- [External Kafka client compatibility matrix](compatibility/README.md)
 - [Container deployment runbook](docs/containers.md)
 - [TLS key and trust rotation runbook](docs/tls-rotation.md)
 - [OAuth and OIDC authentication runbook](docs/oauth-oidc.md)
