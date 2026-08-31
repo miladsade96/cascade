@@ -1,6 +1,6 @@
 # Backup and restore runbook
 
-I use Cascade's maintenance commands for offline, file-exact disaster-recovery copies. This is not an online snapshot service: the source broker must have completed a clean shutdown, and a rolling set of node backups is not automatically one cluster-wide point in time.
+I use Cascade's maintenance commands for offline, file-exact disaster-recovery copies and the broker write barrier for an online point-in-time local snapshot. A rolling set of node snapshots is not automatically one cluster-wide point in time.
 
 ## What the backup contains
 
@@ -36,7 +36,13 @@ On Linux or macOS:
 
 The command refuses a live or unclean source. After a forced process or host failure I first start Cascade against that directory so it can perform conservative recovery, verify the data through a Kafka client, and stop it cleanly. Only then do I create the backup.
 
-For a cluster-consistent disaster-recovery set I quiesce writes and stop every broker cleanly before backing up every node. A rolling per-node backup can still be useful for local recovery, but it may contain different committed moments and I do not treat it as an atomic cluster snapshot. Online snapshot barriers remain a release follow-up.
+For a cluster-consistent disaster-recovery set I quiesce writes and stop every broker cleanly before backing up every node. A rolling per-node backup can still be useful for local recovery, but it may contain different committed moments and I do not treat it as an atomic cluster snapshot. A cluster-wide barrier and cross-node manifest remain release follow-ups.
+
+## Create an online broker snapshot
+
+The embedded broker API exposes `createOnlineSnapshot(target)`. It takes the broker's exclusive snapshot barrier, waits for admitted requests to finish, pauses lifecycle and background-flush workers, forces every local partition and coordinator file, publishes the checksummed snapshot, and then resumes traffic. The automated test proves the artifact contains every record acknowledged before the barrier and none acknowledged after it.
+
+This barrier is local to one broker. For replication factor three I must collect an artifact from every replica host at the same operational checkpoint and preserve their node identities. Until Cascade has a cluster snapshot coordinator and a manifest spanning those artifacts, I do not call independently triggered node snapshots an atomic cluster backup.
 
 ## Protect and retain backups
 
@@ -71,4 +77,4 @@ For a full-cluster restore I keep the node identities and their corresponding da
 
 I run a restore drill after changing storage formats or maintenance code and on a regular operations schedule. The automated end-to-end test currently produces 100 ordered Kafka records, cleanly stops the broker, creates and verifies a backup, restores it to a new directory, starts with clean recovery, and consumes the exact 100 values. Unit tests also tamper with content, add untracked files, exercise traversal and duplicate paths, and confirm existing-target refusal.
 
-That test proves the implemented format and local recovery path; it does not replace physical power-loss testing, lost-device recovery, encrypted off-host transfer qualification, multi-terabyte restore timing, or a cluster-wide online snapshot. I track those remaining gates in [production-readiness.md](production-readiness.md).
+That test proves the implemented format and local recovery path; the online test also proves one broker's write barrier and exact point-in-time restore. Neither replaces physical power-loss testing, lost-device recovery, encrypted off-host transfer qualification, multi-terabyte restore timing, or a coordinated cluster-wide snapshot. I track those remaining gates in [production-readiness.md](production-readiness.md).
