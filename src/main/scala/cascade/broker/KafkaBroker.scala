@@ -41,7 +41,16 @@ final class KafkaBroker(
   private val startedAtNanos = AtomicLong(0L)
   private val shutdownMarker = ShutdownMarker(config.dataDirectory)
   val recoveryMode: RecoveryMode = shutdownMarker.beginRecovery()
-  private val tlsContext = Option.when(config.security.protocol.tls)(ReloadableTlsContext(config.security.tls))
+  private val tlsContext = Option.when(config.security.protocol.tls) {
+    ReloadableTlsContext(
+      config.security.tls,
+      snapshot =>
+        if operationalEventsEnabled then
+          eventLog.info("tls_material_reloaded", brokerFields ++ Map("generation" -> snapshot.generation.toString)),
+      error =>
+        if operationalEventsEnabled then eventLog.error("tls_material_reload_failed", error, brokerFields)
+    )
+  }
   private val server = ServerSocket()
   private val connections: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val connectionAdmission = ConnectionAdmission(
@@ -219,7 +228,8 @@ final class KafkaBroker(
       heapUsedBytes = runtime.totalMemory() - runtime.freeMemory(),
       heapMaxBytes = runtime.maxMemory(),
       peerSecurity = peerSecurityMetrics.snapshot,
-      authentication = authenticationMetrics.snapshot
+      authentication = authenticationMetrics.snapshot,
+      tlsReload = tlsContext.map(_.snapshot).getOrElse(cascade.security.TlsReloadSnapshot.Empty)
     )
 
   def healthSnapshot: BrokerHealth =
@@ -231,7 +241,8 @@ final class KafkaBroker(
       ),
       eventLog.lastFailure,
       Option(handler).flatMap(_.peerIdentityReloadError),
-      Option(handler).flatMap(_.credentialReloadError)
+      Option(handler).flatMap(_.credentialReloadError),
+      tlsContext.flatMap(_.lastReloadError)
     )
 
   override def close(): Unit = synchronized {
