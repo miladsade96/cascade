@@ -283,6 +283,12 @@ final class PartitionLog(
     FlushStatistics(forceCount, forcedBytes, forceNanos, unflushedBytes + inFlightFlushBytes)
   }
 
+  private[storage] def flushForSnapshot(): Long = synchronized {
+    awaitBackgroundFlush()
+    flushDirtySegments()
+    committedOffset
+  }
+
   private[storage] def lifecycleStatistics: LifecycleStatistics = synchronized {
     LifecycleStatistics(lifecycleRuns, retiredSegments, reclaimedBytes, compactedBatches, rejectedAppends)
   }
@@ -533,22 +539,24 @@ final class PartitionLog(
     }
     val candidates = segments.dropRight(1).filter(_.index.lastOption.forall(_.lastOffset < committedOffset)).toVector
     var changed = false
+    val tombstoneCutoff = System.currentTimeMillis() - currentLifecycleConfig.deleteRetentionMillis
     candidates.foreach { segment =>
-      val removable = segment.index.filter { entry =>
-        !entry.metadata.transactional && !entry.metadata.control &&
-          RecordBatch.indexedRecords(readBatch(entry)).exists { records =>
-            records.nonEmpty && records.forall(record => record.key.exists(key => latestByKey.get(key).exists(_ > record.offset)))
-          }
-      }.toSet
-      if removable.nonEmpty then
-        rewriteCompactedSegment(segment, removable)
-        compactedBatches = Math.addExact(compactedBatches, removable.size.toLong)
+      val rewrites = segment.index.iterator.map { entry =>
+        val original = readBatch(entry)
+        entry -> RecordBatch.compact(original, latestByKey.toMap, tombstoneCutoff)
+      }.toMap
+      val rewrittenCount = rewrites.count { case (entry, replacement) =>
+        replacement.forall(bytes => !java.util.Arrays.equals(bytes, readBatch(entry)))
+      }
+      if rewrittenCount > 0 then
+        rewriteCompactedSegment(segment, rewrites)
+        compactedBatches = Math.addExact(compactedBatches, rewrittenCount.toLong)
         changed = true
     }
     if changed then rebuildProducerHistory()
 
-  private def rewriteCompactedSegment(segment: LogSegment, removable: Set[BatchIndex]): Unit =
-    val retained = segment.index.filterNot(removable).toVector
+  private def rewriteCompactedSegment(segment: LogSegment, rewrites: Map[BatchIndex, Option[Array[Byte]]]): Unit =
+    val retained = segment.index.flatMap(entry => rewrites.getOrElse(entry, Some(readBatch(entry)))).toVector
     if retained.isEmpty then retireSegment(segment)
     else
       val temporary = segment.path.resolveSibling(segment.path.getFileName.toString + ".cleaned")
@@ -561,8 +569,7 @@ final class PartitionLog(
       )
       try
         var position = 0L
-        retained.foreach { entry =>
-          val batch = readBatch(entry)
+        retained.foreach { batch =>
           writeFully(output, ByteBuffer.wrap(batch), position)
           position += batch.length
         }
@@ -576,6 +583,16 @@ final class PartitionLog(
       scan(replacement)
       segments.update(segmentIndex, replacement)
       reclaimedBytes = Math.addExact(reclaimedBytes, oldSize - replacement.size)
+      throttleCompaction(oldSize)
+
+  private def throttleCompaction(processedBytes: Long): Unit =
+    val limit = currentLifecycleConfig.compactionMaxBytesPerSecond
+    if limit > 0L && processedBytes > 0L then
+      val delayNanos = Math.multiplyExact(processedBytes, 1_000_000_000L) / limit
+      if delayNanos > 0L then
+        val millis = delayNanos / 1_000_000L
+        val nanos = (delayNanos % 1_000_000L).toInt
+        Thread.sleep(millis, nanos)
 
   private def readBatch(entry: BatchIndex): Array[Byte] =
     val owner = segments.iterator.find(_.index.contains(entry))
