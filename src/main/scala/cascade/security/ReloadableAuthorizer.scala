@@ -4,8 +4,8 @@ import cascade.storage.AtomicFileLifecycle
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
-import java.nio.file.StandardOpenOption.{TRUNCATE_EXISTING, WRITE}
-import java.nio.file.{Files, Path}
+import java.nio.file.StandardOpenOption.{CREATE_NEW, TRUNCATE_EXISTING, WRITE}
+import java.nio.file.{FileAlreadyExistsException, Files, Path}
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import scala.util.control.NonFatal
 
@@ -13,6 +13,7 @@ final class ReloadableAuthorizer(path: Path, superUsers: Set[String], reloadInte
   require(reloadIntervalMillis >= 0L, "ACL reload interval cannot be negative")
 
   private val normalizedPath = path.toAbsolutePath.normalize()
+  ReloadableAuthorizer.initialize(normalizedPath)
   private val authorizer = AtomicReference(AclAuthorizer.load(normalizedPath, superUsers))
   private val nextReloadNanos = AtomicLong(deadlineFromNow())
   private val reloadError = AtomicReference(Option.empty[String])
@@ -94,3 +95,17 @@ final class ReloadableAuthorizer(path: Path, superUsers: Set[String], reloadInte
     if Long.MaxValue - now < intervalNanos then Long.MaxValue else now + intervalNanos
 
   private def message(error: Throwable): String = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+
+object ReloadableAuthorizer:
+  def apply(path: Path, superUsers: Set[String], reloadIntervalMillis: Long): ReloadableAuthorizer =
+    new ReloadableAuthorizer(path, superUsers, reloadIntervalMillis)
+
+  def initialize(path: Path): Unit =
+    val parent = Option(path.getParent).getOrElse(throw IllegalArgumentException("ACL file must have a parent directory"))
+    Files.createDirectories(parent)
+    if !Files.exists(path) then
+      try
+        val channel = FileChannel.open(path, CREATE_NEW, WRITE)
+        try channel.force(true)
+        finally channel.close()
+      catch case _: FileAlreadyExistsException => ()

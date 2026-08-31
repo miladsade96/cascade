@@ -4,6 +4,21 @@ import java.nio.file.Files
 import munit.FunSuite
 
 final class ReloadableAuthorizerSuite extends FunSuite:
+  test("bootstraps a deny-by-default ACL file for an authorized administrator") {
+    val directory = Files.createTempDirectory("cascade-acl-bootstrap")
+    val path = directory.resolve("security").resolve("acls.conf")
+    try
+      val authorizer = ReloadableAuthorizer(path, Set("User:cluster-admin"), reloadIntervalMillis = 60_000L)
+      assert(Files.isRegularFile(path))
+      assertEquals(Files.size(path), 0L)
+      assert(authorizer.authorize("cluster-admin", AclOperation.Alter, Resource(ResourceType.Cluster, "cascade")))
+      assert(!authorizer.authorize("application", AclOperation.Read, Resource(ResourceType.Topic, "events")))
+    finally
+      if Files.exists(path) then Files.delete(path)
+      Files.delete(directory.resolve("security"))
+      Files.delete(directory)
+  }
+
   test("replaces ACL snapshots atomically and preserves the last valid rules") {
     val path = Files.createTempFile("cascade-reloadable-acls", ".conf")
     val resource = Resource(ResourceType.Topic, "orders")
