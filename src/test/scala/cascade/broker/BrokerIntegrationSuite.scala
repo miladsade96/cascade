@@ -87,6 +87,48 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("serves the OffsetFetch v4 response shape used by KafkaJS") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        val response = request(output, input, offsetFetchV4Request("node-readers", "node-events", correlationId = 17))
+        assertEquals(response.readInt(), 17)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readString(), "node-events")
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readLong(), -1L)
+        assertEquals(response.readNullableString(), None)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readShort(), Errors.None)
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
+  test("accepts the OffsetCommit v5 request shape used by KafkaJS") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("node-events", correlationId = 16))
+        val response = request(output, input, offsetCommitV5Request("node-readers", "node-events", 9L, correlationId = 18))
+        assertEquals(response.readInt(), 18)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readString(), "node-events")
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readShort(), Errors.None)
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("idempotent producer retries return the original offset and reject sequence gaps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
@@ -370,6 +412,27 @@ final class BrokerIntegrationSuite extends FunSuite:
   private def metadataRequest(topic: String, correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.Metadata, 4, correlationId)
     writer.writeArray(Vector(topic))(writer.writeString).writeBoolean(true).result()
+
+  private def offsetFetchV4Request(groupId: String, topic: String, correlationId: Int): Array[Byte] =
+    val writer = requestHeader(ApiKey.OffsetFetch, 4, correlationId).writeString(groupId)
+    writer.writeNullableArray(Some(Vector(topic))) { name =>
+      writer.writeString(name)
+      writer.writeArray(Vector(0))(writer.writeInt): Unit
+    }
+    writer.result()
+
+  private def offsetCommitV5Request(groupId: String, topic: String, offset: Long, correlationId: Int): Array[Byte] =
+    val writer = requestHeader(ApiKey.OffsetCommit, 5, correlationId)
+      .writeString(groupId)
+      .writeInt(-1)
+      .writeString("")
+    writer.writeArray(Vector(topic)) { name =>
+      writer.writeString(name)
+      writer.writeArray(Vector(0)) { partition =>
+        writer.writeInt(partition).writeLong(offset).writeNullableString(None): Unit
+      }: Unit
+    }
+    writer.result()
 
   private def produceRequest(topic: String, records: Array[Byte], correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.Produce, 3, correlationId)
