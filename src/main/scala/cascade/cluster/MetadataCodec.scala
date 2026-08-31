@@ -4,11 +4,21 @@ import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 
 object MetadataCodec:
-  private val FormatVersion: Short = 6
+  val MinimumReadableFormat: Short = 1
+  val CurrentFormat: Short = 8
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
+    encode(metadata, CurrentFormat)
+
+  def encode(metadata: ClusterMetadata, format: Short): Array[Byte] =
+    if format < MinimumReadableFormat || format > CurrentFormat then
+      throw ProtocolException(s"unsupported cluster metadata format: $format")
+    val required = minimumRequiredFormat(metadata)
+    if format < required then
+      throw ProtocolException(s"cluster metadata requires format $required but negotiated format is $format")
     val writer = ByteWriter()
-    writer.writeShort(FormatVersion).writeLong(metadata.version).writeLong(metadata.controllerTerm)
+    writer.writeShort(format).writeLong(metadata.version)
+    if format >= 2 then writer.writeLong(metadata.controllerTerm)
     writer.writeArray(metadata.topics) { topic =>
       writer.writeString(topic.name)
       writer.writeArray(topic.partitions) { partition =>
@@ -17,31 +27,50 @@ object MetadataCodec:
         writer.writeInt(partition.leaderEpoch)
         writer.writeArray(partition.replicas)(writer.writeInt)
         writer.writeArray(partition.inSyncReplicas)(writer.writeInt)
-        writer.writeArray(partition.addingReplicas)(writer.writeInt)
-        writer.writeArray(partition.removingReplicas)(writer.writeInt): Unit
+        if format >= 3 then
+          writer.writeArray(partition.addingReplicas)(writer.writeInt)
+          writer.writeArray(partition.removingReplicas)(writer.writeInt): Unit
       }
-      writer.writeBoolean(topic.lifecyclePolicy.nonEmpty)
-      topic.lifecyclePolicy.foreach { policy =>
-        writer.writeByte(cleanupPolicyCode(policy.cleanupPolicy))
-        writer.writeLong(policy.retentionMillis)
-        writer.writeLong(policy.retentionBytes): Unit
+      if format >= 6 then
+        writer.writeBoolean(topic.lifecyclePolicy.nonEmpty)
+        topic.lifecyclePolicy.foreach { policy =>
+          writer.writeByte(cleanupPolicyCode(policy.cleanupPolicy))
+          writer.writeLong(policy.retentionMillis)
+          writer.writeLong(policy.retentionBytes): Unit
+        }
+    }
+    if format >= 4 then
+      writer.writeBoolean(metadata.membership.nonEmpty)
+      metadata.membership.foreach { membership =>
+        writeVoters(writer, membership.currentVoters)
+        writeVoters(writer, membership.nextVoters)
       }
-    }
-    writer.writeBoolean(metadata.membership.nonEmpty)
-    metadata.membership.foreach { membership =>
-      writeVoters(writer, membership.currentVoters)
-      writeVoters(writer, membership.nextVoters)
-    }
-    writer.writeLong(metadata.coordinator.version)
-    writer.writeLong(metadata.coordinator.ownerTerm)
-    writer.writeByteArray(metadata.coordinator.groupState.toArray)
-    writer.writeByteArray(metadata.coordinator.deliveryState.toArray)
+    if format >= 5 then
+      writer.writeLong(metadata.coordinator.version)
+      writer.writeLong(metadata.coordinator.ownerTerm)
+      writer.writeByteArray(metadata.coordinator.groupState.toArray)
+      writer.writeByteArray(metadata.coordinator.deliveryState.toArray)
+    if format >= 7 then
+      writer.writeArray(metadata.featureLevels.toVector.sortBy(_._1)) { case (name, level) =>
+        writer.writeString(name).writeShort(level): Unit
+      }
+    if format >= 8 then writer.writeArray(metadata.unavailableBrokerIds.toVector.sorted)(writer.writeInt)
     writer.result()
+
+  def minimumRequiredFormat(metadata: ClusterMetadata): Short =
+    if metadata.unavailableBrokerIds.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorFailover) then 8
+    else if metadata.featureLevels.nonEmpty then 7
+    else if metadata.topics.exists(_.lifecyclePolicy.nonEmpty) then 6
+    else if metadata.coordinator != CoordinatorMetadata.Empty then 5
+    else if metadata.membership.nonEmpty then 4
+    else if metadata.topics.exists(_.partitions.exists(_.isReassigning)) then 3
+    else if metadata.controllerTerm != 0L then 2
+    else 1
 
   def decode(bytes: Array[Byte]): ClusterMetadata =
     val cursor = ByteCursor(bytes)
     val format = cursor.readShort()
-    if format < 1 || format > FormatVersion then
+    if format < MinimumReadableFormat || format > CurrentFormat then
       throw ProtocolException(s"unsupported cluster metadata format: $format")
     val version = cursor.readLong()
     val controllerTerm = if format >= 2 then cursor.readLong() else 0L
@@ -84,8 +113,14 @@ object MetadataCodec:
           cursor.readByteArray().toVector
         )
       else CoordinatorMetadata.Empty
+    val featureLevels =
+      if format >= 7 then cursor.readArray((cursor.readString(), cursor.readShort())).toMap
+      else Map.empty[String, Short]
+    val unavailableBrokerIds =
+      if format >= 8 then cursor.readArray(cursor.readInt()).toSet
+      else Set.empty[Int]
     cursor.ensureFullyRead()
-    ClusterMetadata(version, topics, controllerTerm, membership, coordinator)
+    ClusterMetadata(version, topics, controllerTerm, membership, coordinator, featureLevels, unavailableBrokerIds)
 
   private def writeVoters(writer: ByteWriter, voters: Vector[QuorumVoter]): Unit =
     writer.writeArray(voters) { voter =>
