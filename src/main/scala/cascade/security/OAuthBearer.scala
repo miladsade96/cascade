@@ -43,10 +43,11 @@ final class JwtValidator(config: OAuthConfig, keys: ReloadableJwks, clock: Clock
     val key = keys.resolve(keyId, algorithm).getOrElse(reject(JwtValidationError.UnknownKey))
     val signatureBytes = decodeSegment(segments(2), 2048)
     if signatureBytes.isEmpty then reject(JwtValidationError.Malformed)
+    val verificationSignature = if algorithm.ellipticCurve then ecdsaJoseToDer(signatureBytes, algorithm) else signatureBytes
     val verifier = Signature.getInstance(algorithm.signatureName)
     verifier.initVerify(key)
     verifier.update(s"${segments(0)}.${segments(1)}".getBytes(StandardCharsets.US_ASCII))
-    if !verifier.verify(signatureBytes) then reject(JwtValidationError.InvalidSignature)
+    if !verifier.verify(verificationSignature) then reject(JwtValidationError.InvalidSignature)
 
     if string(claims, "iss") != config.issuer then reject(JwtValidationError.InvalidIssuer)
     val expectedAudience = config.audience.getOrElse(reject(JwtValidationError.InvalidAudience))
@@ -77,6 +78,29 @@ final class JwtValidator(config: OAuthConfig, keys: ReloadableJwks, clock: Clock
     val bytes = Base64.getUrlDecoder.decode(value)
     if bytes.isEmpty || bytes.length > maximumBytes then throw IllegalArgumentException("JWT segment size is outside policy")
     bytes
+
+  private def ecdsaJoseToDer(signature: Array[Byte], algorithm: JwtAlgorithm): Array[Byte] =
+    val coordinateBytes = algorithm match
+      case JwtAlgorithm.Es256 => 32
+      case JwtAlgorithm.Es384 => 48
+      case JwtAlgorithm.Es512 => 66
+      case _                  => reject(JwtValidationError.Malformed)
+    if signature.length != coordinateBytes * 2 then reject(JwtValidationError.Malformed)
+    val first = derInteger(signature.take(coordinateBytes))
+    val second = derInteger(signature.drop(coordinateBytes))
+    val payload = first ++ second
+    Array[Byte](0x30) ++ derLength(payload.length) ++ payload
+
+  private def derInteger(unsigned: Array[Byte]): Array[Byte] =
+    val stripped = unsigned.dropWhile(_ == 0.toByte) match
+      case value if value.isEmpty => Array[Byte](0)
+      case value if (value.head & 0x80) != 0 => Array[Byte](0) ++ value
+      case value => value
+    Array[Byte](0x02, stripped.length.toByte) ++ stripped
+
+  private def derLength(length: Int): Array[Byte] =
+    if length < 128 then Array(length.toByte)
+    else Array[Byte](0x81.toByte, length.toByte)
 
   private def objectFields(value: JsonValue): Map[String, JsonValue] = value match
     case JsonValue.ObjectValue(fields) => fields

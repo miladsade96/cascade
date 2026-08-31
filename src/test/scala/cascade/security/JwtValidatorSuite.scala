@@ -103,7 +103,7 @@ final class JwtValidatorSuite extends munit.FunSuite:
     test(s"JWT validator supports explicitly allowed ${algorithm.jwtName}") {
       val directory = Files.createTempDirectory("cascade-jwt-algorithm")
       val path = directory.resolve("jwks.json")
-      val pair = OAuthTestSupport.keyPair()
+      val pair = OAuthTestSupport.keyPairFor(algorithm)
       OAuthTestSupport.writeJwks(path, Vector("active" -> pair), Some(algorithm.jwtName))
       val config = OAuthConfig(
         jwksUri = Some(path.toUri),
@@ -122,6 +122,29 @@ final class JwtValidatorSuite extends munit.FunSuite:
         keys.close()
         SecurityTestSupport.deleteTree(directory)
     }
+  }
+
+  test("JWT validator rejects a malformed JOSE ECDSA signature before verification") {
+    val directory = Files.createTempDirectory("cascade-jwt-ecdsa-format")
+    val path = directory.resolve("jwks.json")
+    val pair = OAuthTestSupport.keyPairFor(JwtAlgorithm.Es256)
+    OAuthTestSupport.writeJwks(path, Vector("ec" -> pair), Some("ES256"))
+    val config = OAuthConfig(
+      jwksUri = Some(path.toUri), issuer = Some("https://issuer.example"), audience = Some("cascade"),
+      allowedAlgorithms = Set(JwtAlgorithm.Es256), jwksRefreshMillis = 60000L
+    )
+    val keys = ReloadableJwks(config)
+    try
+      val claims = OAuthTestSupport.claims("https://issuer.example", "\"cascade\"", "alice", now, now + 60)
+      val token = OAuthTestSupport.token(pair.getPrivate, "ec", claims, JwtAlgorithm.Es256)
+      val segments = token.split("\\.", -1)
+      val signature = java.util.Base64.getUrlDecoder.decode(segments(2)).dropRight(1)
+      val malformed = s"${segments(0)}.${segments(1)}.${java.util.Base64.getUrlEncoder.withoutPadding().encodeToString(signature)}"
+      val validator = JwtValidator(config, keys, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC))
+      assertEquals(validator.validate(malformed).left.toOption, Some(JwtValidationError.Malformed))
+    finally
+      keys.close()
+      SecurityTestSupport.deleteTree(directory)
   }
 
   private def withValidator(requiredScopes: Set[String] = Set("cascade.read"))(test: (java.security.KeyPair, JwtValidator) => Unit): Unit =
