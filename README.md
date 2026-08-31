@@ -189,6 +189,17 @@ I keep the operations listener on loopback unless a protected monitoring network
 
 The included launchers download SBT the first time you run them.
 
+### Run the container
+
+I can start the hardened single-broker Compose deployment without installing Java or SBT on the host:
+
+```bash
+docker compose up --build --detach
+docker compose ps
+```
+
+The image runs as non-root UID 65532 with a read-only root filesystem, an internal readiness check, cgroup-aware JDK 21 memory settings, and a named volume at `/var/lib/cascade`. Kafka is available at `localhost:9092`; `docker compose down` stops cleanly and preserves the data volume. I use `compose.cluster.yaml` for a three-broker local cluster on ports 19092 through 19094. Pulling the released image, authenticated monitoring, immutable tags, multi-architecture publishing, volume ownership, and the Kafka-client smoke procedure are in my [container deployment runbook](docs/containers.md).
+
 ### Run the tests and start one broker
 
 Windows:
@@ -481,6 +492,8 @@ After adding Kafka-compatible SCRAM-SHA-256/512, strict bounded exchanges, offli
 
 After adding signed OAuth/OIDC JWT authentication, strict JSON/JWKS parsing, verified HTTPS refresh with ETags, issuer/audience/time/scope policy, signing-key rotation, expiring connection identities, and operational integration, I finished with **244/244** passing tests. I reran all **10,000,000** records on 2026-08-30 and consumed exactly **10,000,000 / 10,000,000** at **368,387 produced records/s** (**359.8 MiB/s**) and **351,784 consumed records/s** (**343.5 MiB/s**). Produce took 27.145 seconds, consume took 28.427 seconds, maximum acknowledgement latency was 3,213.600 ms, and peak heap was 5,391.9 MiB. The run stored 9,862.3 MiB and forced 9,710.2 MiB in 221 operations during production. I use this single-node plaintext run as an exactness and inactive-OAuth regression gate, not as authenticated or replicated capacity.
 
+After adding the production container path, I finished a clean **247/247** suite and built a 38.7 MB distroless image. I verified a non-root read-only standalone container, graceful named-volume recovery, the single-broker Compose deployment, and an external Kafka 4.3.1 client. I also brought up the three-broker Compose topology and produced and consumed 25/25 exact idempotent `acks=all` records with replication factor three and minimum ISR two. Both amd64 and arm64 release builds complete, and the 2026-08-30 Docker Scout scan found zero critical, high, medium, or low vulnerabilities among 15 detected packages. This container smoke is a deployment and interoperability gate; it does not replace the ten-million throughput qualification above.
+
 ### Reproduce the load test
 
 ```bash
@@ -501,14 +514,14 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current test suite passes **244/244 tests** in four layers:
+The current test suite passes **247/247 tests** in four layers:
 
-- Unit tests for binary codecs, record batches, storage and coordinator recovery, delivery semantics, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA JWT validation, OAuth claim/time/scope policy, concurrent verification, credential files, peer identity policy, TLS trust/hostname rejection, security metrics, health/readiness, capacity evaluation, structured-log rotation, backup manifests, checksum validation, and maintenance command parsing.
+- Unit tests for binary codecs, record batches, storage and coordinator recovery, delivery semantics, Kafka's non-transactional idempotence timeout sentinel, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA JWT validation, OAuth claim/time/scope policy, concurrent verification, credential files, peer identity policy, TLS trust/hostname rejection, security metrics, container health probing, health/readiness, capacity evaluation, structured-log rotation, backup manifests, checksum validation, and maintenance command parsing.
 - TCP integration tests for discovery, Produce/Fetch, idempotence, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, OAUTHBEARER, malformed and oversized authentication exchanges, peer certificate impersonation rejection, live identity/credential/key/ACL rotation, auditing, admission/quotas, and operational HTTP authentication and state.
 - Kafka 4.3.1 end-to-end tests for Admin/Producer/Consumer interoperability, `DescribeConfigs`, SCRAM-SHA-256, SCRAM-SHA-512 and OAUTHBEARER with `SASL_SSL` + ACLs, live verifier/JWKS rotation, wrong-token denial, encrypted RF=3 peer replication and quorum failover, consumer groups, reassignment, dynamic voters, transactions, coordinator failover, and exact Kafka-visible data after backup restore.
 - Qualification tests that force-kill real broker JVMs, interrupt durable-store shutdown, corrupt persisted tails, partition stable and joint quorums, exercise retention and low-disk rejection, tamper with backup contents, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
 
-The load harness separately checks the exact record count at one million and ten million records.
+The load harness separately checks the exact record count at one million and ten million records. The container workflow separately builds the image, enforces its non-root metadata, crosses the Docker boundary with a real Kafka client, restarts the broker, and verifies exact recovery from the same named volume.
 
 ## What I plan to build next
 
@@ -627,6 +640,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 ## More documentation
 
 - [Production-readiness gates](docs/production-readiness.md)
+- [Container deployment runbook](docs/containers.md)
 - [OAuth and OIDC authentication runbook](docs/oauth-oidc.md)
 - [SCRAM authentication runbook](docs/scram-authentication.md)
 - [Broker-to-broker security runbook](docs/peer-security.md)
