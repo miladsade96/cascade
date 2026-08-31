@@ -1,5 +1,6 @@
 package cascade.operations
 
+import cascade.security.TlsReloadSnapshot
 import munit.FunSuite
 
 final class PrometheusMetricsSuite extends FunSuite:
@@ -11,10 +12,14 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_request_processing_seconds_total{node_id=\"7\"} 1.5\n"))
     assert(output.contains("cascade_peer_tls_authentications_total{node_id=\"7\"} 29.0\n"))
     assert(output.contains("cascade_peer_authentication_rejections_total{node_id=\"7\"} 30.0\n"))
+    assert(output.contains("cascade_tls_enabled{node_id=\"7\"} 1.0\n"))
+    assert(output.contains("cascade_tls_material_generation{node_id=\"7\"} 4.0\n"))
+    assert(output.contains("cascade_tls_material_reloads_total{node_id=\"7\"} 3.0\n"))
+    assert(output.contains("cascade_tls_material_reload_failures_total{node_id=\"7\"} 2.0\n"))
     assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"SCRAM-SHA-256\",node_id=\"7\"} 2.0\n"))
     assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"OAUTHBEARER\",node_id=\"7\"} 8.0\n"))
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 46)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 50)
   }
 
   private val snapshot = BrokerMetricsSnapshot(
@@ -56,5 +61,6 @@ final class PrometheusMetricsSuite extends FunSuite:
         MechanismAuthenticationSnapshot("OAUTHBEARER", 8L, 9L),
         MechanismAuthenticationSnapshot("UNKNOWN", 0L, 7L)
       )
-    )
+    ),
+    tlsReload = TlsReloadSnapshot(enabled = true, generation = 4L, successfulReloads = 3L, failedReloads = 2L)
   )
