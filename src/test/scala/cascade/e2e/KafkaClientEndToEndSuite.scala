@@ -71,6 +71,35 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("Apache Kafka 4.3 consumer protocol receives a server-side assignment") {
+    val directory = Files.createTempDirectory("cascade-modern-consumer-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try admin.createTopics(java.util.List.of(NewTopic("modern-consumer-events", 2, 1.toShort))).all().get()
+      finally admin.close(Duration.ofSeconds(5))
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(broker.bootstrapServers))
+      try
+        (0 until 12).foreach(index =>
+          producer.send(ProducerRecord("modern-consumer-events", index % 2, null, s"modern-$index".getBytes(StandardCharsets.UTF_8))).get()
+        )
+      finally producer.close(Duration.ofSeconds(5))
+
+      val settings = consumerProperties(broker.bootstrapServers)
+      settings.put(ConsumerConfig.GROUP_ID_CONFIG, "modern-consumer-group")
+      settings.put(ConsumerConfig.GROUP_PROTOCOL_CONFIG, "consumer")
+      settings.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100")
+      val consumer = KafkaConsumer[Array[Byte], Array[Byte]](settings)
+      try
+        consumer.subscribe(java.util.List.of("modern-consumer-events"))
+        assertEquals(pollValues(consumer, 12).toSet, (0 until 12).map(index => s"modern-$index").toSet)
+      finally consumer.close()
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   test("subscribed Kafka consumer commits offsets across broker restart") {
     val directory = Files.createTempDirectory("cascade-group-e2e")
     try
