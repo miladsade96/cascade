@@ -66,6 +66,7 @@ final class GroupCoordinator(
   private val EmptyAssignment = Array.emptyByteArray
   private val closed = AtomicBoolean(false)
   private val groups = mutable.HashMap.empty[String, ManagedGroup]
+  private val consumerGroups = mutable.HashMap.empty[String, ManagedConsumerGroup]
   private val offsets = OffsetStore(offsetPath)
   private var stateVersion = 0L
   private var checkpoint: CoordinatorCheckpoint = CoordinatorCheckpoint.Local
@@ -82,6 +83,122 @@ final class GroupCoordinator(
 
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray))
+  }
+
+  /** KIP-848-style server-side membership and assignment, without the classic join/sync barrier. */
+  def consumerHeartbeat(
+      command: ConsumerHeartbeatCommand,
+      partitionCount: String => Int,
+      heartbeatIntervalMillis: Int = 5000
+  ): ConsumerHeartbeatResult = stateLock.synchronized {
+    def failure(code: Short, message: String, epoch: Int = command.memberEpoch): ConsumerHeartbeatResult =
+      ConsumerHeartbeatResult(code, Some(message), Option(command.memberId).filter(_.nonEmpty), epoch, heartbeatIntervalMillis, None)
+
+    if command.groupId.isEmpty then return failure(Errors.InvalidGroupId, "group ID must not be empty")
+    if groups.get(command.groupId).exists(_.members.nonEmpty) then
+      return failure(Errors.InconsistentGroupProtocol, "the group already uses the classic protocol")
+    if command.serverAssignor.exists(name => name != "uniform" && name != "range") then
+      return failure(Errors.UnsupportedAssignor, "supported server assignors are uniform and range")
+
+    val group = consumerGroups.getOrElseUpdate(command.groupId, ManagedConsumerGroup())
+    if command.memberEpoch == -1 then
+      if command.memberId.isEmpty || group.members.remove(command.memberId).isEmpty then
+        return failure(Errors.UnknownMemberId, "consumer member does not exist")
+      rebalanceConsumerGroup(group, partitionCount)
+      if !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
+      return ConsumerHeartbeatResult(Errors.None, None, Some(command.memberId), -1, heartbeatIntervalMillis, None)
+
+    val staticMember = command.instanceId.flatMap(instance =>
+      group.members.valuesIterator.find(_.instanceId.contains(instance))
+    )
+    if command.memberEpoch == -2 then
+      if command.instanceId.isEmpty then return failure(Errors.InvalidRequest, "static rejoin requires an instance ID")
+      staticMember match
+        case None => return failure(Errors.UnknownMemberId, "static consumer instance does not exist")
+        case Some(existing) if command.memberId.nonEmpty && command.memberId != existing.memberId =>
+          return failure(Errors.UnreleasedInstanceId, "consumer instance is owned by another member")
+        case Some(existing) =>
+          existing.lastHeartbeatMillis = System.currentTimeMillis()
+          return ConsumerHeartbeatResult(
+            Errors.None,
+            None,
+            Some(existing.memberId),
+            existing.memberEpoch,
+            heartbeatIntervalMillis,
+            Some(existing.assignment)
+          )
+
+    val now = System.currentTimeMillis()
+    val joining = command.memberEpoch == 0
+    if joining then
+      if command.rebalanceTimeoutMillis <= 0 || command.subscribedTopicNames.isEmpty ||
+          command.ownedPartitions.forall(_.nonEmpty)
+      then return failure(Errors.InvalidRequest, "initial heartbeat requires timeout, subscription, and an empty owned assignment")
+      if staticMember.exists(_.memberId != command.memberId) then
+        return failure(Errors.UnreleasedInstanceId, "consumer instance is owned by another member")
+      val requestedAssignor = command.serverAssignor
+        .orElse(group.members.headOption.map(_._2.serverAssignor))
+        .getOrElse("uniform")
+      if group.members.valuesIterator.exists(_.serverAssignor != requestedAssignor) then
+        return failure(Errors.InconsistentGroupProtocol, "consumer group members must use one server assignor")
+      val memberId = Option(command.memberId).filter(_.nonEmpty).getOrElse(newMemberId("consumer"))
+      if group.members.contains(memberId) then return failure(Errors.FencedMemberEpoch, "member must rejoin with its current epoch")
+      group.members.update(
+        memberId,
+        ConsumerMember(
+          memberId,
+          command.instanceId,
+          command.rackId,
+          command.rebalanceTimeoutMillis,
+          command.subscribedTopicNames.getOrElse(Vector.empty).distinct.sorted,
+          requestedAssignor,
+          0,
+          now,
+          Vector.empty
+        )
+      )
+      rebalanceConsumerGroup(group, partitionCount)
+      if !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
+      val member = group.members(memberId)
+      ConsumerHeartbeatResult(Errors.None, None, Some(memberId), member.memberEpoch, heartbeatIntervalMillis, Some(member.assignment))
+    else
+      group.members.get(command.memberId) match
+        case None => failure(Errors.UnknownMemberId, "consumer member does not exist")
+        case Some(member) if command.memberEpoch > member.memberEpoch =>
+          failure(Errors.FencedMemberEpoch, "consumer member epoch is ahead of the coordinator", member.memberEpoch)
+        case Some(member) if command.memberEpoch < member.memberEpoch =>
+          member.lastHeartbeatMillis = now
+          ConsumerHeartbeatResult(
+            Errors.None,
+            None,
+            Some(member.memberId),
+            member.memberEpoch,
+            heartbeatIntervalMillis,
+            Some(member.assignment)
+          )
+        case Some(member) if command.instanceId.exists(id => !member.instanceId.contains(id)) =>
+          failure(Errors.UnreleasedInstanceId, "consumer instance does not own this member", member.memberEpoch)
+        case Some(member) =>
+          if command.serverAssignor.exists(assignor => group.members.valuesIterator.exists(other => other.serverAssignor != assignor)) then
+            return failure(Errors.InconsistentGroupProtocol, "consumer group members must use one server assignor", member.memberEpoch)
+          val previousSubscriptions = member.subscriptions
+          member.instanceId = command.instanceId.orElse(member.instanceId)
+          member.rackId = command.rackId.orElse(member.rackId)
+          if command.rebalanceTimeoutMillis >= 0 then member.rebalanceTimeoutMillis = command.rebalanceTimeoutMillis
+          command.subscribedTopicNames.foreach(names => member.subscriptions = names.distinct.sorted)
+          command.serverAssignor.foreach(member.serverAssignor = _)
+          member.lastHeartbeatMillis = now
+          val changed = previousSubscriptions != member.subscriptions
+          if changed then rebalanceConsumerGroup(group, partitionCount)
+          if changed && !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
+          ConsumerHeartbeatResult(
+            Errors.None,
+            None,
+            Some(member.memberId),
+            member.memberEpoch,
+            heartbeatIntervalMillis,
+            Option.when(changed || !ownedMatches(command.ownedPartitions, member.assignment))(member.assignment)
+          )
   }
 
   def join(command: JoinGroupCommand): JoinGroupResult = stateLock.synchronized {
@@ -362,6 +479,16 @@ final class GroupCoordinator(
           if group.members.isEmpty then resetEmpty(group) else beginRebalance(group, now)
           stateLock.notifyAll()
     }
+    consumerGroups.valuesIterator.foreach { group =>
+      val expired = group.members.valuesIterator
+        .filter(member => now - member.lastHeartbeatMillis >= 45_000L)
+        .map(_.memberId)
+        .toVector
+      if expired.nonEmpty then
+        changed = true
+        expired.foreach(group.members.remove)
+        rebalanceConsumerGroup(group, _ => 0)
+    }
     if offsetRetentionMillis > 0L then
       val expiredOffsets = offsets.expireBefore(now - offsetRetentionMillis, durableLocal)
       changed ||= expiredOffsets.nonEmpty
@@ -411,10 +538,30 @@ final class GroupCoordinator(
         group.pendingMemberIds.toVector.sortBy(_._1)
       )
     }
-    GroupImage(stateVersion, storedGroups, offsets.entries)
+    val storedConsumers = consumerGroups.iterator.toVector.sortBy(_._1).map { case (groupId, group) =>
+      StoredConsumerGroup(
+        groupId,
+        group.groupEpoch,
+        group.members.valuesIterator.map { member =>
+          StoredConsumerMember(
+            member.memberId,
+            member.instanceId,
+            member.rackId,
+            member.rebalanceTimeoutMillis,
+            member.subscriptions,
+            member.serverAssignor,
+            member.memberEpoch,
+            member.lastHeartbeatMillis,
+            member.assignment
+          )
+        }.toVector
+      )
+    }
+    GroupImage(stateVersion, storedGroups, offsets.entries, storedConsumers)
 
   private def installImage(image: GroupImage): Unit =
     groups.clear()
+    consumerGroups.clear()
     val installedAtMillis = System.currentTimeMillis()
     image.groups.foreach { stored =>
       val group = ManagedGroup()
@@ -442,5 +589,77 @@ final class GroupCoordinator(
       groups.update(stored.groupId, group)
     }
     offsets.install(image.offsets)
+    image.consumerGroups.foreach { stored =>
+      val group = ManagedConsumerGroup()
+      group.groupEpoch = stored.groupEpoch
+      stored.members.foreach { value =>
+        group.members.update(
+          value.memberId,
+          ConsumerMember(
+            value.memberId,
+            value.instanceId,
+            value.rackId,
+            value.rebalanceTimeoutMillis,
+            value.subscriptions,
+            value.serverAssignor,
+            value.memberEpoch,
+            installedAtMillis,
+            value.assignment
+          )
+        )
+      }
+      stored.members.iterator.flatMap { member =>
+        member.subscriptions.iterator.flatMap { topic =>
+          val topicId = ConsumerTopicId.forName(topic)
+          member.assignment.iterator
+            .filter(_.topicId == topicId)
+            .flatMap(_.partitions.maxOption.map(_ + 1))
+            .map(topic -> _)
+        }
+      }.foreach { case (topic, count) =>
+        group.partitionCounts.update(topic, math.max(group.partitionCounts.getOrElse(topic, 0), count))
+      }
+      consumerGroups.update(stored.groupId, group)
+    }
     stateVersion = image.version
     stateLock.notifyAll()
+
+  private def rebalanceConsumerGroup(group: ManagedConsumerGroup, partitionCount: String => Int): Unit =
+    group.groupEpoch = Math.addExact(group.groupEpoch, 1)
+    val assignments = mutable.HashMap.from(group.members.keysIterator.map(_ -> mutable.ArrayBuffer.empty[ConsumerTopicPartitions]))
+    val topicNames = group.members.valuesIterator.flatMap(_.subscriptions).toSet.toVector.sorted
+    topicNames.foreach { topic =>
+      val subscribers = group.members.valuesIterator.filter(_.subscriptions.contains(topic)).toVector.sortBy(_.memberId)
+      if subscribers.nonEmpty then
+        val observedCount = math.max(0, partitionCount(topic))
+        if observedCount > 0 then group.partitionCounts.update(topic, observedCount)
+        val effectiveCount = if observedCount > 0 then observedCount else group.partitionCounts.getOrElse(topic, 0)
+        val buffers = mutable.HashMap.from(subscribers.map(member => member.memberId -> mutable.ArrayBuffer.empty[Int]))
+        if subscribers.head.serverAssignor == "range" then
+          val width = effectiveCount / subscribers.size
+          val remainder = effectiveCount % subscribers.size
+          subscribers.indices.foreach { index =>
+            val start = index * width + math.min(index, remainder)
+            val size = width + Option.when(index < remainder)(1).getOrElse(0)
+            (start until start + size).foreach(buffers(subscribers(index).memberId) += _)
+          }
+        else
+          (0 until effectiveCount).foreach { partition =>
+            buffers(subscribers(partition % subscribers.size).memberId) += partition
+          }
+        val topicId = ConsumerTopicId.forName(topic)
+        subscribers.foreach { member =>
+          val partitions = buffers(member.memberId).toVector
+          if partitions.nonEmpty then assignments(member.memberId) += ConsumerTopicPartitions(topicId, partitions)
+        }
+    }
+    group.members.valuesIterator.foreach { member =>
+      member.memberEpoch = group.groupEpoch
+      member.assignment = assignments(member.memberId).toVector
+    }
+
+  private def ownedMatches(
+      owned: Option[Vector[ConsumerTopicPartitions]],
+      assigned: Vector[ConsumerTopicPartitions]
+  ): Boolean = owned.exists(_.sortBy(value => (value.topicId.mostSignificantBits, value.topicId.leastSignificantBits)) ==
+    assigned.sortBy(value => (value.topicId.mostSignificantBits, value.topicId.leastSignificantBits)))
