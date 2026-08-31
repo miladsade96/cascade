@@ -68,4 +68,4 @@ I test both mechanisms with Kafka 4.3.1 clients. The end-to-end suite covers SCR
 
 ## Current limitations
 
-I do not yet implement SCRAM channel binding, Kafka `AlterUserScramCredentials`, or TLS key/trust-store hot reload. I support signed OAuth/OIDC JWTs as a separate client mechanism. SCRAM verifier management is currently an operator-owned file workflow. I use filesystem permissions and encrypted secret distribution for the verifier file, TLS key material, password inputs, and backup copies, and I track the remaining release gates in my [production-readiness checklist](production-readiness.md).
+I do not yet implement SCRAM channel binding or Kafka `AlterUserScramCredentials`. TLS key/trust stores and SCRAM verifier snapshots do reload atomically with last-known-good retention. I support signed OAuth/OIDC JWTs as a separate client mechanism. SCRAM verifier management remains an operator-owned file workflow, so I use filesystem permissions and encrypted secret distribution for the verifier file, TLS key material, password inputs, and backup copies, and I track the remaining release gates in my [production-readiness checklist](production-readiness.md).

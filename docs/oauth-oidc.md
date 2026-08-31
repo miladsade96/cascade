@@ -8,7 +8,7 @@ Bearer tokens are credentials. I always use `SASL_SSL`; Cascade rejects an `OAUT
 
 I configure an explicit JWKS URI, issuer, and audience instead of trusting values discovered from an unverified token. The JWKS URI must use `https` or `file`; plain HTTP, redirects, URI user information, and fragments are rejected. HTTPS uses the JVM trust roots and hostname verification.
 
-Cascade accepts `RS256`, `RS384`, and `RS512` JWT signatures. I keep the allowlist as small as the identity provider permits and use `RS256` by default. Every token must have a `kid`, every usable RSA key must have a unique `kid` and at least 2,048 bits, and a JWK `alg`, `use`, or `key_ops` restriction must agree with signature verification.
+Cascade accepts `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, and `EdDSA` JWT signatures. I keep the allowlist as small as the identity provider permits and use `RS256` by default. RSA keys must be 2,048-8,192 bits, EC keys must use P-256/P-384/P-521 with their matching ES algorithm, and OKP keys must use Ed25519 with `EdDSA`. Every token and usable key needs a unique `kid`, and a JWK `alg`, `use`, or `key_ops` restriction must agree with verification.
 
 The default claim contract is:
 
@@ -23,12 +23,14 @@ The default claim contract is:
 
 I can select another principal or scope claim with `--oauth-principal-claim` and `--oauth-scope-claim`. I map the resulting principal to the same Cascade ACL format used by PLAIN and SCRAM.
 
+For shared authorization roles, I configure `--oauth-role-claim` together with an explicit `--oauth-role-map`. The claim can be a string or string array. Cascade ignores unapproved values, maps only exact allowlisted values, and exposes each mapped role to ACL evaluation as `Role:<local-role>`. For example, `--oauth-role-claim roles --oauth-role-map orders-writer=orders-write,orders-reader=orders-read` lets an ACL target `Role:orders-write` without trusting arbitrary token text as a local role.
+
 ## Broker configuration
 
 This is the production shape I use with an HTTPS identity provider:
 
 ```powershell
-.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --sasl-mechanisms OAUTHBEARER --oauth-jwks-uri https://identity.example.com/oauth2/keys --oauth-issuer https://identity.example.com --oauth-audience cascade --oauth-required-scopes cascade.read,cascade.write --oauth-allowed-algorithms RS256 --oauth-jwks-refresh-ms 300000 --oauth-http-timeout-ms 5000 --acl-file acls.conf --audit-log security-audit.jsonl"
+.\sbt.bat "run --host 0.0.0.0 --port 9093 --advertised-host broker.example.com --data-dir data --security-protocol SASL_SSL --ssl-keystore broker.p12 --ssl-keystore-password-file broker-store.password --sasl-mechanisms OAUTHBEARER --oauth-jwks-uri https://identity.example.com/oauth2/keys --oauth-issuer https://identity.example.com --oauth-audience cascade --oauth-required-scopes cascade.read,cascade.write --oauth-allowed-algorithms RS256,ES256,EdDSA --oauth-role-claim roles --oauth-role-map orders-writer=orders-write,orders-reader=orders-read --oauth-jwks-refresh-ms 300000 --oauth-http-timeout-ms 5000 --acl-file acls.conf --audit-log security-audit.jsonl"
 ```
 
 I use a `file:` JWKS URI only when my secret/configuration agent publishes a complete local JWKS atomically. The file still contains public keys, not client secrets or access tokens.
@@ -74,6 +76,6 @@ I alert on `credential_policy` readiness failure, a sustained OAuth failure-rate
 
 ## Bounds and limitations
 
-The default token limit is 16 KiB and can be configured from 1 KiB to 1 MiB. Cascade bounds JSON depth, members, strings, numbers, JWKS documents to 1 MiB, JWKS key count to 128, RFC 7628 envelope attributes to 16, RSA modulus size to 2,048-8,192 bits, HTTP timeouts to 60 seconds, and clock skew to five minutes. It rejects duplicate JSON members, malformed UTF-8/Base64URL, `alg=none`, HMAC/RSA confusion, mismatched GS2 authorization identities, and post-expiry connection identity.
+The default token limit is 16 KiB and can be configured from 1 KiB to 1 MiB. Cascade bounds JSON depth, members, strings, numbers, JWKS documents to 1 MiB, JWKS key count to 128, RFC 7628 envelope attributes to 16, RSA modulus size to 2,048-8,192 bits, EC coordinates to the declared curve, Ed25519 keys to 32 bytes, role claim/mapping sizes, HTTP timeouts to 60 seconds, and clock skew to five minutes. It rejects duplicate JSON members, malformed UTF-8/Base64URL, non-canonical JOSE ECDSA signatures, `alg=none`, algorithm/key confusion, mismatched GS2 authorization identities, and post-expiry connection identity.
 
-I currently validate signed JWT access tokens only. I do not yet implement opaque-token introspection, automatic OIDC discovery, EC/EdDSA JWKs, claim-to-group expansion, token revocation callbacks, or OAuth for broker-to-broker identity. I keep broker mTLS for internal traffic and track the remaining release gates in my [production-readiness checklist](production-readiness.md).
+I currently validate signed JWT access tokens only. I do not yet implement opaque-token introspection, automatic OIDC discovery, dynamic claim-to-group expansion beyond the explicit role allowlist, token revocation callbacks, or OAuth for broker-to-broker identity. I keep broker mTLS for internal traffic and track the remaining release gates in my [production-readiness checklist](production-readiness.md).
