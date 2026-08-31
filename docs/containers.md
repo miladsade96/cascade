@@ -76,6 +76,31 @@ The brokers are available to host clients at `localhost:19092`, `localhost:19093
 
 On Linux, a bind-mounted data directory must be writable by UID 65532. I prefer a named volume unless I have already provisioned and permissioned the host directory. I also size the container memory above the expected heap plus direct buffers, thread stacks, native TLS state, and page cache; `MaxRAMPercentage` governs only the JVM heap.
 
+## Kubernetes
+
+I keep the production-oriented three-broker base in `deploy/kubernetes`. It uses three one-replica StatefulSets so every broker has a stable node ID, DNS identity, TLS secret, and retained PVC. The base also applies required host anti-affinity, preferred zone spreading, a two-of-three disruption budget, `OnDelete` updates, 180-second termination grace, non-root/seccomp/read-only security contexts, CPU and memory reservations, startup/readiness/liveness probes, and default-deny network policy.
+
+Before I apply it, I create these secrets in the `cascade` namespace:
+
+- `cascade-node-1-tls`, `cascade-node-2-tls`, and `cascade-node-3-tls`, each with `keystore.p12`, `keystore.password`, and `key.password`;
+- `cascade-cluster-trust` with `truststore.p12` and `truststore.password`;
+- `cascade-client-auth` with `scram.conf`; and
+- `cascade-operations` with a random `token` of at least 32 characters.
+
+I replace the example peer certificate subjects in `deploy/kubernetes/peer-policy.yaml`, review the storage class and 100 GiB PVC request, pin the image to a verified immutable digest, label client and monitoring namespaces for the NetworkPolicy, then render and apply:
+
+```bash
+kubectl kustomize deploy/kubernetes > cascade-rendered.yaml
+kubectl apply --server-side --filename cascade-rendered.yaml
+kubectl --namespace cascade rollout status statefulset/cascade-1
+kubectl --namespace cascade rollout status statefulset/cascade-2
+kubectl --namespace cascade rollout status statefulset/cascade-3
+```
+
+The operations pack includes a bearer-authenticated ServiceMonitor, Prometheus rules, and a Grafana dashboard ConfigMap. It expects the Prometheus Operator CRDs and a dashboard sidecar that discovers `grafana_dashboard=1`. I keep Alertmanager receivers and credentials outside the repository.
+
+For a rolling change I delete one pod at a time because the StatefulSets use `OnDelete`. I wait for the replacement to become ready, confirm it is synchronized and unfenced, and verify `acks=all` traffic before touching the next broker. This is an operational restart procedure, not a mixed-binary compatibility claim; I still require an automated upgrade/downgrade matrix before using different Cascade versions in one quorum.
+
 ## Authenticated remote operations
 
 I create the token outside the image, restrict its permissions, and mount it read-only. I then add these environment and broker settings to my deployment:
