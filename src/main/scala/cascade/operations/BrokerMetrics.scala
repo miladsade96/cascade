@@ -1,5 +1,6 @@
 package cascade.operations
 
+import cascade.security.TlsReloadSnapshot
 import java.util.concurrent.atomic.AtomicLong
 
 final case class TrafficSnapshot(
@@ -72,7 +73,8 @@ final case class BrokerMetricsSnapshot(
     heapUsedBytes: Long,
     heapMaxBytes: Long,
     peerSecurity: PeerSecuritySnapshot = PeerSecuritySnapshot.Empty,
-    authentication: AuthenticationSnapshot = AuthenticationSnapshot.Empty
+    authentication: AuthenticationSnapshot = AuthenticationSnapshot.Empty,
+    tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty
 )
 
 object PrometheusMetrics:
@@ -101,6 +103,10 @@ object PrometheusMetrics:
     counter(builder, "cascade_peer_authentications_total", "Internal peer requests accepted by identity policy.", snapshot.peerSecurity.authenticated.toDouble, labels)
     counter(builder, "cascade_peer_tls_authentications_total", "Internal peer requests accepted over mutually authenticated TLS.", snapshot.peerSecurity.tlsAuthenticated.toDouble, labels)
     counter(builder, "cascade_peer_authentication_rejections_total", "Internal peer requests rejected by peer authentication.", snapshot.peerSecurity.rejected.toDouble, labels)
+    gauge(builder, "cascade_tls_enabled", "Whether the Kafka listener uses TLS.", if snapshot.tlsReload.enabled then 1d else 0d, labels)
+    gauge(builder, "cascade_tls_material_generation", "Active TLS key and trust material generation.", snapshot.tlsReload.generation.toDouble, labels)
+    counter(builder, "cascade_tls_material_reloads_total", "Successful atomic TLS material reloads.", snapshot.tlsReload.successfulReloads.toDouble, labels)
+    counter(builder, "cascade_tls_material_reload_failures_total", "Rejected TLS material reloads.", snapshot.tlsReload.failedReloads.toDouble, labels)
     snapshot.authentication.mechanisms.foreach { mechanism =>
       val mechanismLabels = labels.updated("mechanism", mechanism.mechanism)
       counter(builder, "cascade_sasl_authentication_successes_total", "Successful SASL authentications.", mechanism.successes.toDouble, mechanismLabels)
