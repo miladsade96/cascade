@@ -28,3 +28,37 @@ jobs:
           kubectl kustomize deploy/kubernetes > /tmp/cascade-kubernetes.yaml
           test -s /tmp/cascade-kubernetes.yaml
           jq empty deploy/kubernetes/dashboards/cascade.json
+
+  client-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: compatibility/node/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: compatibility/python/requirements.txt
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: compatibility/go/go.mod
+          cache-dependency-path: compatibility/go/go.sum
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+          cache: true
+          cache-dependency-path: compatibility/dotnet/CascadeCompatibility.csproj
+      - name: Run external Kafka client matrix
+        run: |
+          chmod +x sbt compatibility/run.sh
+          compatibility/run.sh
