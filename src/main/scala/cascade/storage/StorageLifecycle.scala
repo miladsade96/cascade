@@ -20,7 +20,9 @@ final case class StorageLifecycleConfig(
     lifecycleIntervalMillis: Long = 5L * 60 * 1000,
     minimumFreeBytes: Long = 0L,
     offsetRetentionMillis: Long = 7L * 24 * 60 * 60 * 1000,
-    journalCompactionBytes: Long = 64L * 1024 * 1024
+    journalCompactionBytes: Long = 64L * 1024 * 1024,
+    deleteRetentionMillis: Long = 24L * 60 * 60 * 1000,
+    compactionMaxBytesPerSecond: Long = -1L
 ):
   require(retentionMillis == -1L || retentionMillis > 0L, "retention time must be -1 or positive")
   require(retentionBytes == -1L || retentionBytes > 0L, "retention bytes must be -1 or positive")
@@ -28,6 +30,8 @@ final case class StorageLifecycleConfig(
   require(minimumFreeBytes >= 0L, "minimum free disk bytes must be non-negative")
   require(offsetRetentionMillis == -1L || offsetRetentionMillis > 0L, "offset retention must be -1 or positive")
   require(journalCompactionBytes >= 1024L, "journal compaction threshold must be at least 1 KiB")
+  require(deleteRetentionMillis >= 0L, "tombstone retention cannot be negative")
+  require(compactionMaxBytesPerSecond == -1L || compactionMaxBytesPerSecond > 0L, "compaction limit must be -1 or positive")
 
 final case class TopicLifecyclePolicy(
     cleanupPolicy: CleanupPolicy,
