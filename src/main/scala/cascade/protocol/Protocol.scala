@@ -24,6 +24,7 @@ object ApiKey:
   val CreateAcls: Short = 30
   val DeleteAcls: Short = 31
   val DescribeConfigs: Short = 32
+  val IncrementalAlterConfigs: Short = 44
   val SaslAuthenticate: Short = 36
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
@@ -55,6 +56,7 @@ object Errors:
   val UnknownProducerId: Short = 59
   val UnsupportedVersion: Short = 35
   val TopicAlreadyExists: Short = 36
+  val InvalidConfiguration: Short = 40
   val InvalidPartitions: Short = 37
   val InvalidReplicationFactor: Short = 38
   val NotController: Short = 41
@@ -111,6 +113,7 @@ object Compatibility:
     ApiVersion(ApiKey.CreateAcls, 1, 1),
     ApiVersion(ApiKey.DeleteAcls, 1, 1),
     ApiVersion(ApiKey.DescribeConfigs, 2, 2),
+    ApiVersion(ApiKey.IncrementalAlterConfigs, 0, 0),
     ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),

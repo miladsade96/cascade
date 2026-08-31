@@ -116,6 +116,7 @@ final class RequestHandler(
       case ApiKey.CreateAcls => createAcls(body, session)
       case ApiKey.DeleteAcls => deleteAcls(body, session)
       case ApiKey.DescribeConfigs => describeConfigs(body)
+      case ApiKey.IncrementalAlterConfigs => incrementalAlterConfigs(body, session)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
       case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
@@ -765,14 +766,18 @@ final class RequestHandler(
       VisibleConfig("min.insync.replicas", config.minInSyncReplicas.toString, 4),
       VisibleConfig("auto.create.topics.enable", config.autoCreateTopics.toString, 4)
     )
-    val topicValues = Vector(
-      VisibleConfig("cleanup.policy", cleanupPolicyName, 5),
-      VisibleConfig("retention.ms", config.storageLifecycle.retentionMillis.toString, 5),
-      VisibleConfig("retention.bytes", config.storageLifecycle.retentionBytes.toString, 5),
+    def topicValues(topic: String): Vector[VisibleConfig] =
+      val configured = registry.configuredLifecyclePolicy(topic)
+      val policy = configured.orElse(registry.effectiveLifecyclePolicy(topic)).getOrElse(cascade.storage.TopicLifecyclePolicy.from(config.storageLifecycle))
+      val lifecycleSource = if configured.nonEmpty then 1 else 5
+      Vector(
+      VisibleConfig("cleanup.policy", cleanupPolicyName(policy.cleanupPolicy), lifecycleSource),
+      VisibleConfig("retention.ms", policy.retentionMillis.toString, lifecycleSource),
+      VisibleConfig("retention.bytes", policy.retentionBytes.toString, lifecycleSource),
       VisibleConfig("segment.bytes", config.segmentBytes.toString, 5),
       VisibleConfig("max.message.bytes", config.maxRequestBytes.toString, 5),
       VisibleConfig("min.insync.replicas", config.minInSyncReplicas.toString, 5)
-    )
+      )
     def selected(values: Vector[VisibleConfig], keys: Option[Vector[String]]): Vector[VisibleConfig] =
       keys match
         case None => values
@@ -787,7 +792,7 @@ final class RequestHandler(
         case 4 =>
           ConfigResult(request.resourceType, request.name, Errors.BrokerNotAvailable, Some("broker is not available"), Vector.empty)
         case 2 if topicExists(request.name) =>
-          ConfigResult(request.resourceType, request.name, Errors.None, None, selected(topicValues, request.keys))
+          ConfigResult(request.resourceType, request.name, Errors.None, None, selected(topicValues(request.name), request.keys))
         case 2 =>
           ConfigResult(request.resourceType, request.name, Errors.UnknownTopicOrPartition, Some("topic does not exist"), Vector.empty)
         case _ =>
@@ -810,6 +815,80 @@ final class RequestHandler(
       }
     }
     Some(writer.result())
+
+  private def incrementalAlterConfigs(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    final case class Change(name: String, operation: Byte, value: Option[String])
+    final case class RequestedResource(resourceType: Byte, name: String, changes: Vector[Change])
+    val requests = cursor.readArray {
+      val resourceType = cursor.readByte()
+      val name = cursor.readString()
+      val changes = cursor.readArray(Change(cursor.readString(), cursor.readByte(), cursor.readNullableString()))
+      RequestedResource(resourceType, name, changes)
+    }
+    val validateOnly = cursor.readBoolean()
+    cursor.ensureFullyRead()
+
+    val defaults = cascade.storage.TopicLifecyclePolicy.from(config.storageLifecycle)
+    val results = requests.map { request =>
+      if request.resourceType != 2.toByte then
+        (request, Errors.InvalidRequest, Some("only topic configuration is supported"))
+      else if !topicExists(request.name) then
+        (request, Errors.UnknownTopicOrPartition, Some("topic does not exist"))
+      else if !isAuthorized(session, AclOperation.Alter, ResourceType.Topic, request.name) then
+        (request, Errors.TopicAuthorizationFailed, Some("topic authorization failed"))
+      else
+        val current = registry.effectiveLifecyclePolicy(request.name).getOrElse(defaults)
+        applyLifecycleChanges(current, defaults, request.changes.map(change => (change.name, change.operation, change.value))) match
+          case Left(message) => (request, Errors.InvalidConfiguration, Some(message))
+          case Right(policy) if validateOnly => (request, Errors.None, None)
+          case Right(policy) =>
+            val result = clusterManager.alterTopicLifecycle(request.name, policy)
+            (request, result.errorCode, result.message)
+    }
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(results) { case (request, error, message) =>
+      writer.writeShort(error).writeNullableString(message).writeByte(request.resourceType).writeString(request.name): Unit
+    }
+    Some(writer.result())
+
+  private def applyLifecycleChanges(
+      current: cascade.storage.TopicLifecyclePolicy,
+      defaults: cascade.storage.TopicLifecyclePolicy,
+      changes: Vector[(String, Byte, Option[String])]
+  ): Either[String, cascade.storage.TopicLifecyclePolicy] =
+    try
+      val updated = changes.foldLeft(current) { case (policy, (name, operation, value)) =>
+        name match
+          case "cleanup.policy" =>
+            val next = operation.toInt match
+              case 0 => cascade.storage.CleanupPolicy.parse(value.getOrElse(throw IllegalArgumentException("cleanup.policy requires a value")))
+              case 1 => defaults.cleanupPolicy
+              case 2 | 3 =>
+                val requested = value.getOrElse(throw IllegalArgumentException("cleanup.policy list operation requires a value"))
+                  .split(',').iterator.map(_.trim.toLowerCase).filter(_.nonEmpty).toSet
+                val existing = cleanupPolicyName(policy.cleanupPolicy).split(',').toSet
+                val values = if operation == 2.toByte then existing ++ requested else existing -- requested
+                if values.isEmpty then throw IllegalArgumentException("cleanup.policy cannot be empty")
+                cascade.storage.CleanupPolicy.parse(values.toVector.sorted.mkString(","))
+              case other => throw IllegalArgumentException(s"unsupported config operation: $other")
+            policy.copy(cleanupPolicy = next)
+          case "retention.ms" =>
+            policy.copy(retentionMillis = lifecycleLong("retention.ms", operation, value, defaults.retentionMillis))
+          case "retention.bytes" =>
+            policy.copy(retentionBytes = lifecycleLong("retention.bytes", operation, value, defaults.retentionBytes))
+          case other => throw IllegalArgumentException(s"unsupported topic configuration: $other")
+      }
+      Right(updated)
+    catch case error: IllegalArgumentException => Left(Option(error.getMessage).getOrElse("invalid topic configuration"))
+
+  private def lifecycleLong(name: String, operation: Byte, value: Option[String], default: Long): Long =
+    operation.toInt match
+      case 0 =>
+        val parsed = value.getOrElse(throw IllegalArgumentException(s"$name requires a value")).toLong
+        if parsed != -1L && parsed <= 0L then throw IllegalArgumentException(s"$name must be -1 or positive")
+        parsed
+      case 1 => default
+      case other => throw IllegalArgumentException(s"operation $other is not valid for $name")
 
   private def alterPartitionReassignments(cursor: ByteCursor): Option[Array[Byte]] =
     cursor.readInt() // timeout_ms; the metadata quorum bounds the operation.
@@ -1375,7 +1454,9 @@ final class RequestHandler(
     if clusterManager.isEnabled then clusterManager.topic(topic).nonEmpty
     else registry.partitions(topic).nonEmpty
 
-  private def cleanupPolicyName: String = config.storageLifecycle.cleanupPolicy match
+  private def cleanupPolicyName: String = cleanupPolicyName(config.storageLifecycle.cleanupPolicy)
+
+  private def cleanupPolicyName(policy: cascade.storage.CleanupPolicy): String = policy match
     case cascade.storage.CleanupPolicy.Delete        => "delete"
     case cascade.storage.CleanupPolicy.Compact       => "compact"
     case cascade.storage.CleanupPolicy.CompactDelete => "compact,delete"

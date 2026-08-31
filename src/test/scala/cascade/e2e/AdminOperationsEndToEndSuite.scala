@@ -5,7 +5,7 @@ import java.nio.file.Files
 import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.TimeUnit
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, ConfigEntry, NewTopic}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, AlterConfigOp, ConfigEntry, NewTopic}
 import org.apache.kafka.common.config.ConfigResource
 import scala.jdk.CollectionConverters.*
 
@@ -50,6 +50,50 @@ final class AdminOperationsEndToEndSuite extends munit.FunSuite:
       broker.close()
       deleteTree(directory)
   }
+
+  test("Apache Kafka Admin changes durable per-topic lifecycle configuration") {
+    val directory = Files.createTempDirectory("cascade-admin-lifecycle-e2e")
+    def createBroker(): KafkaBroker = KafkaBroker(
+      BrokerConfig(bindHost = "127.0.0.1", port = 0, advertisedHost = "127.0.0.1", dataDirectory = directory)
+    )
+    val resource = ConfigResource(ConfigResource.Type.TOPIC, "policy-events")
+    var broker = createBroker()
+    try
+      broker.start()
+      withAdmin(broker) { admin =>
+        admin.createTopics(java.util.List.of(NewTopic("policy-events", 1, 1.toShort))).all().get(10, TimeUnit.SECONDS)
+        val changes = java.util.List.of(
+          AlterConfigOp(ConfigEntry("cleanup.policy", "compact,delete"), AlterConfigOp.OpType.SET),
+          AlterConfigOp(ConfigEntry("retention.ms", "3600000"), AlterConfigOp.OpType.SET),
+          AlterConfigOp(ConfigEntry("retention.bytes", "1073741824"), AlterConfigOp.OpType.SET)
+        )
+        admin.incrementalAlterConfigs(Map(resource -> changes).asJava).all().get(10, TimeUnit.SECONDS)
+        assertLifecycle(admin, resource)
+      }
+      broker.close()
+
+      broker = createBroker()
+      broker.start()
+      withAdmin(broker)(admin => assertLifecycle(admin, resource))
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
+  private def withAdmin(broker: KafkaBroker)(action: Admin => Unit): Unit =
+    val properties = Properties()
+    properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.bootstrapServers)
+    properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
+    val admin = Admin.create(properties)
+    try action(admin)
+    finally admin.close(Duration.ofSeconds(5))
+
+  private def assertLifecycle(admin: Admin, resource: ConfigResource): Unit =
+    val config = admin.describeConfigs(java.util.List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource)
+    assertEquals(config.get("cleanup.policy").value(), "compact,delete")
+    assertEquals(config.get("retention.ms").value(), "3600000")
+    assertEquals(config.get("retention.bytes").value(), "1073741824")
+    assertEquals(config.get("retention.ms").source(), ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG)
 
   private def deleteTree(root: java.nio.file.Path): Unit =
     if Files.exists(root) then

@@ -4,7 +4,7 @@ import cascade.TestRecordBatch
 import cascade.broker.{BrokerConfig, KafkaBroker}
 import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient, VoterDirectoryId}
 import cascade.protocol.{ByteWriter, Errors}
-import cascade.storage.{FlushPolicy, PartitionLog}
+import cascade.storage.{CleanupPolicy, FlushPolicy, PartitionLog, TopicLifecyclePolicy}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.net.ServerSocket
@@ -15,11 +15,12 @@ import java.util.Properties
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewPartitionReassignment, NewTopic, RaftVoterEndpoint}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, AlterConfigOp, ConfigEntry, NewPartitionReassignment, NewTopic, RaftVoterEndpoint}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{TopicPartition, Uuid}
+import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.errors.{InvalidReplicaAssignmentException, NoReassignmentInProgressException}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
@@ -370,6 +371,54 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       finally admin.close(Duration.ofSeconds(5))
     finally
       restartedBroker.foreach(_.close())
+      brokers.foreach(_.close())
+      directories.foreach(deleteTree)
+  }
+
+  test("per-topic lifecycle configuration is quorum committed and survives controller loss") {
+    val ports = freePorts(3)
+    val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
+    val directories = nodes.map(node => Files.createTempDirectory(s"cascade-policy-quorum-${node.id}"))
+    val configs = nodes.zip(directories).map { case (node, directory) =>
+      BrokerConfig(
+        bindHost = "127.0.0.1", port = node.port, advertisedHost = node.host, advertisedPort = Some(node.port),
+        dataDirectory = directory, flushPolicy = FlushPolicy.Sync, nodeId = node.id, clusterNodes = nodes,
+        controllerId = 1, defaultReplicationFactor = 3, minInSyncReplicas = 2, peerTimeoutMillis = 800,
+        controllerHeartbeatMillis = 100, controllerElectionTimeoutMillis = 600
+      )
+    }
+    val brokers = configs.map(KafkaBroker(_))
+    val bootstrapServers = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
+    try
+      brokers.foreach(_.start())
+      val admin = Admin.create(adminProperties(bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic("policy-quorum", 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
+        awaitInSyncReplicas(admin, "policy-quorum", 0, Set(1, 2, 3))
+        val resource = ConfigResource(ConfigResource.Type.TOPIC, "policy-quorum")
+        val changes = java.util.List.of(
+          AlterConfigOp(ConfigEntry("cleanup.policy", "compact,delete"), AlterConfigOp.OpType.SET),
+          AlterConfigOp(ConfigEntry("retention.ms", "7200000"), AlterConfigOp.OpType.SET),
+          AlterConfigOp(ConfigEntry("retention.bytes", "2147483648"), AlterConfigOp.OpType.SET)
+        )
+        admin.incrementalAlterConfigs(Map(resource -> changes).asJava).all().get(20, TimeUnit.SECONDS)
+        val expected = TopicLifecyclePolicy(CleanupPolicy.CompactDelete, 7_200_000L, 2_147_483_648L)
+        val replicationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        var replicated = false
+        while !replicated && System.nanoTime() < replicationDeadline do
+          replicated = nodes.forall(node => clusterMetadata(node).byName.get("policy-quorum").flatMap(_.lifecyclePolicy).contains(expected))
+          if !replicated then Thread.sleep(50L)
+        assert(replicated, "topic lifecycle policy did not reach every quorum member")
+
+        val firstController = awaitController(admin)
+        brokers(firstController - 1).close()
+        awaitController(admin, excludedId = Some(firstController))
+        val restored = admin.describeConfigs(java.util.List.of(resource)).all().get(10, TimeUnit.SECONDS).get(resource)
+        assertEquals(restored.get("cleanup.policy").value(), "compact,delete")
+        assertEquals(restored.get("retention.ms").value(), "7200000")
+        assertEquals(restored.get("retention.bytes").value(), "2147483648")
+      finally admin.close(Duration.ofSeconds(5))
+    finally
       brokers.foreach(_.close())
       directories.foreach(deleteTree)
   }
