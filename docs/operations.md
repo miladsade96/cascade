@@ -50,7 +50,7 @@ scrape_configs:
       - targets: ["127.0.0.1:9404"]
 ```
 
-Most metric series have only the `node_id` label. SASL success and failure counters add one bounded `mechanism` label with `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `UNKNOWN`. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, client and peer authentication/TLS/rejection totals, TLS material generation/reload/failure state, quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, key ID, token, and request identifiers out of labels to avoid unbounded cardinality and secret leakage.
+Most metric series have only the `node_id` label. SASL success and failure counters add one bounded `mechanism` label with `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `UNKNOWN`. Traffic quota metrics use bounded direction/class labels rather than principal names. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, client and peer authentication/TLS/rejection totals, TLS material generation/reload/failure state, ingress/egress/Produce/Fetch quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, key ID, token, and request identifiers out of labels to avoid unbounded cardinality and secret leakage.
 
 ## Readiness policy
 
@@ -79,11 +79,17 @@ The main event families are:
 
 I evaluate capacity immediately after startup and then every `--capacity-alert-interval-ms`. Connection and request thresholds are ratios of their configured hard limits. Pending flush and minimum free disk are byte thresholds; zero disables that byte alert. I repeat a continuing alert only after `--capacity-alert-repeat-ms`, so my log or external collector is not flooded.
 
-I currently route alerts through structured events. I still need a standard Alertmanager/webhook integration and maintained dashboard pack, so I configure my log collector to page on `capacity_alert` and close the incident on `capacity_alert_resolved`.
+For non-Kubernetes deployments I route these events through my log collector and close the incident on `capacity_alert_resolved`. The Kubernetes pack also includes `PrometheusRule` alerts for broker loss/fencing, controller disagreement, disk/heap/flush pressure, storage rejection, request failures, peer-authentication rejection, TLS reload failure, and quota rejection. A Grafana dashboard ConfigMap covers availability, traffic, latency, storage, quotas, JVM, and security signals.
 
 ## Kafka Admin visibility
 
-Kafka Admin 4.3.1 can call `describeConfigs` for `ConfigResource.Type.BROKER` and `ConfigResource.Type.TOPIC`. I return only non-sensitive effective values and mark them read-only. Topic values currently reflect broker-wide defaults because per-topic lifecycle/config mutation is not implemented. I do not advertise `AlterConfigs` or `IncrementalAlterConfigs`.
+Kafka Admin 4.3.1 can call `describeConfigs` for `ConfigResource.Type.BROKER` and `ConfigResource.Type.TOPIC`. I return only non-sensitive effective values. Broker defaults remain read-only; topic `cleanup.policy`, `retention.ms`, and `retention.bytes` can be set, deleted back to the broker default, or appended/subtracted where the configuration type allows it through `IncrementalAlterConfigs` v0. Cascade validates the full resulting policy, commits it through the metadata quorum, and exposes it only after the commit succeeds.
+
+## Kubernetes monitoring pack
+
+I render the production topology with `kubectl kustomize deploy/kubernetes`. The operations Service is cluster-local, the bearer token comes from the `cascade-operations` Secret, and the `ServiceMonitor` sends that token on `/metrics`. I install the Prometheus Operator CRDs before applying the pack because `ServiceMonitor` and `PrometheusRule` are custom resources.
+
+The generated `cascade-grafana-dashboard` ConfigMap has the `grafana_dashboard=1` discovery label. My Grafana sidecar imports it automatically when configured for that label. I keep alert routing, receivers, silences, and escalation policy in the platform Alertmanager configuration because those values contain organization-specific endpoints and secrets.
 
 ## Startup and shutdown checklist
 
