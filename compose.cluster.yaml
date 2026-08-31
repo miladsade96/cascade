@@ -1,0 +1,137 @@
+name: cascade-cluster
+
+x-cascade-common: &cascade-common
+  image: ${CASCADE_IMAGE:-cascade:local}
+  build:
+    context: .
+    args:
+      VERSION: ${CASCADE_VERSION:-dev}
+      REVISION: ${CASCADE_REVISION:-local}
+      CREATED: ${CASCADE_CREATED:-unknown}
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
+  tmpfs:
+    - /tmp:size=64m,mode=1777,nosuid,nodev,noexec
+  ulimits:
+    nofile:
+      soft: 100000
+      hard: 100000
+  stop_grace_period: 2m
+
+services:
+  cascade-1:
+    <<: *cascade-common
+    ports:
+      - "19092:19092"
+      - "19093:19093"
+      - "19094:19094"
+    environment:
+      JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
+      CASCADE_OPERATIONS_PORT: "19401"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19092"
+      - --advertised-host
+      - localhost
+      - --advertised-port
+      - "19092"
+      - --node-id
+      - "1"
+      - --data-dir
+      - /var/lib/cascade
+      - --cluster-nodes
+      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - --controller-id
+      - "1"
+      - --default-replication-factor
+      - "3"
+      - --min-insync-replicas
+      - "2"
+      - --operations-port
+      - "19401"
+    volumes:
+      - cascade-node-1:/var/lib/cascade
+
+  cascade-2:
+    <<: *cascade-common
+    network_mode: service:cascade-1
+    depends_on:
+      cascade-1:
+        condition: service_started
+    environment:
+      JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
+      CASCADE_OPERATIONS_PORT: "19402"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19093"
+      - --advertised-host
+      - localhost
+      - --advertised-port
+      - "19093"
+      - --node-id
+      - "2"
+      - --data-dir
+      - /var/lib/cascade
+      - --cluster-nodes
+      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - --controller-id
+      - "1"
+      - --default-replication-factor
+      - "3"
+      - --min-insync-replicas
+      - "2"
+      - --operations-port
+      - "19402"
+    volumes:
+      - cascade-node-2:/var/lib/cascade
+
+  cascade-3:
+    <<: *cascade-common
+    network_mode: service:cascade-1
+    depends_on:
+      cascade-1:
+        condition: service_started
+    environment:
+      JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
+      CASCADE_OPERATIONS_PORT: "19403"
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "19094"
+      - --advertised-host
+      - localhost
+      - --advertised-port
+      - "19094"
+      - --node-id
+      - "3"
+      - --data-dir
+      - /var/lib/cascade
+      - --cluster-nodes
+      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - --controller-id
+      - "1"
+      - --default-replication-factor
+      - "3"
+      - --min-insync-replicas
+      - "2"
+      - --operations-port
+      - "19403"
+    volumes:
+      - cascade-node-3:/var/lib/cascade
+
+volumes:
+  cascade-node-1:
+  cascade-node-2:
+  cascade-node-3:
