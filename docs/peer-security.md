@@ -6,7 +6,7 @@ I use mutual TLS for every controller, metadata, replication, and recovery reque
 
 I issue every broker a distinct private key and certificate from the same cluster CA. Each certificate has both `serverAuth` and `clientAuth` extended-key usages and a subject alternative name matching the broker's advertised host. I never reuse one certificate across node IDs.
 
-My trust store contains the issuing CA, not arbitrary leaf certificates. I keep key-store and trust-store passwords in files readable only by the service identity. Cascade loads TLS keys and trust roots at startup, so I rotate that material with a rolling restart.
+My trust store contains the issuing CA, not arbitrary leaf certificates. I keep key-store and trust-store passwords in files readable only by the service identity. Cascade reloads atomically replaced key and trust stores on `--ssl-reload-ms`; the complete procedure is in my [TLS rotation runbook](tls-rotation.md).
 
 ## Identity policy
 
@@ -25,23 +25,23 @@ Cascade canonicalizes each subject before comparing it. I can assign more than o
 Every broker uses its own key store and the same trust store and identity policy. This is the node 1 shape I use:
 
 ```powershell
-.\sbt.bat "run --host 0.0.0.0 --port 9092 --advertised-host cascade-1.example.com --advertised-port 9092 --node-id 1 --data-dir data-1 --cluster-nodes 1@cascade-1.example.com:9092,2@cascade-2.example.com:9092,3@cascade-3.example.com:9092 --controller-id 1 --default-replication-factor 3 --min-insync-replicas 2 --security-protocol SSL --ssl-keystore secrets/cascade-1.p12 --ssl-keystore-password-file secrets/keystore.password --ssl-truststore secrets/cluster-ca.p12 --ssl-truststore-password-file secrets/truststore.password --ssl-client-auth requested --peer-security-protocol SSL --peer-identity-file secrets/peer-identities.conf --peer-identity-reload-ms 1000 --audit-log logs/security-audit.jsonl --operations-port 9404"
+.\sbt.bat "run --host 0.0.0.0 --port 9092 --advertised-host cascade-1.example.com --advertised-port 9092 --node-id 1 --data-dir data-1 --cluster-nodes 1@cascade-1.example.com:9092,2@cascade-2.example.com:9092,3@cascade-3.example.com:9092 --controller-id 1 --default-replication-factor 3 --min-insync-replicas 2 --security-protocol SSL --ssl-keystore secrets/cascade-1.p12 --ssl-keystore-password-file secrets/keystore.password --ssl-truststore secrets/cluster-ca.p12 --ssl-truststore-password-file secrets/truststore.password --ssl-client-auth requested --ssl-reload-ms 1000 --peer-security-protocol SSL --peer-identity-file secrets/peer-identities.conf --peer-identity-reload-ms 1000 --audit-log logs/security-audit.jsonl --operations-port 9404"
 ```
 
 `requested` lets ordinary TLS Kafka clients connect without a client certificate while internal requests still require one. I use `required` when every client also has a trusted certificate. Peer TLS cannot start unless the broker listener uses `SSL` or `SASL_SSL`, client-certificate verification is enabled, a trust store is configured, and the identity file is present.
 
-## Rotation without an authorization gap
+## Rotation without an authorization or trust gap
 
-I rotate one broker at a time:
+For a leaf replacement under the same CA I rotate one broker at a time:
 
 1. I issue the replacement certificate with the same advertised-host SAN and a new subject or key.
 2. I add a second identity-policy line for that node and atomically replace the policy file.
 3. I wait longer than `--peer-identity-reload-ms` and confirm readiness remains healthy.
-4. I install the new key store and restart that broker while the other two maintain quorum.
-5. I confirm replication catches up and peer TLS authentication counters advance.
+4. I atomically replace the broker key store and wait for its TLS material generation to advance.
+5. I open a new connection and confirm replicated traffic plus peer TLS authentication counters advance.
 6. I remove the old subject from the policy, atomically publish it, and repeat for the next node.
 
-If the replacement policy is malformed, `peer_identity_policy` fails readiness and the last valid policy remains active. I repair the file instead of restarting the broker.
+For a CA change I first publish a trust store containing both chains everywhere, rotate every leaf, and remove the old CA only after every broker uses the new leaf. If TLS material or the identity policy is malformed, `tls_material` or `peer_identity_policy` fails readiness and the last valid state remains active. I repair the file instead of restarting the broker.
 
 ## What I monitor
 
@@ -51,6 +51,6 @@ The security audit contains `peer_authentication` events for allowed and denied 
 
 ## Qualification I require
 
-My automated tests use three distinct CA-signed broker certificates. They verify hostname-checked mutual handshakes, rejection of untrusted and hostname-mismatched certificates, rejection when one broker certificate claims another node ID, live identity-policy rotation, encrypted RF=3 replication, and continued `acks=all` production after the original broker/controller stops.
+My automated tests use distinct CA-signed broker certificates. They verify hostname-checked mutual handshakes, rejection of untrusted and hostname-mismatched certificates, rejection when one broker certificate claims another node ID, live identity-policy rotation, old/new CA overlap, live key and trust replacement, peer reconnection, encrypted RF=3 replication during every rotation phase, and continued `acks=all` production after the original broker/controller stops.
 
-This closes the broker-to-broker encryption and authentication gate. SCRAM-SHA-256/512 and signed OAuth/OIDC tokens are available for client authentication, but neither replaces certificate-bound peer identity. I still need TLS key-store hot reload, Kafka ACL Admin APIs, and a rolling-version protocol negotiation layer, which I track in my [production-readiness checklist](production-readiness.md).
+This closes the broker-to-broker encryption, authentication, and TLS material-rotation gate. SCRAM-SHA-256/512 and signed OAuth/OIDC tokens are available for client authentication, but neither replaces certificate-bound peer identity. I still need Kafka ACL Admin APIs and a rolling-version protocol negotiation layer, which I track in my [production-readiness checklist](production-readiness.md).

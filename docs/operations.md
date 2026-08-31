@@ -26,7 +26,7 @@ The token protects every endpoint and is compared in constant time. It does not 
 | Endpoint | Healthy response | Failure response | What I use it for |
 | --- | ---: | ---: | --- |
 | `GET /live` | 200 | 503 | Process supervision; it checks whether the broker is running |
-| `GET /ready` | 200 | 503 | Load-balancer admission; it checks running, unfenced state, flush backlog, disk reserve, structured-log health, peer identity-policy reload health, and PLAIN/SCRAM/OAuth credential or key-policy reload health |
+| `GET /ready` | 200 | 503 | Load-balancer admission; it checks running, unfenced state, flush backlog, disk reserve, structured-log health, peer identity-policy reload health, PLAIN/SCRAM/OAuth policy health, and TLS material reload health |
 | `GET /metrics` | 200 | 500 | Prometheus 0.0.4 scrape output |
 | `GET /v1/status` | 200 | 500 | Compact JSON broker, traffic, storage, disk, and readiness state |
 
@@ -50,7 +50,7 @@ scrape_configs:
       - targets: ["127.0.0.1:9404"]
 ```
 
-Most metric series have only the `node_id` label. SASL success and failure counters add one bounded `mechanism` label with `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `UNKNOWN`. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, client and peer authentication/TLS/rejection totals, quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, key ID, token, and request identifiers out of labels to avoid unbounded cardinality and secret leakage.
+Most metric series have only the `node_id` label. SASL success and failure counters add one bounded `mechanism` label with `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `UNKNOWN`. I export broker uptime/fencing/controller state, topic and local-partition counts, connection/request admission, request and response traffic, cumulative request duration/failures, client and peer authentication/TLS/rejection totals, TLS material generation/reload/failure state, quota activity, flush work/backlog, storage lifecycle/rejection totals, disk capacity, and JVM heap. I keep topic, client, principal, key ID, token, and request identifiers out of labels to avoid unbounded cardinality and secret leakage.
 
 ## Readiness policy
 
@@ -62,6 +62,8 @@ If `peer_identity_policy` fails, Cascade continues using the last valid policy. 
 
 If `credential_policy` fails, Cascade likewise continues using the last valid PLAIN, SCRAM, and OAuth JWKS snapshots. I repair and atomically replace the malformed file or restore the verified HTTPS JWKS endpoint, wait for the reload interval, and require readiness plus a test authentication to recover before I finish a credential or signing-key rotation.
 
+If `tls_material` fails, Cascade continues using the last valid key/trust generation for new connections. I atomically restore or repair both stores, wait for readiness to recover, and require a fresh TLS handshake before I finish the rotation. My [TLS rotation runbook](tls-rotation.md) covers leaf and CA replacement without a trust gap.
+
 ## Structured events and capacity alerts
 
 With `--structured-log logs/cascade.jsonl`, I write one JSON object per line. I rotate before an event would cross `--structured-log-max-bytes`, retain the configured number of generations, and name them `cascade.jsonl.1`, `cascade.jsonl.2`, and so on. Standard error remains enabled unless I pass `--no-stderr-log`.
@@ -71,6 +73,7 @@ The main event families are:
 - `broker_starting`, `broker_started`, `broker_stopping`, and `broker_stopped`;
 - connection accept, connection handling, protocol, operations-server, storage, and capacity-monitor failures;
 - `peer_authentication` audit events for certificate-bound internal requests, with allowed or denied decisions;
+- `tls_material_reloaded` and `tls_material_reload_failed` for atomic key/trust rotation outcomes;
 - `capacity_alert` with `alert`, `current`, `threshold`, and `unit` fields;
 - `capacity_alert_resolved` when an active condition clears.
 
@@ -90,4 +93,4 @@ In a container I use the built-in `cascade.operations.ContainerHealthCheck`, whi
 
 For shutdown I first drain client traffic, wait for in-flight work and pending flush bytes to fall, terminate the broker normally, and wait for `broker_stopped`. A clean close forces dirty logs and publishes the clean-shutdown marker required by the backup tool. I never take an offline backup after a forced kill until I have started Cascade to perform recovery and then completed a clean shutdown.
 
-My [OAuth and OIDC runbook](oauth-oidc.md) covers provider policy, client configuration, signing-key rotation, and token monitoring. My [SCRAM authentication runbook](scram-authentication.md) covers verifier generation, client configuration, rotation, and authentication monitoring. My [broker-to-broker security runbook](peer-security.md) covers certificate inventory, identity policy, monitoring, and rolling rotation. My separate [backup and restore runbook](backup-restore.md) covers disaster-recovery copies and restore drills. The remaining release gates stay in [production-readiness.md](production-readiness.md).
+My [TLS rotation runbook](tls-rotation.md) covers listener and cluster PKI replacement. My [OAuth and OIDC runbook](oauth-oidc.md) covers provider policy, client configuration, signing-key rotation, and token monitoring. My [SCRAM authentication runbook](scram-authentication.md) covers verifier generation, client configuration, rotation, and authentication monitoring. My [broker-to-broker security runbook](peer-security.md) covers certificate inventory, identity policy, monitoring, and live rotation. My separate [backup and restore runbook](backup-restore.md) covers disaster-recovery copies and restore drills. The remaining release gates stay in [production-readiness.md](production-readiness.md).
