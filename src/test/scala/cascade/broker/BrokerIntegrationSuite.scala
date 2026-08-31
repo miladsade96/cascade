@@ -14,6 +14,49 @@ import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import scala.jdk.CollectionConverters.*
 
 final class BrokerIntegrationSuite extends FunSuite:
+  test("serves the flexible ConsumerGroupHeartbeat protocol with server-side assignment") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("modern-events", 70))
+        val join = requestHeader(ApiKey.ConsumerGroupHeartbeat, 0, 71, flexible = true)
+          .writeCompactString("modern-group")
+          .writeCompactString("")
+          .writeInt(0)
+          .writeCompactNullableString(None)
+          .writeCompactNullableString(None)
+          .writeInt(30_000)
+        join.writeCompactNullableArray(Some(Vector("modern-events")))(join.writeCompactString)
+        join.writeCompactNullableString(None)
+        join.writeCompactNullableArray(Some(Vector.empty[Unit]))(_ => ())
+        join.writeEmptyTaggedFields()
+
+        val response = request(output, input, join.result())
+        assertEquals(response.readInt(), 71)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readCompactNullableString(), None)
+        assert(response.readCompactNullableString().exists(_.nonEmpty))
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readInt(), 5000)
+        assertEquals(response.readByte(), 1.toByte)
+        val assignment = response.readCompactArray {
+          val id = response.readUuid()
+          val partitions = response.readCompactArray(response.readInt())
+          response.skipTaggedFields()
+          (id, partitions)
+        }
+        assertEquals(assignment.map(_._2), Vector(Vector(0)))
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("close is safe before start and permanently closes the broker") {
     val directory = Files.createTempDirectory("cascade-broker-lifecycle")
     val broker = KafkaBroker(

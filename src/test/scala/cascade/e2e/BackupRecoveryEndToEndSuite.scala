@@ -15,6 +15,53 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySe
 import scala.jdk.CollectionConverters.*
 
 final class BackupRecoveryEndToEndSuite extends munit.FunSuite:
+  test("online snapshot is a durable point-in-time image while the broker keeps serving") {
+    val root = Files.createTempDirectory("cascade-online-snapshot-e2e")
+    val original = root.resolve("original")
+    val backup = root.resolve("online-backup")
+    val restored = root.resolve("restored")
+    try
+      val running = broker(original)
+      try
+        running.start()
+        val admin = Admin.create(adminProperties(running.bootstrapServers))
+        try admin.createTopics(java.util.List.of(NewTopic("snapshot-events", 1, 1.toShort))).all().get(10, TimeUnit.SECONDS)
+        finally admin.close(Duration.ofSeconds(5))
+        val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(running.bootstrapServers))
+        try
+          (0 until 100).foreach { index =>
+            producer.send(ProducerRecord("snapshot-events", s"before-$index".getBytes(StandardCharsets.UTF_8))).get(10, TimeUnit.SECONDS)
+          }
+          val manifest = running.createOnlineSnapshot(backup)
+          assert(manifest.entries.nonEmpty)
+          assertEquals(BackupRestore.verify(backup).manifest, manifest)
+          (0 until 25).foreach { index =>
+            producer.send(ProducerRecord("snapshot-events", s"after-$index".getBytes(StandardCharsets.UTF_8))).get(10, TimeUnit.SECONDS)
+          }
+        finally producer.close(Duration.ofSeconds(5))
+      finally running.close()
+
+      BackupRestore.restore(backup, restored)
+      val recovered = broker(restored)
+      try
+        recovered.start()
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(recovered.bootstrapServers))
+        try
+          val partition = TopicPartition("snapshot-events", 0)
+          consumer.assign(java.util.List.of(partition))
+          consumer.seekToBeginning(java.util.List.of(partition))
+          val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos
+          val values = scala.collection.mutable.ArrayBuffer.empty[String]
+          while values.size < 100 && System.nanoTime() < deadline do
+            consumer.poll(Duration.ofMillis(200)).iterator().asScala.foreach(record =>
+              values += String(record.value(), StandardCharsets.UTF_8)
+            )
+          assertEquals(values.toVector, (0 until 100).map(index => s"before-$index").toVector)
+        finally consumer.close()
+      finally recovered.close()
+    finally deleteTree(root)
+  }
+
   test("restored offline backup preserves exact Kafka-visible records") {
     val root = Files.createTempDirectory("cascade-backup-e2e")
     val original = root.resolve("original")
