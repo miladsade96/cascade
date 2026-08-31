@@ -18,8 +18,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: sbt
+      - uses: azure/setup-kubectl@v4
       - name: Unit, integration, and end-to-end tests
         run: |
           chmod +x sbt
           ./sbt test
-
+      - name: Render deployment and validate dashboard JSON
+        run: |
+          kubectl kustomize deploy/kubernetes > /tmp/cascade-kubernetes.yaml
+          test -s /tmp/cascade-kubernetes.yaml
+          jq empty deploy/kubernetes/dashboards/cascade.json
