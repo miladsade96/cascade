@@ -40,7 +40,7 @@ private[cascade] object AtomicFileLifecycle:
           }
       finally paths.close()
 
-  def replace(temp: Path, target: Path): Unit = move(temp, target, replace = true)
+  private[cascade] def replace(temp: Path, target: Path): Unit = move(temp, target, replace = true)
 
   /** An interrupted force closes its channel. Shutdown must still remain idempotent. */
   def forceAndClose(channel: FileChannel): Unit =

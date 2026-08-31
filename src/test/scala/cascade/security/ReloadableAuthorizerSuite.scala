@@ -24,3 +24,23 @@ final class ReloadableAuthorizerSuite extends FunSuite:
       assert(authorizer.authorize("bob", AclOperation.Read, resource))
     finally Files.deleteIfExists(path): Unit
   }
+
+  test("persists administrative creation and deletion before publishing the snapshot") {
+    val path = Files.createTempFile("cascade-admin-acls", ".conf")
+    try
+      Files.writeString(path, "")
+      val rule = AclRule(AclEffect.Allow, "User:alice", AclOperation.Write, ResourceType.Topic, "orders")
+      val filter = AclFilter(
+        Some(ResourceType.Topic), Some("orders"), AclPatternFilter.Literal, Some("User:alice"), Some("*"),
+        Some(AclOperation.Write), Some(AclEffect.Allow)
+      )
+      val authorizer = ReloadableAuthorizer(path, Set.empty, reloadIntervalMillis = 60_000L)
+
+      assertEquals(authorizer.createRules(Vector(rule)), Right(()))
+      assert(authorizer.authorize("alice", AclOperation.Write, Resource(ResourceType.Topic, "orders"), "127.0.0.1"))
+      assertEquals(AclAuthorizer.parse(path), Vector(rule))
+      assertEquals(authorizer.deleteRules(filter), Right(Vector(rule)))
+      assert(!authorizer.authorize("alice", AclOperation.Write, Resource(ResourceType.Topic, "orders"), "127.0.0.1"))
+      assertEquals(AclAuthorizer.parse(path), Vector.empty)
+    finally Files.deleteIfExists(path): Unit
+  }
