@@ -7,6 +7,7 @@ final class ConnectionSession(
     val transportPrincipal: Option[String] = None
 ):
   @volatile private var currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
+  @volatile private var currentAuthorizationPrincipals = transportPrincipal.toSet
   @volatile private var authenticatedState = !authenticationRequired
   @volatile private var mechanismState: Option[String] = None
   @volatile private var scramState: Option[ScramServerSession] = None
@@ -14,6 +15,8 @@ final class ConnectionSession(
   @volatile private var terminateState = false
 
   def principal: String = currentPrincipal
+
+  def authorizationPrincipals: Set[String] = currentAuthorizationPrincipals + currentPrincipal
 
   def authenticated: Boolean =
     expireAuthenticationIfNecessary()
@@ -36,10 +39,16 @@ final class ConnectionSession(
 
   def evaluateScram(token: Array[Byte]): Option[ScramStep] = synchronized(scramState.map(_.evaluate(token)))
 
-  def authenticate(principal: String, expiresAtEpochMillis: Long = Long.MaxValue): Unit = synchronized {
+  def authenticate(
+      principal: String,
+      expiresAtEpochMillis: Long = Long.MaxValue,
+      roles: Set[String] = Set.empty
+  ): Unit = synchronized {
     require(principal.nonEmpty, "authenticated principal cannot be empty")
     require(expiresAtEpochMillis > System.currentTimeMillis(), "authentication expiry must be in the future")
+    require(roles.forall(role => role.nonEmpty && !role.exists(character => character.isWhitespace || character.isControl)), "authorization role is invalid")
     currentPrincipal = principal
+    currentAuthorizationPrincipals = Set(principal) ++ roles.map(role => s"Role:$role")
     authenticatedState = true
     authenticationExpiresAtMillis = expiresAtEpochMillis
     scramState = None
@@ -47,6 +56,7 @@ final class ConnectionSession(
 
   def rejectAuthentication(): Unit = synchronized {
     currentPrincipal = "ANONYMOUS"
+    currentAuthorizationPrincipals = transportPrincipal.toSet
     authenticatedState = false
     authenticationExpiresAtMillis = Long.MaxValue
     mechanismState = None
@@ -64,6 +74,7 @@ final class ConnectionSession(
           System.currentTimeMillis() >= authenticationExpiresAtMillis
       then
         currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
+        currentAuthorizationPrincipals = transportPrincipal.toSet
         authenticatedState = false
         authenticationExpiresAtMillis = Long.MaxValue
         mechanismState = None

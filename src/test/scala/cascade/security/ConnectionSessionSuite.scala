@@ -54,3 +54,10 @@ final class ConnectionSessionSuite extends FunSuite:
     assertEquals(session.principal, "ANONYMOUS")
     assertEquals(session.mechanism, None)
   }
+
+  test("keeps mapped roles separate from the authenticated audit principal") {
+    val session = ConnectionSession("client", secure = true, authenticationRequired = true)
+    session.authenticate("alice", roles = Set("publisher", "reader"))
+    assertEquals(session.principal, "alice")
+    assertEquals(session.authorizationPrincipals, Set("alice", "Role:publisher", "Role:reader"))
+  }

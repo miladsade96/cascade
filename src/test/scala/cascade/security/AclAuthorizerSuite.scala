@@ -49,3 +49,20 @@ final class AclAuthorizerSuite extends FunSuite:
       assert(authorizer.authorize("alice", AclOperation.Read, Resource(ResourceType.Topic, "events-eu"), "10.0.0.2"))
     finally Files.deleteIfExists(path): Unit
   }
+
+  test("applies deny precedence across the subject and mapped roles") {
+    val path = Files.createTempFile("cascade-role-acls", ".conf")
+    try
+      Files.writeString(
+        path,
+        """allow Role:publisher Write Topic events
+          |deny alice Write Topic events
+          |allow Role:reader Read Topic events
+          |""".stripMargin
+      )
+      val authorizer = AclAuthorizer.load(path, Set.empty)
+      val principals = Set("alice", "Role:publisher", "Role:reader")
+      assert(!authorizer.authorizeAny(principals, AclOperation.Write, Resource(ResourceType.Topic, "events")))
+      assert(authorizer.authorizeAny(principals, AclOperation.Read, Resource(ResourceType.Topic, "events")))
+    finally Files.deleteIfExists(path): Unit
+  }

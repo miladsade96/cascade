@@ -21,6 +21,10 @@ final class ReloadableAuthorizer(path: Path, superUsers: Set[String], reloadInte
     reloadIfDue()
     authorizer.get().authorize(principal, operation, resource, host)
 
+  def authorizeAny(principals: Set[String], operation: AclOperation, resource: Resource, host: String = "*"): Boolean =
+    reloadIfDue()
+    authorizer.get().authorizeAny(principals, operation, resource, host)
+
   def rules: Vector[AclRule] =
     reloadIfDue()
     authorizer.get().rules

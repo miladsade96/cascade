@@ -99,9 +99,12 @@ final case class Resource(resourceType: ResourceType, name: String)
 
 final class AclAuthorizer private (val rules: Vector[AclRule], superUsers: Set[String]):
   def authorize(principal: String, operation: AclOperation, resource: Resource, host: String = "*"): Boolean =
-    if superUsers.exists(user => user == principal || user.stripPrefix("User:") == principal.stripPrefix("User:")) then true
+    authorizeAny(Set(principal), operation, resource, host)
+
+  def authorizeAny(principals: Set[String], operation: AclOperation, resource: Resource, host: String = "*"): Boolean =
+    if principals.exists(principal => superUsers.exists(user => user == principal || user.stripPrefix("User:") == principal.stripPrefix("User:"))) then true
     else
-      val matching = rules.filter(_.matches(principal, operation, resource, host))
+      val matching = rules.filter(rule => principals.exists(rule.matches(_, operation, resource, host)))
       !matching.exists(_.effect == AclEffect.Deny) && matching.exists(_.effect == AclEffect.Allow)
 
 object AclAuthorizer:
