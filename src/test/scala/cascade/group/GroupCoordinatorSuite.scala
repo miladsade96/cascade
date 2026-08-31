@@ -71,6 +71,35 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("a replacement static member fences every request from the previous owner") {
+    val directory = Files.createTempDirectory("cascade-static-member-fencing")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    try
+      val first = coordinator.join(command("", Array[Byte](1), Some("worker-a")))
+      assertEquals(first.errorCode, Errors.None)
+      assert(first.memberId.nonEmpty)
+      assertEquals(
+        coordinator.sync("workers", first.generationId, first.memberId, Some("worker-a"), Vector(first.memberId -> Array[Byte](9))).errorCode,
+        Errors.None
+      )
+
+      val replacement = coordinator.join(command("", Array[Byte](2), Some("worker-a")))
+      assertEquals(replacement.errorCode, Errors.None)
+      assertNotEquals(replacement.memberId, first.memberId)
+      assertEquals(coordinator.heartbeat("workers", first.generationId, first.memberId, Some("worker-a")), Errors.FencedInstanceId)
+      assertEquals(
+        coordinator.sync("workers", first.generationId, first.memberId, Some("worker-a"), Vector.empty).errorCode,
+        Errors.FencedInstanceId
+      )
+      assertEquals(
+        coordinator.commitOffsets("workers", first.generationId, first.memberId, Some("worker-a"), Vector.empty),
+        Errors.FencedInstanceId
+      )
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   test("a failed coordinator checkpoint restores the last acknowledged group image") {
     val directory = Files.createTempDirectory("cascade-group-checkpoint-test")
     val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
@@ -142,13 +171,17 @@ final class GroupCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
-  private def command(memberId: String, metadata: Array[Byte]): JoinGroupCommand =
+  private def command(
+      memberId: String,
+      metadata: Array[Byte],
+      groupInstanceId: Option[String] = None
+  ): JoinGroupCommand =
     JoinGroupCommand(
       groupId = "workers",
       sessionTimeoutMillis = 10_000,
       rebalanceTimeoutMillis = 10_000,
       memberId = memberId,
-      groupInstanceId = None,
+      groupInstanceId = groupInstanceId,
       protocolType = "consumer",
       protocols = Vector(GroupProtocol("range", metadata)),
       clientId = "coordinator-test"

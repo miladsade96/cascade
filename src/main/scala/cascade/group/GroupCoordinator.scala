@@ -95,28 +95,45 @@ final class GroupCoordinator(
     val group = groups.getOrElseUpdate(command.groupId, ManagedGroup())
     removeExpiredPendingIds(group, now)
 
-    if command.memberId.isEmpty then
-      val assignedId = newMemberId(command.clientId)
+    val claimedInstanceMember = command.groupInstanceId.flatMap(instance =>
+      group.members.valuesIterator.find(_.groupInstanceId.contains(instance))
+    )
+    if command.memberId.nonEmpty && claimedInstanceMember.exists(_.memberId != command.memberId) then
+      return joinError(Errors.FencedInstanceId, command.memberId)
+    group.members.get(command.memberId) match
+      case Some(member) if member.groupInstanceId != command.groupInstanceId =>
+        return joinError(Errors.FencedInstanceId, command.memberId)
+      case _ => ()
+
+    val effectiveCommand =
+      if command.memberId.isEmpty && command.groupInstanceId.nonEmpty then
+        claimedInstanceMember.foreach(member => group.members.remove(member.memberId): Unit)
+        command.copy(memberId = newMemberId(command.clientId))
+      else command
+
+    if effectiveCommand.memberId.isEmpty then
+      val assignedId = newMemberId(effectiveCommand.clientId)
       group.pendingMemberIds.update(assignedId, now + command.sessionTimeoutMillis.toLong)
       if !checkpointState() then return joinError(Errors.CoordinatorNotAvailable, assignedId)
       return joinError(Errors.MemberIdRequired, assignedId)
 
-    val existing = group.members.get(command.memberId)
-    if existing.isEmpty && group.pendingMemberIds.remove(command.memberId).isEmpty then
-      return joinError(Errors.UnknownMemberId, command.memberId)
+    val existing = group.members.get(effectiveCommand.memberId)
+    val staticAdmission = effectiveCommand.groupInstanceId.nonEmpty && command.memberId.isEmpty
+    if existing.isEmpty && !staticAdmission && group.pendingMemberIds.remove(effectiveCommand.memberId).isEmpty then
+      return joinError(Errors.UnknownMemberId, effectiveCommand.memberId)
 
     val candidate = GroupMember(
-      command.memberId,
-      command.groupInstanceId,
-      command.sessionTimeoutMillis,
-      command.rebalanceTimeoutMillis,
-      command.protocols,
-      command.clientId,
+      effectiveCommand.memberId,
+      effectiveCommand.groupInstanceId,
+      effectiveCommand.sessionTimeoutMillis,
+      effectiveCommand.rebalanceTimeoutMillis,
+      effectiveCommand.protocols,
+      effectiveCommand.clientId,
       now
     )
     val peers = group.members.valuesIterator.filterNot(_.memberId == command.memberId).toVector
-    if peers.nonEmpty && (group.protocolType != command.protocolType || commonProtocol(peers :+ candidate).isEmpty) then
-      return joinError(Errors.InconsistentGroupProtocol, command.memberId)
+    if peers.nonEmpty && (group.protocolType != effectiveCommand.protocolType || commonProtocol(peers :+ candidate).isEmpty) then
+      return joinError(Errors.InconsistentGroupProtocol, effectiveCommand.memberId)
 
     val beginsRebalance = group.phase match
       case GroupStatus.Empty => true
@@ -126,23 +143,23 @@ final class GroupCoordinator(
 
     existing match
       case Some(member) =>
-        member.groupInstanceId = command.groupInstanceId
-        member.sessionTimeoutMillis = command.sessionTimeoutMillis
-        member.rebalanceTimeoutMillis = command.rebalanceTimeoutMillis
-        member.protocols = command.protocols
-        member.clientId = command.clientId
+        member.groupInstanceId = effectiveCommand.groupInstanceId
+        member.sessionTimeoutMillis = effectiveCommand.sessionTimeoutMillis
+        member.rebalanceTimeoutMillis = effectiveCommand.rebalanceTimeoutMillis
+        member.protocols = effectiveCommand.protocols
+        member.clientId = effectiveCommand.clientId
         member.lastHeartbeatMillis = now
-      case None => group.members.update(command.memberId, candidate)
-    group.protocolType = command.protocolType
-    group.joined += command.memberId
+      case None => group.members.update(effectiveCommand.memberId, candidate)
+    group.protocolType = effectiveCommand.protocolType
+    group.joined += effectiveCommand.memberId
 
     if group.joined.size == group.members.size then completeJoin(group)
-    else awaitJoin(group, command.memberId)
+    else awaitJoin(group, effectiveCommand.memberId)
 
-    if !checkpointState() then return joinError(Errors.CoordinatorNotAvailable, command.memberId)
+    if !checkpointState() then return joinError(Errors.CoordinatorNotAvailable, effectiveCommand.memberId)
 
-    group.members.get(command.memberId) match
-      case None => joinError(Errors.UnknownMemberId, command.memberId)
+    group.members.get(effectiveCommand.memberId) match
+      case None => joinError(Errors.UnknownMemberId, effectiveCommand.memberId)
       case Some(member) if group.phase == GroupStatus.PreparingRebalance =>
         joinError(Errors.RebalanceInProgress, member.memberId)
       case Some(member) => successfulJoin(group, member)
@@ -153,11 +170,19 @@ final class GroupCoordinator(
       generationId: Int,
       memberId: String,
       assignments: Vector[(String, Array[Byte])]
+  ): SyncGroupResult = sync(groupId, generationId, memberId, None, assignments)
+
+  def sync(
+      groupId: String,
+      generationId: Int,
+      memberId: String,
+      groupInstanceId: Option[String],
+      assignments: Vector[(String, Array[Byte])]
   ): SyncGroupResult = stateLock.synchronized {
     groups.get(groupId) match
       case None => SyncGroupResult(Errors.UnknownMemberId, EmptyAssignment)
       case Some(group) =>
-        validateMember(group, generationId, memberId) match
+        validateMember(group, generationId, memberId, groupInstanceId) match
           case error if error != Errors.None => SyncGroupResult(error, EmptyAssignment)
           case _ if group.phase == GroupStatus.PreparingRebalance =>
             SyncGroupResult(Errors.RebalanceInProgress, EmptyAssignment)
@@ -185,11 +210,11 @@ final class GroupCoordinator(
               case None    => SyncGroupResult(Errors.UnknownMemberId, EmptyAssignment)
   }
 
-  def heartbeat(groupId: String, generationId: Int, memberId: String): Short = stateLock.synchronized {
+  def heartbeat(groupId: String, generationId: Int, memberId: String, groupInstanceId: Option[String] = None): Short = stateLock.synchronized {
     groups.get(groupId) match
       case None => Errors.UnknownMemberId
       case Some(group) =>
-        validateMember(group, generationId, memberId) match
+        validateMember(group, generationId, memberId, groupInstanceId) match
           case error if error != Errors.None => error
           case _ if group.phase != GroupStatus.Stable => Errors.RebalanceInProgress
           case _ =>
@@ -216,11 +241,19 @@ final class GroupCoordinator(
       generationId: Int,
       memberId: String,
       values: Vector[OffsetCommitValue]
+  ): Short = commitOffsets(groupId, generationId, memberId, None, values)
+
+  def commitOffsets(
+      groupId: String,
+      generationId: Int,
+      memberId: String,
+      groupInstanceId: Option[String],
+      values: Vector[OffsetCommitValue]
   ): Short =
     val validation = stateLock.synchronized {
       if groupId.isEmpty then Errors.InvalidGroupId
       else if generationId < 0 then Errors.None
-      else groups.get(groupId).map(validateMember(_, generationId, memberId)).getOrElse(Errors.UnknownMemberId)
+      else groups.get(groupId).map(validateMember(_, generationId, memberId, groupInstanceId)).getOrElse(Errors.UnknownMemberId)
     }
     if validation == Errors.None then stateLock.synchronized {
       offsets.commit(values, durableLocal)
@@ -292,10 +325,19 @@ final class GroupCoordinator(
       stateLock.wait(math.max(1L, remainingMillis))
       remainingMillis = group.rebalanceDeadlineMillis - System.currentTimeMillis()
 
-  private def validateMember(group: ManagedGroup, generationId: Int, memberId: String): Short =
-    if !group.members.contains(memberId) then Errors.UnknownMemberId
-    else if generationId != group.generationId then Errors.IllegalGeneration
-    else Errors.None
+  private def validateMember(
+      group: ManagedGroup,
+      generationId: Int,
+      memberId: String,
+      groupInstanceId: Option[String]
+  ): Short =
+    group.members.get(memberId) match
+      case None if groupInstanceId.exists(instance => group.members.valuesIterator.exists(_.groupInstanceId.contains(instance))) =>
+        Errors.FencedInstanceId
+      case None => Errors.UnknownMemberId
+      case Some(member) if member.groupInstanceId != groupInstanceId => Errors.FencedInstanceId
+      case Some(_) if generationId != group.generationId => Errors.IllegalGeneration
+      case Some(_) => Errors.None
 
   private def commonProtocol(members: Vector[GroupMember]): Option[String] =
     members.headOption.flatMap { leader =>

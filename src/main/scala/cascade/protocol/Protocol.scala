@@ -76,6 +76,7 @@ object Errors:
   val IllegalSaslState: Short = 34
   val SaslAuthenticationFailed: Short = 58
   val MemberIdRequired: Short = 79
+  val FencedInstanceId: Short = 82
   val FencedLeaderEpoch: Short = 74
   val ProducerFenced: Short = 90
   val InvalidReplicaAssignment: Short = 39
