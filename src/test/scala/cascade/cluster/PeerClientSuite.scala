@@ -47,6 +47,44 @@ final class PeerClientSuite extends munit.FunSuite:
     )
   }
 
+  test("negotiates peer release, metadata formats, and feature levels") {
+    val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+    val acceptor = Thread.ofVirtual().start(() =>
+      val socket = server.accept()
+      try
+        val input = DataInputStream(socket.getInputStream)
+        val output = DataOutputStream(socket.getOutputStream)
+        val frame = new Array[Byte](input.readInt())
+        input.readFully(frame)
+        val cursor = ByteCursor(frame)
+        assertEquals(cursor.readShort(), InternalApi.PeerFeatures)
+        assertEquals(cursor.readShort(), 0.toShort)
+        val correlationId = cursor.readInt()
+        cursor.readNullableString()
+        cursor.ensureFullyRead()
+        val body = cascade.protocol.ByteWriter().writeInt(correlationId).writeShort(0)
+          .writeString("1.1.0").writeShort(1).writeShort(7)
+        body.writeArray(Vector("consumer-v2" -> 1.toShort)) { case (name, level) =>
+          body.writeString(name).writeShort(level): Unit
+        }
+        val response = body.result()
+        output.writeInt(response.length)
+        output.write(response)
+        output.flush()
+      finally socket.close()
+    )
+    val client = PeerClient(localNodeId = 7)
+    try
+      assertEquals(
+        client.capabilities(ClusterNode(1, "127.0.0.1", server.getLocalPort), 5000),
+        PeerCapabilities("1.1.0", 1, 7, Map("consumer-v2" -> 1.toShort))
+      )
+    finally
+      client.close()
+      server.close()
+      acceptor.join(5000L)
+  }
+
   test("reconnects a persistent peer channel with the new TLS generation") {
     val directory = Files.createTempDirectory("cascade-peer-client-tls-rotation")
     try
