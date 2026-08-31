@@ -1,9 +1,10 @@
 package cascade.cluster
 
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
+import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 
 object MetadataCodec:
-  private val FormatVersion: Short = 5
+  private val FormatVersion: Short = 6
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     val writer = ByteWriter()
@@ -18,6 +19,12 @@ object MetadataCodec:
         writer.writeArray(partition.inSyncReplicas)(writer.writeInt)
         writer.writeArray(partition.addingReplicas)(writer.writeInt)
         writer.writeArray(partition.removingReplicas)(writer.writeInt): Unit
+      }
+      writer.writeBoolean(topic.lifecyclePolicy.nonEmpty)
+      topic.lifecyclePolicy.foreach { policy =>
+        writer.writeByte(cleanupPolicyCode(policy.cleanupPolicy))
+        writer.writeLong(policy.retentionMillis)
+        writer.writeLong(policy.retentionBytes): Unit
       }
     }
     writer.writeBoolean(metadata.membership.nonEmpty)
@@ -58,7 +65,11 @@ object MetadataCodec:
           removingReplicas
         )
       }
-      TopicMetadata(name, partitions)
+      val policy =
+        if format >= 6 && cursor.readBoolean() then
+          Some(TopicLifecyclePolicy(readCleanupPolicy(cursor.readByte()), cursor.readLong(), cursor.readLong()))
+        else None
+      TopicMetadata(name, partitions, policy)
     }
     val membership =
       if format >= 4 && cursor.readBoolean() then
@@ -93,3 +104,14 @@ object MetadataCodec:
       val directoryId = VoterDirectoryId(cursor.readLong(), cursor.readLong())
       QuorumVoter(ClusterNode(id, host, port), directoryId)
     }
+
+  private def cleanupPolicyCode(policy: CleanupPolicy): Int = policy match
+    case CleanupPolicy.Delete        => 0
+    case CleanupPolicy.Compact       => 1
+    case CleanupPolicy.CompactDelete => 2
+
+  private def readCleanupPolicy(value: Byte): CleanupPolicy = value.toInt match
+    case 0 => CleanupPolicy.Delete
+    case 1 => CleanupPolicy.Compact
+    case 2 => CleanupPolicy.CompactDelete
+    case other => throw ProtocolException(s"unsupported topic cleanup policy: $other")

@@ -1,6 +1,7 @@
 package cascade.cluster
 
 import cascade.protocol.ByteWriter
+import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 import java.nio.file.{Files, StandardOpenOption}
 import munit.FunSuite
 import scala.jdk.CollectionConverters.*
@@ -149,6 +150,16 @@ final class MetadataStoreSuite extends FunSuite:
       MetadataCodec.decode(legacy),
       ClusterMetadata(20L, Vector.empty, 8L, membership = None, coordinator = CoordinatorMetadata.Empty)
     )
+  }
+
+  test("per-topic lifecycle policy round-trips in the quorum metadata image") {
+    val policy = TopicLifecyclePolicy(CleanupPolicy.CompactDelete, 3_600_000L, 1_073_741_824L)
+    val metadata = ClusterMetadata(
+      22L,
+      Vector(TopicMetadata("orders", Vector(PartitionMetadata(0, 1, 2, Vector(1, 2, 3), Vector(1, 2))), Some(policy))),
+      controllerTerm = 10L
+    )
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata)), metadata)
   }
 
   test("metadata journal compaction bounds full-image history and recovers the latest image") {

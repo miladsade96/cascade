@@ -1,5 +1,6 @@
 package cascade.cluster
 
+import cascade.storage.TopicLifecyclePolicy
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
@@ -96,7 +97,13 @@ final case class PartitionMetadata(
 
   def originalReplicas: Vector[Int] = replicas.filterNot(addingReplicas.contains)
 
-final case class TopicMetadata(name: String, partitions: Vector[PartitionMetadata])
+final case class TopicMetadata(
+    name: String,
+    partitions: Vector[PartitionMetadata],
+    lifecyclePolicy: Option[TopicLifecyclePolicy] = None
+)
+
+final case class TopicConfigResult(errorCode: Short, message: Option[String])
 
 /** One quorum-committed image for every coordinator service hosted by the elected controller. */
 final case class CoordinatorMetadata(
@@ -144,5 +151,6 @@ object InternalApi:
   val ReplicaRecoveryState: Short = -115
   val ReplicaRecoveryProbe: Short = -116
   val ReplicaTruncate: Short = -117
+  val AlterTopicConfig: Short = -118
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaTruncate
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= AlterTopicConfig
