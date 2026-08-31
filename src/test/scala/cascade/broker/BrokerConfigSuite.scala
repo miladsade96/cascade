@@ -136,6 +136,7 @@ final class BrokerConfigSuite extends FunSuite:
           "--ssl-truststore-password-file", trustPassword.toString,
           "--ssl-client-auth", "requested",
           "--tls-protocols", "TLSv1.3,TLSv1.2",
+          "--ssl-reload-ms", "750",
           "--peer-security-protocol", "SSL",
           "--peer-identity-file", "peers.conf",
           "--peer-identity-reload-ms", "400",
@@ -174,6 +175,7 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.tls.keyPassword, Some("key-secret"))
       assertEquals(config.security.tls.trustStorePassword, Some("trust-secret"))
       assertEquals(config.security.tls.clientAuth, TlsClientAuth.Requested)
+      assertEquals(config.security.tls.reloadIntervalMillis, 750L)
       assertEquals(config.security.peer.protocol, PeerSecurityProtocol.Ssl)
       assertEquals(config.security.peer.identityFile.map(_.toString), Some("peers.conf"))
       assertEquals(config.security.peer.identityReloadIntervalMillis, 400L)
@@ -230,6 +232,8 @@ final class BrokerConfigSuite extends FunSuite:
     intercept[IllegalArgumentException](
       BrokerConfig.parse(Array("--peer-security-protocol", "SSL", "--peer-identity-file", "peers.conf"))
     )
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--ssl-reload-ms", "-1")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--tls-protocols", "TLSv1.3,TLSv1.3")))
   }
 
   test("parses operations, readiness, logging, and capacity settings") {
