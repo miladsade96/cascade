@@ -29,6 +29,7 @@ object ApiKey:
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
   val DescribeQuorum: Short = 55
+  val ConsumerGroupHeartbeat: Short = 68
   val AddRaftVoter: Short = 80
   val RemoveRaftVoter: Short = 81
 
@@ -86,6 +87,10 @@ object Errors:
   val InvalidVoterKey: Short = 125
   val DuplicateVoter: Short = 126
   val VoterNotFound: Short = 127
+  val FencedMemberEpoch: Short = 110
+  val UnreleasedInstanceId: Short = 111
+  val UnsupportedAssignor: Short = 112
+  val StaleMemberEpoch: Short = 113
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
@@ -94,7 +99,7 @@ object Compatibility:
     ApiVersion(ApiKey.Produce, 3, 3),
     ApiVersion(ApiKey.Fetch, 6, 6),
     ApiVersion(ApiKey.ListOffsets, 2, 2),
-    ApiVersion(ApiKey.Metadata, 4, 4),
+    ApiVersion(ApiKey.Metadata, 4, 12),
     ApiVersion(ApiKey.OffsetCommit, 5, 7),
     ApiVersion(ApiKey.OffsetFetch, 4, 5),
     ApiVersion(ApiKey.FindCoordinator, 2, 2),
@@ -119,6 +124,7 @@ object Compatibility:
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.DescribeQuorum, 0, 2),
+    ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 0),
     ApiVersion(ApiKey.AddRaftVoter, 0, 1),
     ApiVersion(ApiKey.RemoveRaftVoter, 0, 0)
   )
@@ -130,14 +136,18 @@ object Compatibility:
 
   def isFlexibleRequest(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.ApiVersions && version >= 3) ||
+      (apiKey == ApiKey.Metadata && version >= 9) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
-      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
+      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
+      apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
   // ApiVersions deliberately retains response header v0 even for flexible body versions.
   // All other flexible APIs use response header v1.
   def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
-    apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
-      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
+    (apiKey == ApiKey.Metadata && version >= 9) ||
+      apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
+      apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
+      apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
 final case class RequestHeader(
     apiKey: Short,
