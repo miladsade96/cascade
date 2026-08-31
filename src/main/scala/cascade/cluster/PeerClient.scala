@@ -10,6 +10,7 @@ import scala.jdk.CollectionConverters.*
 
 trait PeerTransport extends AutoCloseable:
   def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor
+  def capabilities(node: ClusterNode, timeoutMillis: Int): PeerCapabilities = PeerCapabilities.Legacy100
 
 /** Persistent, ordered peer connections; failed sockets are discarded and recreated by the next call. */
 final class PeerClient(
@@ -35,9 +36,33 @@ final class PeerClient(
   private val closed = AtomicBoolean(false)
 
   override def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
+    callVersion(node, apiKey, 0, payload, timeoutMillis)
+
+  override def capabilities(node: ClusterNode, timeoutMillis: Int): PeerCapabilities =
+    val response = callVersion(node, InternalApi.PeerFeatures, 0, Array.emptyByteArray, timeoutMillis)
+    val error = response.readShort()
+    if error != 0 then throw ProtocolException(s"peer feature negotiation failed with error $error")
+    val capabilities = PeerCapabilities(
+      response.readString(),
+      response.readShort(),
+      response.readShort(),
+      response.readArray {
+        response.readString() -> response.readShort()
+      }.toMap
+    )
+    response.ensureFullyRead()
+    capabilities
+
+  private def callVersion(
+      node: ClusterNode,
+      apiKey: Short,
+      apiVersion: Short,
+      payload: Array[Byte],
+      timeoutMillis: Int
+  ): ByteCursor =
     if closed.get() then throw IllegalStateException("peer client is closed")
     val connection = connections.computeIfAbsent(node, target => PeerConnection(target, clientId, tlsClient))
-    try connection.call(apiKey, payload, timeoutMillis, correlations.getAndIncrement())
+    try connection.call(apiKey, apiVersion, payload, timeoutMillis, correlations.getAndIncrement())
     catch
       case error: Throwable =>
         if connections.remove(node, connection) then connection.close()
@@ -60,11 +85,17 @@ private final class PeerConnection(
   private var output: DataOutputStream | Null = null
   private var tlsGeneration = -1L
 
-  def call(apiKey: Short, payload: Array[Byte], timeoutMillis: Int, correlationId: Int): ByteCursor = synchronized {
+  def call(
+      apiKey: Short,
+      apiVersion: Short,
+      payload: Array[Byte],
+      timeoutMillis: Int,
+      correlationId: Int
+  ): ByteCursor = synchronized {
     ensureConnected(timeoutMillis)
     val request = ByteWriter(payload.length + 32)
       .writeShort(apiKey)
-      .writeShort(0)
+      .writeShort(apiVersion)
       .writeInt(correlationId)
       .writeNullableString(Some(clientId))
       .writeBytes(payload)
