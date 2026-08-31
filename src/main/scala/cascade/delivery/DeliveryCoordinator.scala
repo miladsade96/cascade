@@ -64,7 +64,7 @@ final class DeliveryCoordinator(
     expireTransactionsLocked(System.currentTimeMillis())
     if transactionalId.exists(_.isEmpty) then
       InitProducerIdResult(Errors.TransactionalIdAuthorizationFailed, -1L, -1)
-    else if timeoutMillis <= 0 || timeoutMillis > MaximumTransactionTimeoutMillis then
+    else if transactionalId.nonEmpty && (timeoutMillis <= 0 || timeoutMillis > MaximumTransactionTimeoutMillis) then
       InitProducerIdResult(Errors.InvalidTransactionTimeout, -1L, -1)
     else
       transactionalId.flatMap(current.producerByTransactionalId.get) match

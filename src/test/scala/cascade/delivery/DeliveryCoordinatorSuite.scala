@@ -12,6 +12,18 @@ import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 final class DeliveryCoordinatorSuite extends FunSuite:
+  test("non-transactional idempotent producers accept Kafka's timeout sentinel") {
+    val directory = Files.createTempDirectory("cascade-idempotent-timeout-sentinel")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val idempotent = delivery.initProducerId(None, Int.MaxValue)
+        assertEquals(idempotent.errorCode, Errors.None)
+        assertEquals(idempotent.producerEpoch, 0.toShort)
+        assertEquals(delivery.initProducerId(Some("bounded"), Int.MaxValue).errorCode, Errors.InvalidTransactionTimeout)
+      }
+    finally deleteTree(directory)
+  }
+
   test("producer epochs fence old owners and survive coordinator restart") {
     val directory = Files.createTempDirectory("cascade-delivery-fencing")
     try
