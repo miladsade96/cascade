@@ -2,7 +2,7 @@ package cascade.cluster
 
 import cascade.broker.BrokerConfig
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
-import cascade.storage.{CreateTopicResult, TopicRegistry}
+import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
@@ -262,6 +262,18 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         case Some(controller) => forwardRemoveVoter(controller, nodeId, directoryId)
         case None => MembershipChangeResult(Errors.NotController, Some("controller election is in progress"))
 
+  def alterTopicLifecycle(topic: String, policy: TopicLifecyclePolicy): TopicConfigResult =
+    if !enabled then
+      registry.configureLifecycle(topic, policy) match
+        case Right(_)      => TopicConfigResult(Errors.None, None)
+        case Left(message) => TopicConfigResult(Errors.UnknownTopicOrPartition, Some(message))
+    else
+      controllerNode match
+        case Some(controller) if controller.id == config.nodeId =>
+          metadataMutationLock.synchronized(alterTopicLifecycleOnController(topic, policy))
+        case Some(controller) => forwardAlterTopicLifecycle(controller, topic, policy)
+        case None => TopicConfigResult(Errors.NotController, Some("controller election is in progress"))
+
   def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.Ping =>
       cursor.ensureFullyRead()
@@ -299,6 +311,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val result =
         if isActiveController then metadataMutationLock.synchronized(createOnController(name, partitions, replicationFactor))
         else ClusterCreateResult(Errors.NotController, Some("metadata mutation must be sent to the elected controller"))
+      ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
+    case InternalApi.AlterTopicConfig =>
+      val topic = cursor.readString()
+      val policy = TopicLifecyclePolicy(CleanupPolicy.parse(cursor.readString()), cursor.readLong(), cursor.readLong())
+      cursor.ensureFullyRead()
+      val result = metadataMutationLock.synchronized(alterTopicLifecycleOnController(topic, policy))
       ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
     case _ => throw IllegalArgumentException(s"unsupported metadata API: $apiKey")
 
@@ -749,7 +767,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         }
         val next = ClusterMetadata(
           Math.addExact(current.version, 1L),
-          (current.topics :+ TopicMetadata(name, assignments)).sortBy(_.name),
+          (current.topics :+ TopicMetadata(name, assignments, Some(TopicLifecyclePolicy.from(config.storageLifecycle)))).sortBy(_.name),
           currentTerm
         )
         if propose(next) then ClusterCreateResult(Errors.None, None)
@@ -879,6 +897,36 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       if result.errorCode == Errors.None then synchronizeFrom(controller): Unit
       result
     catch case error: Throwable => ClusterCreateResult(Errors.CoordinatorNotAvailable, Some(error.getMessage))
+
+  private def alterTopicLifecycleOnController(topic: String, policy: TopicLifecyclePolicy): TopicConfigResult =
+    if !isActiveController then TopicConfigResult(Errors.NotController, Some("request must be sent to the active controller"))
+    else current.byName.get(topic) match
+      case None => TopicConfigResult(Errors.UnknownTopicOrPartition, Some("topic does not exist"))
+      case Some(existing) if existing.lifecyclePolicy.contains(policy) => TopicConfigResult(Errors.None, None)
+      case Some(_) =>
+        val topics = current.topics.map(value => if value.name == topic then value.copy(lifecyclePolicy = Some(policy)) else value)
+        val next = current.copy(version = Math.addExact(current.version, 1L), topics = topics, controllerTerm = currentTerm)
+        if propose(next) then TopicConfigResult(Errors.None, None)
+        else TopicConfigResult(Errors.RequestTimedOut, Some("metadata quorum did not commit topic configuration"))
+
+  private def forwardAlterTopicLifecycle(
+      controller: ClusterNode,
+      topic: String,
+      policy: TopicLifecyclePolicy
+  ): TopicConfigResult =
+    try
+      val response = peerClient.call(
+        controller,
+        InternalApi.AlterTopicConfig,
+        ByteWriter().writeString(topic).writeString(cleanupPolicyName(policy.cleanupPolicy))
+          .writeLong(policy.retentionMillis).writeLong(policy.retentionBytes).result(),
+        config.peerTimeoutMillis
+      )
+      val result = TopicConfigResult(response.readShort(), response.readNullableString())
+      response.ensureFullyRead()
+      if result.errorCode == Errors.None then synchronizeFrom(controller): Unit
+      result
+    catch case error: Throwable => TopicConfigResult(Errors.CoordinatorNotAvailable, Some(error.getMessage))
 
   private def localCreate(name: String, partitions: Int): ClusterCreateResult =
     registry.createTopic(name, partitions) match
@@ -1019,7 +1067,17 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           registry.createTopic(topic.name, topic.partitions.size) match
             case CreateTopicResult.Created | CreateTopicResult.AlreadyExists => ()
             case other => throw IllegalStateException(s"cannot materialize metadata for ${topic.name}: $other")
+      topic.lifecyclePolicy.foreach { policy =>
+        registry.configureLifecycle(topic.name, policy) match
+          case Right(_) => ()
+          case Left(message) => throw IllegalStateException(s"cannot apply lifecycle policy for ${topic.name}: $message")
+      }
     }
+
+  private def cleanupPolicyName(policy: CleanupPolicy): String = policy match
+    case CleanupPolicy.Delete        => "delete"
+    case CleanupPolicy.Compact       => "compact"
+    case CleanupPolicy.CompactDelete => "compact,delete"
 
   private def synchronizeFrom(controller: ClusterNode): Boolean =
     try
