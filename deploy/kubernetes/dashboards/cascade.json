@@ -1,0 +1,90 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Brokers up",
+      "targets": [{"expr": "sum(cascade_broker_up)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Fenced brokers",
+      "targets": [{"expr": "sum(cascade_broker_fenced)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Usable disk",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [{"expr": "min(cascade_disk_usable_bytes)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Pending flush",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [{"expr": "sum(cascade_flush_pending_bytes)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Active connections",
+      "targets": [{"expr": "sum(cascade_connections_active)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "In-flight requests",
+      "targets": [{"expr": "sum(cascade_requests_inflight)", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka throughput",
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "targets": [
+        {"expr": "sum(rate(cascade_request_bytes_total[5m]))", "legendFormat": "ingress", "refId": "A"},
+        {"expr": "sum(rate(cascade_response_bytes_total[5m]))", "legendFormat": "egress", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate and failures",
+      "targets": [
+        {"expr": "sum(rate(cascade_requests_total[5m]))", "legendFormat": "requests", "refId": "A"},
+        {"expr": "sum(rate(cascade_request_failures_total[5m]))", "legendFormat": "failures", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "JVM heap",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [
+        {"expr": "cascade_jvm_heap_used_bytes", "legendFormat": "node {{node_id}} used", "refId": "A"},
+        {"expr": "cascade_jvm_heap_max_bytes", "legendFormat": "node {{node_id}} max", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+    },
+    {
+      "type": "timeseries",
+      "title": "Quota throttle time",
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "sum by (quota) (rate(cascade_traffic_quota_throttle_seconds_total[5m]))", "legendFormat": "{{quota}}", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["cascade", "kafka"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "Cascade production overview",
+  "uid": "cascade-production",
+  "version": 1
+}

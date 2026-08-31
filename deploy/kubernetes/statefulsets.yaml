@@ -1,0 +1,590 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cascade-1
+spec:
+  serviceName: cascade-peer
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cascade
+      app.kubernetes.io/instance: cascade-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cascade
+        app.kubernetes.io/instance: cascade-1
+        app.kubernetes.io/component: broker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: cascade
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cascade
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: cascade
+          image: miladsade96/cascade:1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9092"
+            - --advertised-host
+            - cascade-1-0.cascade-peer.cascade.svc.cluster.local
+            - --node-id
+            - "1"
+            - --data-dir
+            - /var/lib/cascade
+            - --cluster-nodes
+            - 1@cascade-1-0.cascade-peer.cascade.svc.cluster.local:9092,2@cascade-2-0.cascade-peer.cascade.svc.cluster.local:9092,3@cascade-3-0.cascade-peer.cascade.svc.cluster.local:9092
+            - --controller-id
+            - "1"
+            - --default-replication-factor
+            - "3"
+            - --min-insync-replicas
+            - "2"
+            - --no-auto-create
+            - --security-protocol
+            - SASL_SSL
+            - --ssl-keystore
+            - /etc/cascade/node-tls/keystore.p12
+            - --ssl-keystore-password-file
+            - /etc/cascade/node-tls/keystore.password
+            - --ssl-key-password-file
+            - /etc/cascade/node-tls/key.password
+            - --ssl-truststore
+            - /etc/cascade/cluster-trust/truststore.p12
+            - --ssl-truststore-password-file
+            - /etc/cascade/cluster-trust/truststore.password
+            - --ssl-client-auth
+            - requested
+            - --peer-security-protocol
+            - SSL
+            - --peer-identity-file
+            - /etc/cascade/peer-policy/peer-identities.conf
+            - --sasl-mechanisms
+            - SCRAM-SHA-512
+            - --scram-credentials-file
+            - /etc/cascade/client-auth/scram.conf
+            - --acl-file
+            - /var/lib/cascade/security/acls.conf
+            - --super-users
+            - User:cluster-admin
+            - --audit-log
+            - /var/lib/cascade/log/security-audit.jsonl
+            - --operations-host
+            - 0.0.0.0
+            - --operations-port
+            - "9404"
+            - --operations-token-file
+            - /etc/cascade/operations/token
+            - --structured-log
+            - /var/lib/cascade/log/events.jsonl
+            - --minimum-free-bytes
+            - "10737418240"
+            - --readiness-max-pending-flush-bytes
+            - "536870912"
+          env:
+            - name: CASCADE_OPERATIONS_PORT
+              value: "9404"
+            - name: CASCADE_HEALTHCHECK_TOKEN_FILE
+              value: /etc/cascade/operations/token
+            - name: JAVA_TOOL_OPTIONS
+              value: -XX:InitialRAMPercentage=20.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: operations
+              containerPort: 9404
+          startupProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck, /live]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cascade
+            - name: node-tls
+              mountPath: /etc/cascade/node-tls
+              readOnly: true
+            - name: cluster-trust
+              mountPath: /etc/cascade/cluster-trust
+              readOnly: true
+            - name: peer-policy
+              mountPath: /etc/cascade/peer-policy
+              readOnly: true
+            - name: client-auth
+              mountPath: /etc/cascade/client-auth
+              readOnly: true
+            - name: operations
+              mountPath: /etc/cascade/operations
+              readOnly: true
+      volumes:
+        - name: node-tls
+          secret:
+            secretName: cascade-node-1-tls
+        - name: cluster-trust
+          secret:
+            secretName: cascade-cluster-trust
+        - name: peer-policy
+          configMap:
+            name: cascade-peer-policy
+        - name: client-auth
+          secret:
+            secretName: cascade-client-auth
+        - name: operations
+          secret:
+            secretName: cascade-operations
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cascade-2
+spec:
+  serviceName: cascade-peer
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cascade
+      app.kubernetes.io/instance: cascade-2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cascade
+        app.kubernetes.io/instance: cascade-2
+        app.kubernetes.io/component: broker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: cascade
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cascade
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: cascade
+          image: miladsade96/cascade:1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9092"
+            - --advertised-host
+            - cascade-2-0.cascade-peer.cascade.svc.cluster.local
+            - --node-id
+            - "2"
+            - --data-dir
+            - /var/lib/cascade
+            - --cluster-nodes
+            - 1@cascade-1-0.cascade-peer.cascade.svc.cluster.local:9092,2@cascade-2-0.cascade-peer.cascade.svc.cluster.local:9092,3@cascade-3-0.cascade-peer.cascade.svc.cluster.local:9092
+            - --controller-id
+            - "1"
+            - --default-replication-factor
+            - "3"
+            - --min-insync-replicas
+            - "2"
+            - --no-auto-create
+            - --security-protocol
+            - SASL_SSL
+            - --ssl-keystore
+            - /etc/cascade/node-tls/keystore.p12
+            - --ssl-keystore-password-file
+            - /etc/cascade/node-tls/keystore.password
+            - --ssl-key-password-file
+            - /etc/cascade/node-tls/key.password
+            - --ssl-truststore
+            - /etc/cascade/cluster-trust/truststore.p12
+            - --ssl-truststore-password-file
+            - /etc/cascade/cluster-trust/truststore.password
+            - --ssl-client-auth
+            - requested
+            - --peer-security-protocol
+            - SSL
+            - --peer-identity-file
+            - /etc/cascade/peer-policy/peer-identities.conf
+            - --sasl-mechanisms
+            - SCRAM-SHA-512
+            - --scram-credentials-file
+            - /etc/cascade/client-auth/scram.conf
+            - --acl-file
+            - /var/lib/cascade/security/acls.conf
+            - --super-users
+            - User:cluster-admin
+            - --audit-log
+            - /var/lib/cascade/log/security-audit.jsonl
+            - --operations-host
+            - 0.0.0.0
+            - --operations-port
+            - "9404"
+            - --operations-token-file
+            - /etc/cascade/operations/token
+            - --structured-log
+            - /var/lib/cascade/log/events.jsonl
+            - --minimum-free-bytes
+            - "10737418240"
+            - --readiness-max-pending-flush-bytes
+            - "536870912"
+          env:
+            - name: CASCADE_OPERATIONS_PORT
+              value: "9404"
+            - name: CASCADE_HEALTHCHECK_TOKEN_FILE
+              value: /etc/cascade/operations/token
+            - name: JAVA_TOOL_OPTIONS
+              value: -XX:InitialRAMPercentage=20.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: operations
+              containerPort: 9404
+          startupProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck, /live]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cascade
+            - name: node-tls
+              mountPath: /etc/cascade/node-tls
+              readOnly: true
+            - name: cluster-trust
+              mountPath: /etc/cascade/cluster-trust
+              readOnly: true
+            - name: peer-policy
+              mountPath: /etc/cascade/peer-policy
+              readOnly: true
+            - name: client-auth
+              mountPath: /etc/cascade/client-auth
+              readOnly: true
+            - name: operations
+              mountPath: /etc/cascade/operations
+              readOnly: true
+      volumes:
+        - name: node-tls
+          secret:
+            secretName: cascade-node-2-tls
+        - name: cluster-trust
+          secret:
+            secretName: cascade-cluster-trust
+        - name: peer-policy
+          configMap:
+            name: cascade-peer-policy
+        - name: client-auth
+          secret:
+            secretName: cascade-client-auth
+        - name: operations
+          secret:
+            secretName: cascade-operations
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cascade-3
+spec:
+  serviceName: cascade-peer
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cascade
+      app.kubernetes.io/instance: cascade-3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cascade
+        app.kubernetes.io/instance: cascade-3
+        app.kubernetes.io/component: broker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: cascade
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cascade
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: cascade
+          image: miladsade96/cascade:1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9092"
+            - --advertised-host
+            - cascade-3-0.cascade-peer.cascade.svc.cluster.local
+            - --node-id
+            - "3"
+            - --data-dir
+            - /var/lib/cascade
+            - --cluster-nodes
+            - 1@cascade-1-0.cascade-peer.cascade.svc.cluster.local:9092,2@cascade-2-0.cascade-peer.cascade.svc.cluster.local:9092,3@cascade-3-0.cascade-peer.cascade.svc.cluster.local:9092
+            - --controller-id
+            - "1"
+            - --default-replication-factor
+            - "3"
+            - --min-insync-replicas
+            - "2"
+            - --no-auto-create
+            - --security-protocol
+            - SASL_SSL
+            - --ssl-keystore
+            - /etc/cascade/node-tls/keystore.p12
+            - --ssl-keystore-password-file
+            - /etc/cascade/node-tls/keystore.password
+            - --ssl-key-password-file
+            - /etc/cascade/node-tls/key.password
+            - --ssl-truststore
+            - /etc/cascade/cluster-trust/truststore.p12
+            - --ssl-truststore-password-file
+            - /etc/cascade/cluster-trust/truststore.password
+            - --ssl-client-auth
+            - requested
+            - --peer-security-protocol
+            - SSL
+            - --peer-identity-file
+            - /etc/cascade/peer-policy/peer-identities.conf
+            - --sasl-mechanisms
+            - SCRAM-SHA-512
+            - --scram-credentials-file
+            - /etc/cascade/client-auth/scram.conf
+            - --acl-file
+            - /var/lib/cascade/security/acls.conf
+            - --super-users
+            - User:cluster-admin
+            - --audit-log
+            - /var/lib/cascade/log/security-audit.jsonl
+            - --operations-host
+            - 0.0.0.0
+            - --operations-port
+            - "9404"
+            - --operations-token-file
+            - /etc/cascade/operations/token
+            - --structured-log
+            - /var/lib/cascade/log/events.jsonl
+            - --minimum-free-bytes
+            - "10737418240"
+            - --readiness-max-pending-flush-bytes
+            - "536870912"
+          env:
+            - name: CASCADE_OPERATIONS_PORT
+              value: "9404"
+            - name: CASCADE_HEALTHCHECK_TOKEN_FILE
+              value: /etc/cascade/operations/token
+            - name: JAVA_TOOL_OPTIONS
+              value: -XX:InitialRAMPercentage=20.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: operations
+              containerPort: 9404
+          startupProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [/opt/java/bin/java, -cp, /opt/cascade/lib/*, cascade.operations.ContainerHealthCheck, /live]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cascade
+            - name: node-tls
+              mountPath: /etc/cascade/node-tls
+              readOnly: true
+            - name: cluster-trust
+              mountPath: /etc/cascade/cluster-trust
+              readOnly: true
+            - name: peer-policy
+              mountPath: /etc/cascade/peer-policy
+              readOnly: true
+            - name: client-auth
+              mountPath: /etc/cascade/client-auth
+              readOnly: true
+            - name: operations
+              mountPath: /etc/cascade/operations
+              readOnly: true
+      volumes:
+        - name: node-tls
+          secret:
+            secretName: cascade-node-3-tls
+        - name: cluster-trust
+          secret:
+            secretName: cascade-cluster-trust
+        - name: peer-policy
+          configMap:
+            name: cascade-peer-policy
+        - name: client-auth
+          secret:
+            secretName: cascade-client-auth
+        - name: operations
+          secret:
+            secretName: cascade-operations
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 100Gi

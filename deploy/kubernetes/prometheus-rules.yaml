@@ -1,0 +1,106 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cascade
+  labels:
+    app.kubernetes.io/component: operations
+spec:
+  groups:
+    - name: cascade.availability
+      rules:
+        - alert: CascadeBrokerDown
+          expr: cascade_broker_up == 0 or absent(cascade_broker_up)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade broker metrics are unavailable
+            description: A Cascade broker has been down or absent from monitoring for two minutes.
+        - alert: CascadeBrokerFenced
+          expr: cascade_broker_fenced > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade broker is fenced
+            description: A broker cannot safely serve replicated writes or controller work.
+        - alert: CascadeControllerDisagreement
+          expr: count(count_values("controller_id", cascade_broker_controller_id)) > 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade brokers disagree about the controller
+            description: The monitored brokers report more than one active controller ID.
+    - name: cascade.capacity
+      rules:
+        - alert: CascadeDiskSpaceLow
+          expr: cascade_disk_usable_bytes / cascade_disk_total_bytes < 0.15
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade data volume is below 15 percent free
+            description: Rebalance or expand storage before the disk reserve rejects writes.
+        - alert: CascadeDiskSpaceCritical
+          expr: cascade_disk_usable_bytes / cascade_disk_total_bytes < 0.08
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade data volume is below 8 percent free
+            description: Write availability is at immediate risk.
+        - alert: CascadeFlushBacklog
+          expr: cascade_flush_pending_bytes > 536870912
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade has a sustained flush backlog
+            description: More than 512 MiB has remained pending for ten minutes.
+        - alert: CascadeHeapPressure
+          expr: cascade_jvm_heap_used_bytes / cascade_jvm_heap_max_bytes > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade JVM heap usage is sustained above 85 percent
+            description: Inspect traffic, segment indexes, client cardinality, and GC before scaling.
+    - name: cascade.integrity
+      rules:
+        - alert: CascadeStorageAdmissionRejected
+          expr: increase(cascade_storage_rejected_appends_total[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade rejected appends to preserve disk reserve
+            description: Free capacity immediately and confirm producer retry behavior.
+        - alert: CascadeRequestFailureRate
+          expr: rate(cascade_request_failures_total[5m]) / clamp_min(rate(cascade_requests_total[5m]), 1) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade request failure rate exceeds one percent
+            description: Inspect structured events and the affected client/API path.
+        - alert: CascadePeerAuthenticationRejected
+          expr: increase(cascade_peer_authentication_rejections_total[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade rejected a broker identity
+            description: Check node IDs, certificate subjects, trust, and peer identity policy.
+        - alert: CascadeTlsReloadFailed
+          expr: increase(cascade_tls_material_reload_failures_total[10m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade rejected replacement TLS material
+            description: The last valid TLS generation is still active; repair the replacement files.
+        - alert: CascadeQuotaRejectedTraffic
+          expr: increase(cascade_traffic_quota_rejected_total[5m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade rejected traffic after quota delay exceeded its bound
+            description: Identify the quota class and principal before raising limits.

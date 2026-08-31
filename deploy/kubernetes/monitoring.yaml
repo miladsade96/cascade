@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cascade
+  labels:
+    app.kubernetes.io/component: operations
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cascade
+      app.kubernetes.io/component: operations
+  endpoints:
+    - port: operations
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 5s
+      authorization:
+        credentials:
+          name: cascade-operations
+          key: token

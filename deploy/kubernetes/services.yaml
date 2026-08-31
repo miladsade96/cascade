@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cascade-peer
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: cascade
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cascade-bootstrap
+spec:
+  selector:
+    app.kubernetes.io/name: cascade
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cascade-operations
+  labels:
+    app.kubernetes.io/component: operations
+spec:
+  selector:
+    app.kubernetes.io/name: cascade
+  ports:
+    - name: operations
+      port: 9404
+      targetPort: operations
