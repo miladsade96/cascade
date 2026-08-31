@@ -17,15 +17,19 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
 final class KafkaBroker(
     val config: BrokerConfig,
-    peerTransportFactory: ClusterNode => PeerTransport
+    peerTransportFactory: (ClusterNode, Option[ReloadableTlsContext]) => PeerTransport
 ) extends AutoCloseable:
+  def this(config: BrokerConfig, peerTransportFactory: ClusterNode => PeerTransport) =
+    this(config, (node, _) => peerTransportFactory(node))
+
   def this(config: BrokerConfig) =
     this(
       config,
-      _ => PeerClient(
+      (_, tlsContext) => PeerClient(
         localNodeId = if config.security.peer.protocol.tls then config.nodeId else -1,
         security = config.security.peer,
-        tls = Option.when(config.security.peer.protocol.tls)(config.security.tls)
+        tls = Option.when(config.security.peer.protocol.tls)(config.security.tls),
+        tlsContext = tlsContext
       )
     )
 
@@ -101,7 +105,7 @@ final class KafkaBroker(
     server.setReuseAddress(true)
     server.bind(InetSocketAddress(config.bindHost, config.port))
     val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
-    val peers = peerTransportFactory(localNode)
+    val peers = peerTransportFactory(localNode, tlsContext)
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
     cluster.attachReplicationManager(replication)

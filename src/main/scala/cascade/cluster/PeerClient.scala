@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
-import cascade.security.{PeerSecurityConfig, PeerSecurityProtocol, PeerTlsClient, TlsConfig}
+import cascade.security.{PeerSecurityConfig, PeerSecurityProtocol, PeerTlsClient, ReloadableTlsContext, TlsConfig}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
 import java.net.{InetSocketAddress, Socket}
 import java.util.concurrent.ConcurrentHashMap
@@ -15,14 +15,21 @@ trait PeerTransport extends AutoCloseable:
 final class PeerClient(
     localNodeId: Int = -1,
     security: PeerSecurityConfig = PeerSecurityConfig(),
-    tls: Option[TlsConfig] = None
+    tls: Option[TlsConfig] = None,
+    tlsContext: Option[ReloadableTlsContext] = None
 ) extends PeerTransport:
   require(localNodeId >= -1, "local peer node ID must be -1 or non-negative")
   private val clientId = if localNodeId < 0 then "cascade-peer" else s"cascade-peer:$localNodeId"
   private val tlsClient = security.protocol match
     case PeerSecurityProtocol.Plaintext => None
     case PeerSecurityProtocol.Ssl =>
-      Some(PeerTlsClient(tls.getOrElse(throw IllegalArgumentException("peer SSL requires TLS client configuration")), security))
+      Some(
+        PeerTlsClient(
+          tls.getOrElse(throw IllegalArgumentException("peer SSL requires TLS client configuration")),
+          security,
+          tlsContext
+        )
+      )
   private val correlations = AtomicInteger(1)
   private val connections = ConcurrentHashMap[ClusterNode, PeerConnection]()
   private val closed = AtomicBoolean(false)
@@ -40,6 +47,7 @@ final class PeerClient(
     if closed.compareAndSet(false, true) then
       connections.values().asScala.foreach(_.close())
       connections.clear()
+      tlsClient.foreach(_.close())
 
 private final class PeerConnection(
     node: ClusterNode,
@@ -50,6 +58,7 @@ private final class PeerConnection(
   private var socket: Socket | Null = null
   private var input: DataInputStream | Null = null
   private var output: DataOutputStream | Null = null
+  private var tlsGeneration = -1L
 
   def call(apiKey: Short, payload: Array[Byte], timeoutMillis: Int, correlationId: Int): ByteCursor = synchronized {
     ensureConnected(timeoutMillis)
@@ -85,12 +94,16 @@ private final class PeerConnection(
     socket = null
     input = null
     output = null
+    tlsGeneration = -1L
   }
 
   private def ensureConnected(timeoutMillis: Int): Unit =
+    if socket != null && tlsClient.exists(_.generation != tlsGeneration) then close()
     if socket == null then
-      val connected = tlsClient match
-        case Some(client) => client.connect(node.host, node.port, timeoutMillis)
+      val (connected, connectedGeneration) = tlsClient match
+        case Some(client) =>
+          val current = client.connectCurrent(node.host, node.port, timeoutMillis)
+          (current.socket, current.generation)
         case None =>
           val plain = Socket()
           try
@@ -98,7 +111,7 @@ private final class PeerConnection(
             plain.setSoTimeout(timeoutMillis)
             plain.setTcpNoDelay(true)
             plain.setKeepAlive(true)
-            plain
+            (plain, -1L)
           catch
             case error: Throwable =>
               plain.close()
@@ -106,6 +119,7 @@ private final class PeerConnection(
       try
         connected.setSoTimeout(timeoutMillis)
         socket = connected
+        tlsGeneration = connectedGeneration
         input = DataInputStream(BufferedInputStream(connected.getInputStream, 64 * 1024))
         output = DataOutputStream(BufferedOutputStream(connected.getOutputStream, 64 * 1024))
       catch
