@@ -99,7 +99,11 @@ final class BrokerConfigSuite extends FunSuite:
         "--offset-retention-ms",
         "86400000",
         "--journal-compaction-bytes",
-        "1048576"
+        "1048576",
+        "--delete-retention-ms",
+        "43200000",
+        "--compaction-max-bytes-per-second",
+        "67108864"
       )
     )
 
@@ -110,12 +114,16 @@ final class BrokerConfigSuite extends FunSuite:
     assertEquals(config.storageLifecycle.minimumFreeBytes, 536_870_912L)
     assertEquals(config.storageLifecycle.offsetRetentionMillis, 86_400_000L)
     assertEquals(config.storageLifecycle.journalCompactionBytes, 1_048_576L)
+    assertEquals(config.storageLifecycle.deleteRetentionMillis, 43_200_000L)
+    assertEquals(config.storageLifecycle.compactionMaxBytesPerSecond, 67_108_864L)
   }
 
   test("rejects invalid lifecycle settings") {
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--cleanup-policy", "archive")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--retention-ms", "0")))
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--minimum-free-bytes", "-1")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--delete-retention-ms", "-1")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--compaction-max-bytes-per-second", "0")))
   }
 
   test("parses security and resource-isolation settings without exposing secrets on the command line") {
