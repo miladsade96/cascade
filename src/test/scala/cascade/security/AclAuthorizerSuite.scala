@@ -32,3 +32,20 @@ final class AclAuthorizerSuite extends FunSuite:
       intercept[IllegalArgumentException](AclAuthorizer.load(path, Set.empty))
     finally Files.deleteIfExists(path): Unit
   }
+
+  test("distinguishes durable literal and prefix patterns and enforces principal and host identity") {
+    val path = Files.createTempFile("cascade-typed-acls", ".conf")
+    try
+      val rules = Vector(
+        AclRule(AclEffect.Allow, "User:alice", AclOperation.Write, ResourceType.Topic, "orders-*", AclPatternType.Literal, "10.0.0.1"),
+        AclRule(AclEffect.Allow, "User:alice", AclOperation.Read, ResourceType.Topic, "events-", AclPatternType.Prefixed)
+      )
+      Files.writeString(path, AclAuthorizer.render(rules))
+      val authorizer = AclAuthorizer.load(path, Set.empty)
+
+      assert(authorizer.authorize("alice", AclOperation.Write, Resource(ResourceType.Topic, "orders-*"), "10.0.0.1"))
+      assert(!authorizer.authorize("alice", AclOperation.Write, Resource(ResourceType.Topic, "orders-eu"), "10.0.0.1"))
+      assert(!authorizer.authorize("alice", AclOperation.Write, Resource(ResourceType.Topic, "orders-*"), "10.0.0.2"))
+      assert(authorizer.authorize("alice", AclOperation.Read, Resource(ResourceType.Topic, "events-eu"), "10.0.0.2"))
+    finally Files.deleteIfExists(path): Unit
+  }
