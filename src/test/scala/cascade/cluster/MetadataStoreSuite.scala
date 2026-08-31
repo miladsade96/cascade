@@ -1,6 +1,6 @@
 package cascade.cluster
 
-import cascade.protocol.ByteWriter
+import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 import java.nio.file.{Files, StandardOpenOption}
 import munit.FunSuite
@@ -160,6 +160,92 @@ final class MetadataStoreSuite extends FunSuite:
       controllerTerm = 10L
     )
     assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata)), metadata)
+  }
+
+  test("metadata encoding honors the rolling-upgrade format floor") {
+    val versionFive = ClusterMetadata(
+      23L,
+      Vector(TopicMetadata("orders", Vector(PartitionMetadata(0, 1, 0, Vector(1), Vector(1))))),
+      controllerTerm = 11L,
+      membership = Some(QuorumMembership.bootstrap(Vector(ClusterNode(1, "node-1", 9092))))
+    )
+    val encoded = MetadataCodec.encode(versionFive, 5)
+    assertEquals(ByteCursor(encoded).readShort(), 5.toShort)
+    assertEquals(MetadataCodec.decode(encoded), versionFive)
+
+    val requiringSix = versionFive.copy(
+      topics = versionFive.topics.map(_.copy(lifecyclePolicy = Some(TopicLifecyclePolicy(CleanupPolicy.Compact, -1L, -1L))))
+    )
+    val error = intercept[ProtocolException](MetadataCodec.encode(requiringSix, 5))
+    assert(error.getMessage.contains("requires format 6"))
+  }
+
+  test("rolling capability negotiation selects only common formats and features") {
+    val old = PeerCapabilities("1.0.0", 1, 6, Map("online-snapshot" -> 0.toShort))
+    val current = PeerCapabilities("1.1.0", 1, 7, Map("online-snapshot" -> 1.toShort, "consumer-v2" -> 1.toShort))
+    assertEquals(
+      NegotiatedCapabilities.across(Vector(old, current)),
+      Right(NegotiatedCapabilities(6, Map.empty))
+    )
+
+    val incompatible = PeerCapabilities("0.8.0", 1, 4, Map.empty)
+    assert(NegotiatedCapabilities.across(Vector(incompatible, current)).isRight)
+    assertEquals(NegotiatedCapabilities.across(Vector(PeerCapabilities("future", 8, 9, Map.empty), current)).isLeft, true)
+  }
+
+  test("metadata format seven persists quorum-activated feature levels") {
+    val metadata = ClusterMetadata(
+      24L,
+      Vector.empty,
+      controllerTerm = 12L,
+      featureLevels = Map(
+        ClusterFeature.CoordinatorSharding -> 1.toShort,
+        ClusterFeature.ConsumerProtocol -> 1.toShort
+      )
+    )
+
+    assertEquals(MetadataCodec.minimumRequiredFormat(metadata), 7.toShort)
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata, 7)), metadata)
+    intercept[ProtocolException](MetadataCodec.encode(metadata, 6))
+  }
+
+  test("metadata format eight persists coordinator failover eligibility") {
+    val metadata = ClusterMetadata(
+      25L,
+      Vector.empty,
+      controllerTerm = 13L,
+      featureLevels = Map(
+        ClusterFeature.CoordinatorSharding -> 1.toShort,
+        ClusterFeature.CoordinatorFailover -> 1.toShort
+      ),
+      unavailableBrokerIds = Set(1, 4)
+    )
+
+    assertEquals(MetadataCodec.minimumRequiredFormat(metadata), 8.toShort)
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata, 8)), metadata)
+    intercept[ProtocolException](MetadataCodec.encode(metadata, 7))
+  }
+
+  test("coordinator rendezvous sharding distributes keys and minimizes membership movement") {
+    val three = Vector(
+      ClusterNode(1, "node-1", 9092),
+      ClusterNode(2, "node-2", 9093),
+      ClusterNode(3, "node-3", 9094)
+    )
+    val keys = (0 until 10_000).map(index => s"tenant-$index").toVector
+    val owners = keys.map(key => CoordinatorRouting.owner(key, three).get.id)
+    val counts = owners.groupMapReduce(identity)(_ => 1)(_ + _)
+    assertEquals(counts.keySet, Set(1, 2, 3))
+    assert(counts.values.forall(count => count > 2800 && count < 3900), counts)
+
+    val four = three :+ ClusterNode(4, "node-4", 9095)
+    val moved = keys.count(key => CoordinatorRouting.owner(key, three) != CoordinatorRouting.owner(key, four))
+    val movedToNewNode = keys.count(key =>
+      CoordinatorRouting.owner(key, three) != CoordinatorRouting.owner(key, four) &&
+        CoordinatorRouting.owner(key, four).exists(_.id == 4)
+    )
+    assertEquals(moved, movedToNewNode)
+    assert(moved > 1800 && moved < 3200, moved)
   }
 
   test("metadata journal compaction bounds full-image history and recovers the latest image") {
