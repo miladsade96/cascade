@@ -151,7 +151,7 @@ final class BrokerConfigSuite extends FunSuite:
           "--oauth-role-claim", "groups",
           "--oauth-role-map", "engineering=publisher,operations=reader",
           "--oauth-required-scopes", "cascade.read,cascade.write",
-          "--oauth-allowed-algorithms", "RS256,RS512",
+          "--oauth-allowed-algorithms", "RS256,ES256,EdDSA",
           "--oauth-clock-skew-seconds", "45",
           "--oauth-jwks-refresh-ms", "60000",
           "--oauth-http-timeout-ms", "3000",
@@ -193,7 +193,7 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.authentication.oauth.roleClaim, Some("groups"))
       assertEquals(config.security.authentication.oauth.roleMappings, Map("engineering" -> "publisher", "operations" -> "reader"))
       assertEquals(config.security.authentication.oauth.requiredScopes, Set("cascade.read", "cascade.write"))
-      assertEquals(config.security.authentication.oauth.allowedAlgorithms, Set(JwtAlgorithm.Rs256, JwtAlgorithm.Rs512))
+      assertEquals(config.security.authentication.oauth.allowedAlgorithms, Set(JwtAlgorithm.Rs256, JwtAlgorithm.Es256, JwtAlgorithm.EdDsa))
       assertEquals(config.security.authentication.oauth.maximumTokenBytes, 32768)
       assertEquals(config.security.authorization.superUsers, Set("admin", "operator"))
       assertEquals(config.security.resources.maxConnections, 500)

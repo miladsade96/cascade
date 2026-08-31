@@ -71,12 +71,20 @@ enum JwtAlgorithm(val jwtName: String, val signatureName: String):
   case Rs256 extends JwtAlgorithm("RS256", "SHA256withRSA")
   case Rs384 extends JwtAlgorithm("RS384", "SHA384withRSA")
   case Rs512 extends JwtAlgorithm("RS512", "SHA512withRSA")
+  case Es256 extends JwtAlgorithm("ES256", "SHA256withECDSA")
+  case Es384 extends JwtAlgorithm("ES384", "SHA384withECDSA")
+  case Es512 extends JwtAlgorithm("ES512", "SHA512withECDSA")
+  case EdDsa extends JwtAlgorithm("EdDSA", "Ed25519")
+
+  def rsa: Boolean = this == Rs256 || this == Rs384 || this == Rs512
+  def ellipticCurve: Boolean = this == Es256 || this == Es384 || this == Es512
+  def edwardsCurve: Boolean = this == EdDsa
 
 object JwtAlgorithm:
-  val Supported: Vector[JwtAlgorithm] = Vector(Rs256, Rs384, Rs512)
+  val Supported: Vector[JwtAlgorithm] = Vector(Rs256, Rs384, Rs512, Es256, Es384, Es512, EdDsa)
 
   def parse(value: String): JwtAlgorithm =
-    Supported.find(_.jwtName == value.trim.toUpperCase).getOrElse {
+    Supported.find(_.jwtName.equalsIgnoreCase(value.trim)).getOrElse {
       throw IllegalArgumentException(s"unsupported JWT algorithm: ${value.trim}")
     }
 

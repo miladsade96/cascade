@@ -22,6 +22,18 @@ final class JwksSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](JwtKeySet.parse(unusable.getBytes(StandardCharsets.UTF_8)))
   }
 
+  test("JWKS constrains elliptic and Edwards keys to their declared algorithms") {
+    val ec = OAuthTestSupport.keyPairFor(JwtAlgorithm.Es256)
+    val ed = OAuthTestSupport.keyPairFor(JwtAlgorithm.EdDsa)
+    val ecSet = JwtKeySet.parse(OAuthTestSupport.jwks(Vector("ec" -> ec), Some("ES256")).getBytes(StandardCharsets.UTF_8))
+    val edSet = JwtKeySet.parse(OAuthTestSupport.jwks(Vector("ed" -> ed), Some("EdDSA")).getBytes(StandardCharsets.UTF_8))
+    assert(ecSet.resolve("ec", JwtAlgorithm.Es256).nonEmpty)
+    assert(ecSet.resolve("ec", JwtAlgorithm.Es384).isEmpty)
+    assert(edSet.resolve("ed", JwtAlgorithm.EdDsa).nonEmpty)
+    val confused = OAuthTestSupport.jwks(Vector("ec" -> ec), Some("ES384"))
+    intercept[IllegalArgumentException](JwtKeySet.parse(confused.getBytes(StandardCharsets.UTF_8)))
+  }
+
   test("reload keeps the last valid JWKS and recovers after atomic repair") {
     val directory = Files.createTempDirectory("cascade-jwks-reload")
     val path = directory.resolve("jwks.json")

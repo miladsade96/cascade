@@ -5,8 +5,8 @@ import java.math.BigInteger
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.file.{Files, Path}
-import java.security.{KeyFactory, PublicKey}
-import java.security.spec.RSAPublicKeySpec
+import java.security.{AlgorithmParameters, KeyFactory, PublicKey}
+import java.security.spec.{ECGenParameterSpec, ECParameterSpec, ECPoint, ECPublicKeySpec, RSAPublicKeySpec, X509EncodedKeySpec}
 import java.time.Duration
 import java.util.Base64
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
@@ -15,13 +15,13 @@ import scala.util.control.NonFatal
 
 private[security] final case class JwtVerificationKey(
     keyId: String,
-    algorithm: Option[JwtAlgorithm],
+    algorithms: Set[JwtAlgorithm],
     publicKey: PublicKey
 )
 
 private[security] final class JwtKeySet private (keys: Map[String, JwtVerificationKey]):
   def resolve(keyId: String, algorithm: JwtAlgorithm): Option[PublicKey] =
-    keys.get(keyId).filter(_.algorithm.forall(_ == algorithm)).map(_.publicKey)
+    keys.get(keyId).filter(_.algorithms.contains(algorithm)).map(_.publicKey)
 
   def keyIds: Set[String] = keys.keySet
 
@@ -39,7 +39,7 @@ private[security] object JwtKeySet:
       case _                                   => invalid("JWKS keys array is missing")
     if values.isEmpty || values.size > MaximumKeys then invalid("JWKS key count is outside policy")
     val parsed = values.flatMap(parseKey)
-    if parsed.isEmpty then invalid("JWKS contains no usable RSA signing keys")
+    if parsed.isEmpty then invalid("JWKS contains no usable signing keys")
     val duplicates = parsed.groupBy(_.keyId).collect { case (keyId, entries) if entries.size > 1 => keyId }
     if duplicates.nonEmpty then invalid("JWKS contains duplicate key IDs")
     new JwtKeySet(parsed.map(key => key.keyId -> key).toMap)
@@ -48,12 +48,63 @@ private[security] object JwtKeySet:
     val fields = objectFields(value, "JWK")
     string(fields, "kty") match
       case Some("RSA") => parseRsa(fields)
+      case Some("EC")  => parseEc(fields)
+      case Some("OKP") => parseOkp(fields)
       case _           => None
 
   private def parseRsa(fields: Map[String, JsonValue]): Option[JwtVerificationKey] =
-    val keyId = string(fields, "kid").getOrElse(invalid("RSA JWK key ID is missing"))
+    metadata(fields, "RSA") match
+      case None => None
+      case Some((_, algorithm)) if algorithm.exists(!_.rsa) => None
+      case Some((keyId, algorithm)) =>
+        val algorithms = algorithm.map(Set(_)).getOrElse(JwtAlgorithm.Supported.filter(_.rsa).toSet)
+        val modulus = unsignedInteger(string(fields, "n").getOrElse(invalid("RSA modulus is missing")))
+        val exponent = unsignedInteger(string(fields, "e").getOrElse(invalid("RSA exponent is missing")))
+        if modulus.bitLength < MinimumRsaBits || modulus.bitLength > MaximumRsaBits then
+          invalid("RSA modulus size is outside policy")
+        if exponent.compareTo(BigInteger.valueOf(3L)) < 0 || !exponent.testBit(0) || exponent.bitLength > 32 then
+          invalid("RSA exponent is outside policy")
+        val publicKey =
+          try KeyFactory.getInstance("RSA").generatePublic(RSAPublicKeySpec(modulus, exponent))
+          catch case error: java.security.GeneralSecurityException => throw IllegalArgumentException("RSA JWK is invalid", error)
+        Some(JwtVerificationKey(keyId, algorithms, publicKey))
+
+  private def parseEc(fields: Map[String, JsonValue]): Option[JwtVerificationKey] =
+    val curve = string(fields, "crv") match
+      case Some("P-256") => Some(("secp256r1", JwtAlgorithm.Es256, 32))
+      case Some("P-384") => Some(("secp384r1", JwtAlgorithm.Es384, 48))
+      case Some("P-521") => Some(("secp521r1", JwtAlgorithm.Es512, 66))
+      case _             => None
+    (metadata(fields, "EC"), curve) match
+      case (Some((keyId, algorithm)), Some((curveName, expectedAlgorithm, coordinateBytes)))
+          if algorithm.forall(_ == expectedAlgorithm) =>
+        val x = fixedUnsigned(string(fields, "x").getOrElse(invalid("EC x coordinate is missing")), coordinateBytes)
+        val y = fixedUnsigned(string(fields, "y").getOrElse(invalid("EC y coordinate is missing")), coordinateBytes)
+        val publicKey =
+          try
+            val parameters = AlgorithmParameters.getInstance("EC")
+            parameters.init(ECGenParameterSpec(curveName))
+            val specification = parameters.getParameterSpec(classOf[ECParameterSpec])
+            KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(ECPoint(BigInteger(1, x), BigInteger(1, y)), specification))
+          catch case error: java.security.GeneralSecurityException => throw IllegalArgumentException("EC JWK is invalid", error)
+        Some(JwtVerificationKey(keyId, Set(expectedAlgorithm), publicKey))
+      case _ => None
+
+  private def parseOkp(fields: Map[String, JsonValue]): Option[JwtVerificationKey] =
+    metadata(fields, "OKP") match
+      case Some((keyId, algorithm)) if string(fields, "crv") == Some("Ed25519") && algorithm.forall(_ == JwtAlgorithm.EdDsa) =>
+        val x = fixedUnsigned(string(fields, "x").getOrElse(invalid("OKP public key is missing")), 32)
+        val prefix = Array[Byte](0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00)
+        val publicKey =
+          try KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(prefix ++ x))
+          catch case error: java.security.GeneralSecurityException => throw IllegalArgumentException("OKP JWK is invalid", error)
+        Some(JwtVerificationKey(keyId, Set(JwtAlgorithm.EdDsa), publicKey))
+      case _ => None
+
+  private def metadata(fields: Map[String, JsonValue], keyType: String): Option[(String, Option[JwtAlgorithm])] =
+    val keyId = string(fields, "kid").getOrElse(invalid(s"$keyType JWK key ID is missing"))
     if keyId.isEmpty || keyId.length > MaximumKeyIdChars || keyId.exists(_.isControl) then
-      invalid("RSA JWK key ID is outside policy")
+      invalid(s"$keyType JWK key ID is outside policy")
     val use = string(fields, "use")
     val operations = fields.get("key_ops") match
       case None => None
@@ -69,16 +120,7 @@ private[security] object JwtKeySet:
       case Some(name) => JwtAlgorithm.Supported.find(_.jwtName == name) match
         case Some(value) => Some(value)
         case None        => return None
-    val modulus = unsignedInteger(string(fields, "n").getOrElse(invalid("RSA modulus is missing")))
-    val exponent = unsignedInteger(string(fields, "e").getOrElse(invalid("RSA exponent is missing")))
-    if modulus.bitLength < MinimumRsaBits || modulus.bitLength > MaximumRsaBits then
-      invalid("RSA modulus size is outside policy")
-    if exponent.compareTo(BigInteger.valueOf(3L)) < 0 || !exponent.testBit(0) || exponent.bitLength > 32 then
-      invalid("RSA exponent is outside policy")
-    val publicKey =
-      try KeyFactory.getInstance("RSA").generatePublic(RSAPublicKeySpec(modulus, exponent))
-      catch case error: java.security.GeneralSecurityException => throw IllegalArgumentException("RSA JWK is invalid", error)
-    Some(JwtVerificationKey(keyId, algorithm, publicKey))
+    Some(keyId -> algorithm)
 
   private def unsignedInteger(value: String): BigInteger =
     if value.isEmpty || value.length > 2048 || value.exists(character => !isBase64Url(character)) then
@@ -88,6 +130,14 @@ private[security] object JwtKeySet:
       catch case _: IllegalArgumentException => invalid("JWK integer is invalid")
     if bytes.isEmpty then invalid("JWK integer is empty")
     BigInteger(1, bytes)
+
+  private def fixedUnsigned(value: String, expectedBytes: Int): Array[Byte] =
+    if value.isEmpty || value.exists(character => !isBase64Url(character)) then invalid("JWK coordinate is invalid")
+    val bytes =
+      try Base64.getUrlDecoder.decode(value)
+      catch case _: IllegalArgumentException => invalid("JWK coordinate is invalid")
+    if bytes.length != expectedBytes then invalid("JWK coordinate size is outside policy")
+    bytes
 
   private def objectFields(value: JsonValue, name: String): Map[String, JsonValue] = value match
     case JsonValue.ObjectValue(fields) => fields
