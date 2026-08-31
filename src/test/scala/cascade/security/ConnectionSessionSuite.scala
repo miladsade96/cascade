@@ -61,3 +61,11 @@ final class ConnectionSessionSuite extends FunSuite:
     assertEquals(session.principal, "alice")
     assertEquals(session.authorizationPrincipals, Set("alice", "Role:publisher", "Role:reader"))
   }
+
+  test("accumulates and consumes bounded protocol throttle time once") {
+    val session = ConnectionSession("client", secure = false, authenticationRequired = false)
+    session.addThrottle(12L)
+    session.addThrottle(8L)
+    assertEquals(session.consumeThrottleMillis(), 20)
+    assertEquals(session.consumeThrottleMillis(), 0)
+  }

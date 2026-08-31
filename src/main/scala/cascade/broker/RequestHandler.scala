@@ -1043,7 +1043,9 @@ final class RequestHandler(
       (topic, partitionResults)
     }
 
-    if acknowledgements == 0 then None
+    if acknowledgements == 0 then
+      session.consumeThrottleMillis(): Unit
+      None
     else
       val writer = ByteWriter()
       writer.writeArray(results) { case (topic, partitions) =>
@@ -1052,7 +1054,7 @@ final class RequestHandler(
           writer.writeInt(index).writeShort(error).writeLong(baseOffset).writeLong(-1L): Unit
         }
       }
-      writer.writeInt(0)
+      writer.writeInt(session.consumeThrottleMillis())
       Some(writer.result())
 
   private def fetch(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
@@ -1107,7 +1109,7 @@ final class RequestHandler(
     }
 
     val writer = ByteWriter()
-    writer.writeInt(0)
+    writer.writeInt(session.consumeThrottleMillis())
     writer.writeArray(results) { case (topic, partitions) =>
       writer.writeString(topic)
       writer.writeArray(partitions) { case (index, error, result) =>

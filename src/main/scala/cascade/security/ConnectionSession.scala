@@ -13,6 +13,7 @@ final class ConnectionSession(
   @volatile private var scramState: Option[ScramServerSession] = None
   @volatile private var authenticationExpiresAtMillis = Long.MaxValue
   @volatile private var terminateState = false
+  private var pendingThrottleMillis = 0L
 
   def principal: String = currentPrincipal
 
@@ -25,6 +26,16 @@ final class ConnectionSession(
   def mechanism: Option[String] = mechanismState
 
   def terminateRequested: Boolean = terminateState
+
+  def addThrottle(delayMillis: Long): Unit = synchronized {
+    pendingThrottleMillis = math.min(Int.MaxValue.toLong, Math.addExact(pendingThrottleMillis, math.max(0L, delayMillis)))
+  }
+
+  def consumeThrottleMillis(): Int = synchronized {
+    val value = pendingThrottleMillis.toInt
+    pendingThrottleMillis = 0L
+    value
+  }
 
   def selectMechanism(value: String): Unit = synchronized {
     mechanismState = Some(value)
