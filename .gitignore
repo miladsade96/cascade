@@ -8,5 +8,8 @@ project/project/
 project/target/
 data/
 *.log
+node_modules/
+**/bin/
+**/obj/
 
 /docs/launch-announcement.md

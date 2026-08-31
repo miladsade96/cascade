@@ -1,0 +1,13 @@
+{
+  "name": "cascade-kafkajs-compatibility",
+  "private": true,
+  "version": "1.0.0",
+  "description": "KafkaJS interoperability smoke test for Cascade",
+  "license": "Apache-2.0",
+  "scripts": {
+    "smoke": "node smoke.js"
+  },
+  "dependencies": {
+    "kafkajs": "2.2.4"
+  }
+}
