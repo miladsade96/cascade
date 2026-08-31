@@ -7,6 +7,7 @@ import java.nio.file.StandardOpenOption.{TRUNCATE_EXISTING, WRITE}
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import scala.jdk.CollectionConverters.*
 
 final case class TopicPartition(topic: String, partition: Int)
@@ -32,6 +33,7 @@ final class TopicRegistry(
   private val closed = AtomicBoolean(false)
   private val flushQueued = AtomicBoolean(false)
   private val backgroundFailure = AtomicReference[Throwable]()
+  private val snapshotBarrier = ReentrantReadWriteLock(true)
   private val PartitionDirectory = "partition-([0-9]+)".r
   private val policyPath = dataDirectory.resolve(".cascade").resolve("topic-lifecycle.conf")
   private val flusher: Option[ScheduledExecutorService] = flushPolicy match
@@ -132,6 +134,18 @@ final class TopicRegistry(
       .map(_.lifecycleStatistics)
       .foldLeft(LifecycleStatistics.Empty)(_ + _)
 
+  /** Stops lifecycle/flush workers, forces all logs, and keeps their files immutable for the callback. */
+  def withSnapshotBarrier[A](callback: Map[TopicPartition, Long] => A): A =
+    val lock = snapshotBarrier.writeLock()
+    lock.lock()
+    try
+      ensureHealthy()
+      val watermarks = topics.asScala.toVector.sortBy(_._1).flatMap { case (topic, logs) =>
+        logs.zipWithIndex.map { case (log, partition) => TopicPartition(topic, partition) -> log.flushForSnapshot() }
+      }.toMap
+      callback(watermarks)
+    finally lock.unlock()
+
   private def discoverTopics(): Unit =
     val directories = Files.list(dataDirectory)
     try
@@ -222,15 +236,19 @@ final class TopicRegistry(
     ): Unit
 
   private def runLifecycle(): Unit =
-    topics.values().asScala.foreach { logs =>
-      logs.foreach { log =>
-        try log.runLifecycle()
-        catch
-          case error: Throwable =>
-            backgroundFailure.compareAndSet(null, error): Unit
-            backgroundError("storage_lifecycle_error", error)
+    val lock = snapshotBarrier.readLock()
+    lock.lock()
+    try
+      topics.values().asScala.foreach { logs =>
+        logs.foreach { log =>
+          try log.runLifecycle()
+          catch
+            case error: Throwable =>
+              backgroundFailure.compareAndSet(null, error): Unit
+              backgroundError("storage_lifecycle_error", error)
+        }
       }
-    }
+    finally lock.unlock()
 
   private def requestFlush(): Unit =
     flusher.foreach { executor =>
@@ -242,16 +260,20 @@ final class TopicRegistry(
 
   private def flushDueLogs(): Unit =
     flushQueued.set(false)
-    val now = System.nanoTime()
-    topics.values().asScala.foreach { logs =>
-      logs.foreach { log =>
-        try log.flushIfNeeded(now)
-        catch
-          case error: Throwable =>
-            backgroundFailure.compareAndSet(null, error): Unit
-            backgroundError("log_flush_error", error)
+    val lock = snapshotBarrier.readLock()
+    lock.lock()
+    try
+      val now = System.nanoTime()
+      topics.values().asScala.foreach { logs =>
+        logs.foreach { log =>
+          try log.flushIfNeeded(now)
+          catch
+            case error: Throwable =>
+              backgroundFailure.compareAndSet(null, error): Unit
+              backgroundError("log_flush_error", error)
+        }
       }
-    }
+    finally lock.unlock()
 
   private def ensureHealthy(): Unit =
     val failure = backgroundFailure.get()
