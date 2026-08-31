@@ -91,9 +91,11 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var nextHeartbeatNanos = 0L
   @volatile private var replicationManager: ReplicationManager | Null = null
   @volatile private var coordinatorInstaller: (CoordinatorMetadata => Unit) | Null = null
+  @volatile private var installedCoordinatorVersion = -1L
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
   private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
+  private val peerCapabilities = mutable.HashMap.empty[Int, PeerCapabilities]
   private val recoveringNodes = ConcurrentHashMap.newKeySet[Int]()
   private val monitor: Option[ScheduledExecutorService] = Option.when(enabled) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-cluster-monitor").factory())
@@ -114,6 +116,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       current.coordinator
     }
     installer(initial)
+    markCoordinatorInstalled(initial.version)
 
   def start(): Unit =
     if enabled && replicationManager == null then throw IllegalStateException("replication manager is not attached")
@@ -136,6 +139,24 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def controllerNode: Option[ClusterNode] = knownNode(electedControllerId)
 
+  /** Rendezvous hashing keeps unrelated coordinator keys distributed and minimizes movement as voters change. */
+  def coordinatorNode(key: String): Option[ClusterNode] =
+    if !enabled then Some(localNode)
+    else if
+      current.featureLevels.getOrElse(ClusterFeature.CoordinatorSharding, 0.toShort) < 1 ||
+        current.featureLevels.getOrElse(ClusterFeature.CoordinatorFailover, 0.toShort) < 1
+    then controllerNode
+    else
+      val available = effectiveMembership.currentVoters.map(_.node).filterNot(node => current.unavailableBrokerIds.contains(node.id))
+      CoordinatorRouting.owner(key, available).orElse(controllerNode)
+
+  def supportsFeature(name: String, minimumLevel: Short = 1): Boolean =
+    !enabled || current.featureLevels.getOrElse(name, 0.toShort) >= minimumLevel
+
+  def ownsCoordinator(key: String): Boolean =
+    coordinatorNode(key).exists(_.id == config.nodeId) && !isBrokerFenced &&
+      installedCoordinatorVersion >= current.coordinator.version
+
   def controllerId: Int = electedControllerId
 
   def controllerTerm: Long = currentTerm
@@ -145,6 +166,16 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def quorumMembership: QuorumMembership = effectiveMembership
 
   def coordinatorMetadata: CoordinatorMetadata = current.coordinator
+
+  def negotiatedCapabilities: Either[String, NegotiatedCapabilities] = synchronized {
+    val committedVoterIds = effectiveMembership.voterIds
+    NegotiatedCapabilities.across(
+      effectiveMembership.voters.map(voter =>
+        if voter.id == config.nodeId then PeerCapabilities.Current
+        else capabilityForLocked(voter.id, committedVoterIds)
+      )
+    )
+  }
 
   /** Commits one complete coordinator image, forwarding to the active controller when necessary. */
   def commitCoordinatorState(
@@ -274,10 +305,23 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         case Some(controller) => forwardAlterTopicLifecycle(controller, topic, policy)
         case None => TopicConfigResult(Errors.NotController, Some("controller election is in progress"))
 
-  def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = apiKey match
+  def handleInternal(apiKey: Short, cursor: ByteCursor): Array[Byte] = handleInternal(apiKey, 0, cursor)
+
+  def handleInternal(apiKey: Short, apiVersion: Short, cursor: ByteCursor): Array[Byte] = apiKey match
     case InternalApi.Ping =>
       cursor.ensureFullyRead()
       ByteWriter().writeShort(Errors.None).result()
+    case InternalApi.PeerFeatures =>
+      cursor.ensureFullyRead()
+      val features = PeerCapabilities.Current
+      val writer = ByteWriter().writeShort(Errors.None)
+        .writeString(features.release)
+        .writeShort(features.minMetadataFormat)
+        .writeShort(features.maxMetadataFormat)
+      writer.writeArray(features.featureLevels.toVector.sortBy(_._1)) { case (name, level) =>
+        writer.writeString(name).writeShort(level): Unit
+      }
+      writer.result()
     case InternalApi.ControllerVote => controllerVote(cursor)
     case InternalApi.ControllerHeartbeat => controllerHeartbeat(cursor)
     case InternalApi.AddVoter =>
@@ -337,13 +381,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         val target = (membership.currentVoters :+ voter).sortBy(_.id)
         val joint = membership.beginTransition(target)
         val entered = propose(
-          ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint))
+          current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, membership = Some(joint))
         )
         if !entered then MembershipChangeResult(Errors.RequestTimedOut, Some("metadata quorum did not commit joint membership"))
         else
           val stable = joint.stabilize
           val completed = propose(
-            ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(stable))
+            current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, membership = Some(stable))
           )
           if completed then MembershipChangeResult(Errors.None, None)
           else MembershipChangeResult(Errors.RequestTimedOut, Some("joint membership committed; stabilization will resume"))
@@ -371,12 +415,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
             val target = membership.currentVoters.filterNot(_.id == nodeId)
             val joint = membership.beginTransition(target)
             val entered = propose(
-              ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint))
+              current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, membership = Some(joint))
             )
             if !entered then MembershipChangeResult(Errors.RequestTimedOut, Some("metadata quorum did not commit joint membership"))
             else
               val completed = propose(
-                ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(joint.stabilize))
+                current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, membership = Some(joint.stabilize))
               )
               if completed then
                 if nodeId == config.nodeId then synchronized(stepDownLocked(currentTerm, None))
@@ -539,7 +583,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
               partition.copy(leaderEpoch = Math.addExact(partition.leaderEpoch, 1))
             })
           }
-          propose(ClusterMetadata(Math.addExact(current.version, 1L), fencedTopics, term))
+          propose(current.copy(version = Math.addExact(current.version, 1L), topics = fencedTopics, controllerTerm = term))
         }
         catch
           case error: Throwable =>
@@ -614,7 +658,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     val accepted = synchronized {
       if !acceptLeaderLocked(term, leaderId) || metadata.controllerTerm != term then false
       else if metadata.version > current.version then
-        commitLocal(metadata)
+        commitLocal(metadata, installCoordinatorSynchronously = false)
         controllerReady = true
         true
       else
@@ -697,6 +741,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         missedHeartbeats.update(node.id, value)
         value
       }
+      if nodeHealthy && current.unavailableBrokerIds.contains(node.id) &&
+          (node.id == config.nodeId || synchronizeNode(node))
+      then markNodeAvailable(node.id)
       if nodeHealthy && nodeNeedsRecovery(node.id) && (node.id == config.nodeId || synchronizeNode(node)) then
         scheduleNodeRecovery(node.id)
       else if node.id != config.nodeId && misses >= 3 then removeFailedNode(node.id)
@@ -710,7 +757,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val removingLocalController = !membership.targetVoters.exists(_.id == config.nodeId)
       val stable = membership.stabilize
       val completed = propose(
-        ClusterMetadata(Math.addExact(current.version, 1L), current.topics, currentTerm, Some(stable))
+        current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, membership = Some(stable))
       )
       if completed && removingLocalController then synchronized(stepDownLocked(currentTerm, None))
   }
@@ -750,7 +797,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       })
     }
     if changedTopics != current.topics then
-      val next = ClusterMetadata(Math.addExact(current.version, 1L), changedTopics, currentTerm)
+      val next = current.copy(version = Math.addExact(current.version, 1L), topics = changedTopics, controllerTerm = currentTerm)
       if !propose(next) then System.err.println("Cascade could not finalize ready partition reassignments")
   }
 
@@ -765,10 +812,14 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           val replicas = Vector.tabulate(replicationFactor)(offset => brokers((partition + offset) % brokers.size).id)
           PartitionMetadata(partition, replicas.head, 0, replicas, replicas)
         }
-        val next = ClusterMetadata(
-          Math.addExact(current.version, 1L),
-          (current.topics :+ TopicMetadata(name, assignments, Some(TopicLifecyclePolicy.from(config.storageLifecycle)))).sortBy(_.name),
-          currentTerm
+        val next = current.copy(
+          version = Math.addExact(current.version, 1L),
+          topics = (current.topics :+ TopicMetadata(
+            name,
+            assignments,
+            Some(TopicLifecyclePolicy.from(config.storageLifecycle))
+          )).sortBy(_.name),
+          controllerTerm = currentTerm
         )
         if propose(next) then ClusterCreateResult(Errors.None, None)
         else ClusterCreateResult(Errors.CoordinatorNotAvailable, Some("metadata quorum is unavailable"))
@@ -813,7 +864,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           replacements.getOrElse((topic.name, partition.partition), partition)
         })
       }
-      val committed = propose(ClusterMetadata(Math.addExact(current.version, 1L), topics, currentTerm))
+      val committed = propose(current.copy(version = Math.addExact(current.version, 1L), topics = topics, controllerTerm = currentTerm))
       if committed then AlterReassignmentsResult(Errors.None, None, results)
       else
         AlterReassignmentsResult(
@@ -937,24 +988,41 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         ClusterCreateResult(Errors.InvalidPartitions, Some("partition count must be positive"))
       case CreateTopicResult.InvalidName => ClusterCreateResult(Errors.InvalidTopic, Some("invalid topic name"))
 
-  private def propose(next: ClusterMetadata): Boolean =
+  private def propose(next: ClusterMetadata): Boolean = scala.util.boundary {
     val coordinator =
       if next.coordinator.version >= current.coordinator.version then next.coordinator else current.coordinator
-    val candidate = next.copy(
+    val baseCandidate = next.copy(
       membership = next.membership.orElse(current.membership).orElse(bootstrapMembership),
       coordinator = coordinator
     )
     val leadership = synchronized {
       Option.when(
-        role == ControllerRole.Leader && electedControllerId == config.nodeId && candidate.controllerTerm == currentTerm &&
-          candidate.version == current.version + 1L
+        role == ControllerRole.Leader && electedControllerId == config.nodeId && baseCandidate.controllerTerm == currentTerm &&
+          baseCandidate.version == current.version + 1L
       )(currentTerm)
     }
     leadership.exists { term =>
+      val committed = effectiveMembership
       val quorum =
-        val committed = effectiveMembership
         if committed.isJoint then committed
-        else candidate.membership.filter(_.isJoint).getOrElse(committed)
+        else baseCandidate.membership.filter(_.isJoint).getOrElse(committed)
+      refreshPeerCapabilities(quorum.voters.map(_.node).filterNot(_.id == config.nodeId))
+      val negotiated = NegotiatedCapabilities.across(
+        quorum.voters.map(voter =>
+          if voter.id == config.nodeId then PeerCapabilities.Current
+          else synchronized(capabilityForLocked(voter.id, committed.voterIds))
+        )
+      )
+      val candidate = negotiated match
+        case Right(value) =>
+          val activeFeatures = (current.featureLevels.keySet ++ value.featureLevels.keySet).iterator.map { name =>
+            name -> math.max(current.featureLevels.getOrElse(name, 0.toShort), value.featureLevels.getOrElse(name, 0.toShort)).toShort
+          }.filter(_._2 > 0).toMap
+          baseCandidate.copy(featureLevels = activeFeatures)
+        case Left(_)      => scala.util.boundary.break(false)
+      val metadataFormat = negotiated match
+        case Right(value) if value.metadataFormat >= MetadataCodec.minimumRequiredFormat(candidate) => value.metadataFormat
+        case _ => scala.util.boundary.break(false)
       val preparePayload = ByteWriter()
         .writeLong(term)
         .writeInt(config.nodeId)
@@ -980,7 +1048,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         val commitPayload = ByteWriter()
           .writeLong(term)
           .writeInt(config.nodeId)
-          .writeByteArray(MetadataCodec.encode(candidate))
+          .writeByteArray(MetadataCodec.encode(candidate, metadataFormat))
           .result()
         val committed = callPeers(preparedPeers, config.peerTimeoutMillis) { node =>
           val response = peerClient.call(node, InternalApi.MetadataCommit, commitPayload, config.peerTimeoutMillis)
@@ -1004,12 +1072,55 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           true
         else false
     }
+  }
 
-  private def commitLocal(metadata: ClusterMetadata): Unit = synchronized {
+  private def refreshPeerCapabilities(nodes: Vector[ClusterNode]): Unit =
+    nodes.foreach { node =>
+      try
+        val capabilities = peerClient.capabilities(node, config.peerTimeoutMillis)
+        synchronized(peerCapabilities.update(node.id, capabilities))
+      catch case _: Throwable => ()
+    }
+
+  /**
+   * A committed voter has already been admitted by a controller that negotiated the current image. Preserve that
+   * compatibility proof across controller failover even when the voter is temporarily offline. Prospective voters do
+   * not receive this floor: they must advertise compatible capabilities before they can join the quorum.
+   */
+  private def capabilityForLocked(nodeId: Int, committedVoterIds: Set[Int]): PeerCapabilities =
+    peerCapabilities.getOrElse(
+      nodeId,
+      if committedVoterIds.contains(nodeId) then
+        val requiredFormat = MetadataCodec.minimumRequiredFormat(current)
+        PeerCapabilities(
+          "committed-metadata",
+          MetadataCodec.MinimumReadableFormat,
+          math.max(PeerCapabilities.Legacy100.maxMetadataFormat.toInt, requiredFormat.toInt).toShort,
+          current.featureLevels
+        )
+      else PeerCapabilities.Legacy100
+    )
+
+
+  private def commitLocal(metadata: ClusterMetadata, installCoordinatorSynchronously: Boolean = true): Unit = synchronized {
     metadataStore.foreach(_.commit(metadata))
     current = metadata
     applyMetadata(metadata)
-    Option(coordinatorInstaller).foreach(_(metadata.coordinator))
+    Option(coordinatorInstaller).foreach { installer =>
+      if installCoordinatorSynchronously then
+        installer(metadata.coordinator)
+        markCoordinatorInstalled(metadata.coordinator.version)
+      else
+        peerExecutor.submit(new Runnable:
+          override def run(): Unit =
+            installer(metadata.coordinator)
+            markCoordinatorInstalled(metadata.coordinator.version)
+        ): Unit
+    }
+  }
+
+  private def markCoordinatorInstalled(version: Long): Unit = synchronized {
+    installedCoordinatorVersion = math.max(installedCoordinatorVersion, version)
   }
 
   private def commitCoordinatorOnController(
@@ -1107,23 +1218,30 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     }
     leadership.exists { case (term, metadata) =>
       try
-        val response = peerClient.call(
-          node,
-          InternalApi.MetadataCommit,
-          ByteWriter()
-            .writeLong(term)
-            .writeInt(config.nodeId)
-            .writeByteArray(MetadataCodec.encode(metadata))
-            .result(),
-          config.peerTimeoutMillis
-        )
-        val responseTerm = response.readLong()
-        val accepted = response.readShort() == Errors.None
-        response.ensureFullyRead()
-        if responseTerm > term then synchronized(stepDownLocked(responseTerm, None))
-        accepted && responseTerm == term && synchronized {
-          role == ControllerRole.Leader && currentTerm == term && current == metadata
-        }
+        refreshPeerCapabilities(Vector(node))
+        val capability = synchronized(capabilityForLocked(node.id, effectiveMembership.voterIds))
+        val requiredFormat = MetadataCodec.minimumRequiredFormat(metadata)
+        if capability.maxMetadataFormat < requiredFormat || capability.minMetadataFormat > MetadataCodec.CurrentFormat then
+          false
+        else
+          val metadataFormat = math.min(MetadataCodec.CurrentFormat.toInt, capability.maxMetadataFormat.toInt).toShort
+          val response = peerClient.call(
+            node,
+            InternalApi.MetadataCommit,
+            ByteWriter()
+              .writeLong(term)
+              .writeInt(config.nodeId)
+              .writeByteArray(MetadataCodec.encode(metadata, metadataFormat))
+              .result(),
+            config.peerTimeoutMillis
+          )
+          val responseTerm = response.readLong()
+          val accepted = response.readShort() == Errors.None
+          response.ensureFullyRead()
+          if responseTerm > term then synchronized(stepDownLocked(responseTerm, None))
+          accepted && responseTerm == term && synchronized {
+            role == ControllerRole.Leader && currentTerm == term && current == metadata
+          }
       catch case _: Throwable => false
     }
 
@@ -1143,9 +1261,27 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       }
       topic.copy(partitions = changedPartitions)
     }
-    if changedTopics != current.topics then
-      val next = ClusterMetadata(Math.addExact(current.version, 1L), changedTopics, currentTerm)
+    val unavailable =
+      if supportsFeature(ClusterFeature.CoordinatorFailover) then current.unavailableBrokerIds + nodeId
+      else current.unavailableBrokerIds
+    if changedTopics != current.topics || unavailable != current.unavailableBrokerIds then
+      val next = current.copy(
+        version = Math.addExact(current.version, 1L),
+        topics = changedTopics,
+        controllerTerm = currentTerm,
+        unavailableBrokerIds = unavailable
+      )
       if !propose(next) then System.err.println(s"Cascade could not commit metadata failover for node $nodeId")
+  }
+
+  private def markNodeAvailable(nodeId: Int): Unit = metadataMutationLock.synchronized {
+    if isActiveController && current.unavailableBrokerIds.contains(nodeId) then
+      val next = current.copy(
+        version = Math.addExact(current.version, 1L),
+        controllerTerm = currentTerm,
+        unavailableBrokerIds = current.unavailableBrokerIds - nodeId
+      )
+      if !propose(next) then System.err.println(s"Cascade could not restore coordinator eligibility for node $nodeId")
   }
 
   private def recoverNode(nodeId: Int): Unit =
@@ -1184,7 +1320,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         }
         val committed =
           changedTopics != current.topics &&
-            propose(ClusterMetadata(Math.addExact(current.version, 1L), changedTopics, currentTerm))
+            propose(current.copy(version = Math.addExact(current.version, 1L), topics = changedTopics, controllerTerm = currentTerm))
         recovered.foreach { target =>
           if releaseReplicaRecovery(target, admitted = committed) then
             synchronized(pendingRecoveryReleases.remove(target): Unit)
