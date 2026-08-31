@@ -15,6 +15,7 @@ final class CoordinatorStateMachine(
 ) extends CoordinatorCheckpoint,
       AutoCloseable:
   private val closed = AtomicBoolean(false)
+  private var installedVersion = -1L
   private val expirationExecutor: ScheduledExecutorService =
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-coordinator-expirer").factory())
 
@@ -50,6 +51,8 @@ final class CoordinatorStateMachine(
       expirationExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
 
   private def install(metadata: CoordinatorMetadata): Unit = stateLock.synchronized {
-    groups.installSnapshot(metadata.groupState)
-    delivery.installSnapshot(metadata.deliveryState)
+    if metadata.version >= installedVersion then
+      groups.installSnapshot(metadata.groupState)
+      delivery.installSnapshot(metadata.deliveryState)
+      installedVersion = metadata.version
   }
