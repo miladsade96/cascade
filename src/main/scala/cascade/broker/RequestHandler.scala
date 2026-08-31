@@ -229,7 +229,8 @@ final class RequestHandler(
           identity.principal,
           Array.emptyByteArray,
           expiresAtEpochMillis = identity.expiresAtEpochMillis,
-          reportedSessionLifetimeMillis = 0L
+          reportedSessionLifetimeMillis = 0L,
+          roles = identity.roles
         )
       case None => authenticationFailure(session, Array.emptyByteArray)
 
@@ -238,9 +239,10 @@ final class RequestHandler(
       principal: String,
       authenticationBytes: Array[Byte],
       expiresAtEpochMillis: Long = Long.MaxValue,
-      reportedSessionLifetimeMillis: Long = config.security.authentication.sessionLifetimeMillis
+      reportedSessionLifetimeMillis: Long = config.security.authentication.sessionLifetimeMillis,
+      roles: Set[String] = Set.empty
   ): Option[Array[Byte]] =
-    session.authenticate(principal, expiresAtEpochMillis)
+    session.authenticate(principal, expiresAtEpochMillis, roles)
     authenticationMetrics.recordSuccess(session.mechanism)
     recordAudit("authentication", session, "allowed", mechanism = session.mechanism)
     authenticationResponse(Errors.None, None, authenticationBytes, reportedSessionLifetimeMillis)
@@ -1318,7 +1320,7 @@ final class RequestHandler(
     authorizer match
       case None => true
       case Some(current) =>
-        val allowed = current.authorize(session.principal, operation, Resource(resourceType, resourceName), session.remoteAddress)
+        val allowed = current.authorizeAny(session.authorizationPrincipals, operation, Resource(resourceType, resourceName), session.remoteAddress)
         recordAudit(
           "authorization",
           session,

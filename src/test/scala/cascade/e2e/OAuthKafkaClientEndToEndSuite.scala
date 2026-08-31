@@ -73,12 +73,12 @@ final class OAuthKafkaClientEndToEndSuite extends munit.FunSuite:
     write(badTokenFile, token(first, "first", now, "wrong-audience"))
     Files.writeString(
       acls,
-      """allow alice Create Topic oauth-events
-        |allow alice Describe Topic oauth-events
-        |allow alice Write Topic oauth-events
-        |allow alice Read Topic oauth-events
-        |allow alice Read Group oauth-group
-        |allow alice Describe Group oauth-group
+      """allow Role:publisher Create Topic oauth-events
+        |allow Role:publisher Describe Topic oauth-events
+        |allow Role:publisher Write Topic oauth-events
+        |allow Role:consumer Read Topic oauth-events
+        |allow Role:consumer Read Group oauth-group
+        |allow Role:consumer Describe Group oauth-group
         |allow alice Describe Cluster cascade
         |""".stripMargin,
       StandardCharsets.UTF_8
@@ -98,6 +98,8 @@ final class OAuthKafkaClientEndToEndSuite extends munit.FunSuite:
               jwksUri = Some(jwks.toUri),
               issuer = Some("https://issuer.example"),
               audience = Some("cascade"),
+              roleClaim = Some("groups"),
+              roleMappings = Map("engineering" -> "publisher", "analysts" -> "consumer"),
               requiredScopes = Set("cascade.write"),
               jwksRefreshMillis = 0L
             )
@@ -179,7 +181,8 @@ final class OAuthKafkaClientEndToEndSuite extends munit.FunSuite:
       s"\"$audience\"",
       "alice",
       now - 10,
-      now + 600
+      now + 600,
+      extra = "\"groups\":[\"engineering\",\"analysts\",\"untrusted-admin\"]"
     )
     OAuthTestSupport.token(pair.getPrivate, keyId, claims)
 
