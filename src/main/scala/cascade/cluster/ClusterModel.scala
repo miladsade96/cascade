@@ -3,6 +3,7 @@ package cascade.cluster
 import cascade.storage.TopicLifecyclePolicy
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.security.MessageDigest
 
 final case class ClusterNode(id: Int, host: String, port: Int):
   require(id >= 0, "cluster node ID must be non-negative")
@@ -123,14 +124,90 @@ final case class ClusterMetadata(
     topics: Vector[TopicMetadata],
     controllerTerm: Long = 0L,
     membership: Option[QuorumMembership] = None,
-    coordinator: CoordinatorMetadata = CoordinatorMetadata.Empty
+    coordinator: CoordinatorMetadata = CoordinatorMetadata.Empty,
+    featureLevels: Map[String, Short] = Map.empty,
+    unavailableBrokerIds: Set[Int] = Set.empty
 ):
   require(version >= 0L, "metadata version must be non-negative")
   require(controllerTerm >= 0L, "metadata controller term must be non-negative")
+  require(featureLevels.values.forall(_ > 0), "active feature levels must be positive")
+  require(unavailableBrokerIds.forall(_ >= 0), "unavailable broker IDs must be non-negative")
   lazy val byName: Map[String, TopicMetadata] = topics.map(topic => topic.name -> topic).toMap
 
 object ClusterMetadata:
   val Empty: ClusterMetadata = ClusterMetadata(0L, Vector.empty)
+
+/** The on-wire/storage capabilities advertised by one broker during a rolling upgrade. */
+final case class PeerCapabilities(
+    release: String,
+    minMetadataFormat: Short,
+    maxMetadataFormat: Short,
+    featureLevels: Map[String, Short]
+):
+  require(release.nonEmpty, "peer release must not be empty")
+  require(minMetadataFormat > 0, "minimum metadata format must be positive")
+  require(maxMetadataFormat >= minMetadataFormat, "maximum metadata format must cover the minimum")
+  require(featureLevels.values.forall(_ >= 0), "feature levels must be non-negative")
+
+  def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
+
+object PeerCapabilities:
+  /** Existing 1.0.0 brokers answer the versioned ping without a capability body. */
+  val Legacy100: PeerCapabilities = PeerCapabilities("1.0.0", 1, 6, Map.empty)
+
+  val Current: PeerCapabilities = PeerCapabilities(
+    "1.1.0-dev",
+    MetadataCodec.MinimumReadableFormat,
+    MetadataCodec.CurrentFormat,
+    Map(
+      ClusterFeature.CoordinatorSharding -> 1,
+      ClusterFeature.CoordinatorFailover -> 1,
+      ClusterFeature.ConsumerProtocol -> 1,
+      ClusterFeature.OnlineSnapshot -> 1,
+      ClusterFeature.AdvancedCompaction -> 1,
+      ClusterFeature.DistributedQuotas -> 1
+    )
+  )
+
+object ClusterFeature:
+  val CoordinatorSharding = "coordinator-sharding"
+  val CoordinatorFailover = "coordinator-failover"
+  val ConsumerProtocol = "consumer-protocol"
+  val OnlineSnapshot = "online-snapshot"
+  val AdvancedCompaction = "advanced-compaction"
+  val DistributedQuotas = "distributed-quotas"
+
+final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
+  def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
+  def supports(name: String, minimumLevel: Short = 1): Boolean = featureLevel(name) >= minimumLevel
+
+object NegotiatedCapabilities:
+  def across(peers: Iterable[PeerCapabilities]): Either[String, NegotiatedCapabilities] =
+    val values = peers.toVector
+    if values.isEmpty then Left("at least one broker capability is required")
+    else
+      val minimumWritable = values.map(_.minMetadataFormat).max
+      val maximumReadable = values.map(_.maxMetadataFormat).min
+      if minimumWritable > maximumReadable then
+        Left(s"metadata formats do not overlap: minimum writable $minimumWritable, maximum readable $maximumReadable")
+      else
+        val featureNames = values.iterator.flatMap(_.featureLevels.keySet).toSet
+        val commonFeatures = featureNames.iterator.map { name =>
+          name -> values.map(_.featureLevel(name)).min
+        }.filter(_._2 > 0).toMap
+        Right(NegotiatedCapabilities(maximumReadable, commonFeatures))
+
+object CoordinatorRouting:
+  /** Highest-random-weight ownership moves only keys assigned to a node that joins or leaves. */
+  def owner(key: String, nodes: Vector[ClusterNode]): Option[ClusterNode] =
+    nodes.maxByOption(node => score(key, node.id))
+
+  private def score(key: String, nodeId: Int): BigInt =
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(key.getBytes(StandardCharsets.UTF_8))
+    digest.update(0.toByte)
+    digest.update(java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(nodeId).array())
+    BigInt(1, digest.digest().take(8))
 
 object InternalApi:
   val Ping: Short = -100
@@ -152,5 +229,6 @@ object InternalApi:
   val ReplicaRecoveryProbe: Short = -116
   val ReplicaTruncate: Short = -117
   val AlterTopicConfig: Short = -118
+  val PeerFeatures: Short = -119
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= AlterTopicConfig
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= PeerFeatures
