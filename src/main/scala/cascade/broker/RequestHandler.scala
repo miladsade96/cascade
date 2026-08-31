@@ -112,6 +112,9 @@ final class RequestHandler(
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.CreateTopics => createTopics(body, session)
+      case ApiKey.DescribeAcls => describeAcls(body, session)
+      case ApiKey.CreateAcls => createAcls(body, session)
+      case ApiKey.DeleteAcls => deleteAcls(body, session)
       case ApiKey.DescribeConfigs => describeConfigs(body)
       case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
       case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
@@ -559,6 +562,177 @@ final class RequestHandler(
       writer.writeString(name).writeShort(error).writeNullableString(message): Unit
     }
     Some(writer.result())
+
+  private def describeAcls(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val filter = readAclFilter(cursor)
+    cursor.ensureFullyRead()
+    val (error, message, matching) = authorizer match
+      case None => (Errors.SecurityDisabled, Some("authorization is disabled"), Vector.empty[AclRule])
+      case Some(_) if !isAuthorized(session, AclOperation.Describe, ResourceType.Cluster, "cascade") =>
+        (Errors.ClusterAuthorizationFailed, Some("cluster authorization failed"), Vector.empty[AclRule])
+      case Some(current) => filter match
+        case Left(reason) => (Errors.InvalidRequest, Some(reason), Vector.empty[AclRule])
+        case Right(value) => (Errors.None, None, current.rules.filter(_.matchesFilter(value)))
+
+    val grouped = matching.groupBy(rule => (rule.resourceType, rule.resourcePattern, rule.patternType)).toVector
+      .sortBy { case ((resourceType, name, patternType), _) => (resourceType.ordinal, name, patternType.ordinal) }
+    val writer = ByteWriter().writeInt(0).writeShort(error).writeNullableString(message)
+    writer.writeArray(grouped) { case ((resourceType, name, patternType), rules) =>
+      writer.writeByte(resourceTypeCode(resourceType)).writeString(name).writeByte(patternTypeCode(patternType))
+      writer.writeArray(rules.sortBy(rule => (rule.principal, rule.host, rule.operation.ordinal, rule.effect.ordinal))) { rule =>
+        writeAclEntry(writer, rule): Unit
+      }: Unit
+    }
+    Some(writer.result())
+
+  private def createAcls(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val requested = cursor.readArray(readAclRule(cursor))
+    cursor.ensureFullyRead()
+    val authorized = authorizer.nonEmpty && isAuthorized(session, AclOperation.Alter, ResourceType.Cluster, "cascade")
+    val valid = requested.collect { case Right(rule) => rule }
+    val persistenceError =
+      if authorizer.isEmpty || !authorized || valid.isEmpty then None
+      else authorizer.flatMap(_.createRules(valid).left.toOption)
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(requested) { candidate =>
+      val (error, message) =
+        if authorizer.isEmpty then Errors.SecurityDisabled -> Some("authorization is disabled")
+        else if !authorized then Errors.ClusterAuthorizationFailed -> Some("cluster authorization failed")
+        else candidate match
+          case Left(reason) => Errors.InvalidRequest -> Some(reason)
+          case Right(_) => persistenceError match
+            case Some(reason) => Errors.KafkaStorageError -> Some(reason)
+            case None         => Errors.None -> None
+      writer.writeShort(error).writeNullableString(message): Unit
+    }
+    Some(writer.result())
+
+  private def deleteAcls(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val filters = cursor.readArray(readAclFilter(cursor))
+    cursor.ensureFullyRead()
+    val authorized = authorizer.nonEmpty && isAuthorized(session, AclOperation.Alter, ResourceType.Cluster, "cascade")
+    val results = filters.map { filter =>
+      if authorizer.isEmpty then (Errors.SecurityDisabled, Some("authorization is disabled"), Vector.empty[AclRule])
+      else if !authorized then
+        (Errors.ClusterAuthorizationFailed, Some("cluster authorization failed"), Vector.empty[AclRule])
+      else filter match
+        case Left(reason) => (Errors.InvalidRequest, Some(reason), Vector.empty[AclRule])
+        case Right(value) => authorizer.get.deleteRules(value) match
+          case Left(reason)  => (Errors.KafkaStorageError, Some(reason), Vector.empty[AclRule])
+          case Right(rules)  => (Errors.None, None, rules)
+    }
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(results) { case (error, message, rules) =>
+      writer.writeShort(error).writeNullableString(message)
+      writer.writeArray(rules) { rule =>
+        writer.writeShort(Errors.None).writeNullableString(None)
+        writer.writeByte(resourceTypeCode(rule.resourceType)).writeString(rule.resourcePattern)
+          .writeByte(patternTypeCode(rule.patternType))
+        writeAclEntry(writer, rule): Unit
+      }: Unit
+    }
+    Some(writer.result())
+
+  private def readAclRule(cursor: ByteCursor): Either[String, AclRule] =
+    val resourceType = cursor.readByte()
+    val resourceName = cursor.readString()
+    val patternType = cursor.readByte()
+    val principal = cursor.readString()
+    val host = cursor.readString()
+    val operation = cursor.readByte()
+    val permission = cursor.readByte()
+    for
+      decodedResource <- decodeResourceType(resourceType, allowAny = false)
+      decodedPattern <- decodePatternType(patternType)
+      decodedOperation <- decodeOperation(operation, allowAny = false)
+      decodedEffect <- decodeEffect(permission, allowAny = false)
+      rule <- scala.util.Try(
+        AclRule(decodedEffect.get, principal, decodedOperation.get, decodedResource.get, resourceName, decodedPattern, host)
+      ).toEither.left.map(error => Option(error.getMessage).getOrElse("invalid ACL"))
+    yield rule
+
+  private def readAclFilter(cursor: ByteCursor): Either[String, AclFilter] =
+    val resourceType = cursor.readByte()
+    val resourceName = cursor.readNullableString()
+    val patternType = cursor.readByte()
+    val principal = cursor.readNullableString()
+    val host = cursor.readNullableString()
+    val operation = cursor.readByte()
+    val permission = cursor.readByte()
+    for
+      decodedResource <- decodeResourceType(resourceType, allowAny = true)
+      decodedPattern <- decodePatternFilter(patternType)
+      decodedOperation <- decodeOperation(operation, allowAny = true)
+      decodedEffect <- decodeEffect(permission, allowAny = true)
+    yield AclFilter(decodedResource, resourceName, decodedPattern, principal, host, decodedOperation, decodedEffect)
+
+  private def decodeResourceType(value: Byte, allowAny: Boolean): Either[String, Option[ResourceType]] = value.toInt match
+    case 1 if allowAny => Right(None)
+    case 2             => Right(Some(ResourceType.Topic))
+    case 3             => Right(Some(ResourceType.Group))
+    case 4             => Right(Some(ResourceType.Cluster))
+    case 5             => Right(Some(ResourceType.TransactionalId))
+    case other         => Left(s"unsupported ACL resource type: $other")
+
+  private def decodePatternType(value: Byte): Either[String, AclPatternType] = value.toInt match
+    case 3     => Right(AclPatternType.Literal)
+    case 4     => Right(AclPatternType.Prefixed)
+    case other => Left(s"unsupported ACL pattern type: $other")
+
+  private def decodePatternFilter(value: Byte): Either[String, AclPatternFilter] = value.toInt match
+    case 1     => Right(AclPatternFilter.Any)
+    case 2     => Right(AclPatternFilter.Match)
+    case 3     => Right(AclPatternFilter.Literal)
+    case 4     => Right(AclPatternFilter.Prefixed)
+    case other => Left(s"unsupported ACL pattern filter: $other")
+
+  private def decodeOperation(value: Byte, allowAny: Boolean): Either[String, Option[AclOperation]] = value.toInt match
+    case 1 if allowAny => Right(None)
+    case 2             => Right(Some(AclOperation.All))
+    case 3             => Right(Some(AclOperation.Read))
+    case 4             => Right(Some(AclOperation.Write))
+    case 5             => Right(Some(AclOperation.Create))
+    case 6             => Right(Some(AclOperation.Delete))
+    case 7             => Right(Some(AclOperation.Alter))
+    case 8             => Right(Some(AclOperation.Describe))
+    case 9             => Right(Some(AclOperation.ClusterAction))
+    case 12            => Right(Some(AclOperation.IdempotentWrite))
+    case other         => Left(s"unsupported ACL operation: $other")
+
+  private def decodeEffect(value: Byte, allowAny: Boolean): Either[String, Option[AclEffect]] = value.toInt match
+    case 1 if allowAny => Right(None)
+    case 2             => Right(Some(AclEffect.Deny))
+    case 3             => Right(Some(AclEffect.Allow))
+    case other         => Left(s"unsupported ACL permission: $other")
+
+  private def resourceTypeCode(value: ResourceType): Int = value match
+    case ResourceType.Topic           => 2
+    case ResourceType.Group           => 3
+    case ResourceType.Cluster         => 4
+    case ResourceType.TransactionalId => 5
+
+  private def patternTypeCode(value: AclPatternType): Int = value match
+    case AclPatternType.Literal  => 3
+    case AclPatternType.Prefixed => 4
+
+  private def operationCode(value: AclOperation): Int = value match
+    case AclOperation.All             => 2
+    case AclOperation.Read            => 3
+    case AclOperation.Write           => 4
+    case AclOperation.Create          => 5
+    case AclOperation.Delete          => 6
+    case AclOperation.Alter           => 7
+    case AclOperation.Describe        => 8
+    case AclOperation.ClusterAction   => 9
+    case AclOperation.IdempotentWrite => 12
+
+  private def effectCode(value: AclEffect): Int = value match
+    case AclEffect.Deny  => 2
+    case AclEffect.Allow => 3
+
+  private def writeAclEntry(writer: ByteWriter, rule: AclRule): Unit =
+    writer.writeString(rule.principal).writeString(rule.host).writeByte(operationCode(rule.operation))
+      .writeByte(effectCode(rule.effect)): Unit
 
   private def describeConfigs(cursor: ByteCursor): Option[Array[Byte]] =
     final case class RequestedResource(resourceType: Byte, name: String, keys: Option[Vector[String]])
@@ -1144,7 +1318,7 @@ final class RequestHandler(
     authorizer match
       case None => true
       case Some(current) =>
-        val allowed = current.authorize(session.principal, operation, Resource(resourceType, resourceName))
+        val allowed = current.authorize(session.principal, operation, Resource(resourceType, resourceName), session.remoteAddress)
         recordAudit(
           "authorization",
           session,

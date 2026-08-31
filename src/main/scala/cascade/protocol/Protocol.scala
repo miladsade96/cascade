@@ -20,6 +20,9 @@ object ApiKey:
   val AddOffsetsToTxn: Short = 25
   val EndTxn: Short = 26
   val TxnOffsetCommit: Short = 28
+  val DescribeAcls: Short = 29
+  val CreateAcls: Short = 30
+  val DeleteAcls: Short = 31
   val DescribeConfigs: Short = 32
   val SaslAuthenticate: Short = 36
   val AlterPartitionReassignments: Short = 45
@@ -48,6 +51,7 @@ object Errors:
   val ConcurrentTransactions: Short = 51
   val KafkaStorageError: Short = 56
   val TransactionalIdAuthorizationFailed: Short = 53
+  val SecurityDisabled: Short = 54
   val UnknownProducerId: Short = 59
   val UnsupportedVersion: Short = 35
   val TopicAlreadyExists: Short = 36
@@ -103,6 +107,9 @@ object Compatibility:
     ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
     ApiVersion(ApiKey.EndTxn, 1, 1),
     ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
+    ApiVersion(ApiKey.DescribeAcls, 1, 1),
+    ApiVersion(ApiKey.CreateAcls, 1, 1),
+    ApiVersion(ApiKey.DeleteAcls, 1, 1),
     ApiVersion(ApiKey.DescribeConfigs, 2, 2),
     ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
