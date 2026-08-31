@@ -104,8 +104,8 @@ final class RequestHandler(
       case ApiKey.SaslHandshake => saslHandshake(body, session)
       case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
       case ApiKey.Metadata     => metadata(body, session)
-      case ApiKey.OffsetCommit => offsetCommit(body)
-      case ApiKey.OffsetFetch  => offsetFetch(body)
+      case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body)
+      case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body)
       case ApiKey.FindCoordinator => findCoordinator(body)
       case ApiKey.JoinGroup    => joinGroup(header, body)
       case ApiKey.Heartbeat    => heartbeat(body)
@@ -393,19 +393,19 @@ final class RequestHandler(
       else SyncGroupResult(Errors.NotCoordinator, Array.emptyByteArray)
     Some(ByteWriter().writeInt(0).writeShort(result.errorCode).writeByteArray(result.assignment).result())
 
-  private def offsetCommit(cursor: ByteCursor): Option[Array[Byte]] =
+  private def offsetCommit(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
     final case class RequestedPartition(index: Int, value: OffsetCommitValue, exists: Boolean)
     val groupId = cursor.readString()
     val generationId = cursor.readInt()
     val memberId = cursor.readString()
-    val groupInstanceId = cursor.readNullableString()
+    val groupInstanceId = if version >= 7 then cursor.readNullableString() else None
     val committedAt = System.currentTimeMillis()
     val requests = cursor.readArray {
       val topic = cursor.readString()
       val partitions = cursor.readArray {
         val index = cursor.readInt()
         val offset = cursor.readLong()
-        val leaderEpoch = cursor.readInt()
+        val leaderEpoch = if version >= 6 then cursor.readInt() else -1
         val metadata = cursor.readNullableString()
         val value = OffsetCommitValue(
           GroupOffsetKey(groupId, topic, index),
@@ -430,7 +430,7 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def offsetFetch(cursor: ByteCursor): Option[Array[Byte]] =
+  private def offsetFetch(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readString()
     val requested = cursor.readNullableArray {
       val topic = cursor.readString()
@@ -460,7 +460,7 @@ final class RequestHandler(
       writer.writeArray(partitions) { case (partition, committed) =>
         writer.writeInt(partition)
         writer.writeLong(committed.map(_.offset).getOrElse(-1L))
-        writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
+        if version >= 5 then writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
         writer.writeNullableString(committed.flatMap(_.metadata))
         writer.writeShort(if isCoordinator then Errors.None else Errors.NotCoordinator): Unit
       }
