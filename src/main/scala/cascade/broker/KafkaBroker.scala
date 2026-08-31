@@ -8,12 +8,15 @@ import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSna
 import cascade.protocol.{ApiKey, ProtocolException, ProtocolThrottle}
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
 import cascade.storage.{FlushStatistics, TopicRegistry}
+import cascade.backup.{BackupCreator, BackupManifest}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import java.nio.file.Files
 import javax.net.ssl.{SSLPeerUnverifiedException, SSLSocket}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.nio.file.Path
 
 final class KafkaBroker(
     val config: BrokerConfig,
@@ -62,25 +65,30 @@ final class KafkaBroker(
     config.security.resources.maxConnectionsPerIp
   )
   private val requestAdmission = RequestAdmission(config.security.resources.maxInFlightRequests)
+  private val snapshotBarrier = ReentrantReadWriteLock(true)
   private val requestQuota = RequestQuota(
     config.security.resources.requestBytesPerSecond,
     config.security.resources.requestBurstBytes,
-    config.security.resources.maxThrottleMillis
+    config.security.resources.maxThrottleMillis,
+    clusterShareCount = () => quotaShareCount
   )
   private val responseQuota = RequestQuota(
     config.security.resources.responseBytesPerSecond,
     config.security.resources.responseBurstBytes,
-    config.security.resources.maxThrottleMillis
+    config.security.resources.maxThrottleMillis,
+    clusterShareCount = () => quotaShareCount
   )
   private val produceQuota = RequestQuota(
     config.security.resources.produceBytesPerSecond,
     config.security.resources.produceBurstBytes,
-    config.security.resources.maxThrottleMillis
+    config.security.resources.maxThrottleMillis,
+    clusterShareCount = () => quotaShareCount
   )
   private val fetchQuota = RequestQuota(
     config.security.resources.fetchBytesPerSecond,
     config.security.resources.fetchBurstBytes,
-    config.security.resources.maxThrottleMillis
+    config.security.resources.maxThrottleMillis,
+    clusterShareCount = () => quotaShareCount
   )
   private val registry = TopicRegistry(
     config.dataDirectory,
@@ -209,6 +217,17 @@ final class KafkaBroker(
   def produceQuotaSnapshot: RequestQuotaSnapshot = produceQuota.snapshot
 
   def fetchQuotaSnapshot: RequestQuotaSnapshot = fetchQuota.snapshot
+
+  /** Creates a checksummed, restore-compatible snapshot while the broker remains online. */
+  def createOnlineSnapshot(targetDirectory: Path): BackupManifest =
+    if !running.get() then throw IllegalStateException("broker must be running for an online snapshot")
+    val cluster = Option(clusterManager).getOrElse(throw IllegalStateException("cluster manager is not initialized"))
+    if !cluster.supportsFeature(cascade.cluster.ClusterFeature.OnlineSnapshot) then
+      throw IllegalStateException("online snapshots require every voter to advertise the feature")
+    val lock = snapshotBarrier.writeLock()
+    lock.lock()
+    try registry.withSnapshotBarrier(_ => BackupCreator.createOnline(config.dataDirectory, targetDirectory))
+    finally lock.unlock()
 
   def metricsSnapshot: BrokerMetricsSnapshot =
     val cluster = Option(clusterManager)
@@ -361,7 +380,9 @@ final class KafkaBroker(
         try
           val currentHandler = handler
           if currentHandler == null then throw IllegalStateException("request handler is not initialized")
-          currentHandler.handle(frame, session).foreach { response =>
+          val barrier = snapshotBarrier.readLock()
+          barrier.lock()
+          try currentHandler.handle(frame, session).foreach { response =>
             val ingressDelay = session.consumeThrottleMillis().toLong
             val responseDelay = egressDelay(responseQuota, session.principal, response.length)
             val fetchDelay = if apiKey == ApiKey.Fetch then egressDelay(fetchQuota, session.principal, response.length) else 0L
@@ -372,6 +393,7 @@ final class KafkaBroker(
             output.flush()
             trafficMetrics.recordResponse(response.length)
           }
+          finally barrier.unlock()
           !session.terminateRequested
         catch
           case error: Throwable =>
@@ -395,6 +417,9 @@ final class KafkaBroker(
       case QuotaDecision.Throttle(delayMillis) => delayMillis
       case QuotaDecision.Allowed               => 0L
       case QuotaDecision.Rejected(_)           => throw IllegalStateException("egress quota unexpectedly rejected traffic")
+
+  private def quotaShareCount: Int =
+    Option(clusterManager).map(_.clusterNodes.size).getOrElse(math.max(1, config.clusterNodes.size))
 
   private def requestApiKey(frame: Array[Byte]): Short =
     if frame.length < 2 then -1.toShort

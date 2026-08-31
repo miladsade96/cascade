@@ -16,12 +16,24 @@ object BackupCreator:
   private final case class SourceFile(path: Path, relativePath: String, length: Long, modified: FileTime)
 
   def create(sourceDirectory: Path, targetDirectory: Path, clock: () => Instant = () => Instant.now()): BackupManifest =
+    createConsistent(sourceDirectory, targetDirectory, requireCleanShutdown = true, clock)
+
+  /** Caller must hold the broker write barrier and force every partition before invoking this method. */
+  def createOnline(sourceDirectory: Path, targetDirectory: Path, clock: () => Instant = () => Instant.now()): BackupManifest =
+    createConsistent(sourceDirectory, targetDirectory, requireCleanShutdown = false, clock)
+
+  private def createConsistent(
+      sourceDirectory: Path,
+      targetDirectory: Path,
+      requireCleanShutdown: Boolean,
+      clock: () => Instant
+  ): BackupManifest =
     val source = sourceDirectory.toAbsolutePath.normalize()
     val target = targetDirectory.toAbsolutePath.normalize()
     require(Files.isDirectory(source), s"backup source is not a directory: $source")
     require(!Files.exists(target), s"backup target already exists: $target")
     require(source != target && !target.startsWith(source), "backup target must be outside the source directory")
-    require(ShutdownMarker.isCleanlyStopped(source), "backup requires a cleanly stopped broker")
+    if requireCleanShutdown then require(ShutdownMarker.isCleanlyStopped(source), "backup requires a cleanly stopped broker")
     val parent = Option(target.getParent).getOrElse(throw IllegalArgumentException("backup target requires a parent directory"))
     Files.createDirectories(parent): Unit
     val prefix = s".${target.getFileName}.partial-"
@@ -40,7 +52,7 @@ object BackupCreator:
         BackupDurability.forceFile(destination)
         BackupEntry(file.relativePath, copiedLength, Sha256.file(destination))
       }
-      require(ShutdownMarker.isCleanlyStopped(source), "broker started while the backup was running")
+      if requireCleanShutdown then require(ShutdownMarker.isCleanlyStopped(source), "broker started while the backup was running")
       require(sourceFiles(source) == before, "backup source changed while it was being copied")
       val manifest = BackupManifest(clock(), entries)
       writeForced(staging.resolve(BackupManifest.FileName), BackupManifest.encode(manifest))
