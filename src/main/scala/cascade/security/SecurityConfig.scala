@@ -60,8 +60,12 @@ final case class TlsConfig(
     trustStore: Option[Path] = None,
     trustStorePassword: Option[String] = None,
     clientAuth: TlsClientAuth = TlsClientAuth.None,
-    enabledProtocols: Vector[String] = Vector("TLSv1.3", "TLSv1.2")
-)
+    enabledProtocols: Vector[String] = Vector("TLSv1.3", "TLSv1.2"),
+    reloadIntervalMillis: Long = 1000L
+):
+  require(enabledProtocols.nonEmpty, "at least one TLS protocol must be enabled")
+  require(enabledProtocols.distinct.size == enabledProtocols.size, "TLS protocols must be unique")
+  require(reloadIntervalMillis >= 0L, "TLS reload interval cannot be negative")
 
 enum JwtAlgorithm(val jwtName: String, val signatureName: String):
   case Rs256 extends JwtAlgorithm("RS256", "SHA256withRSA")

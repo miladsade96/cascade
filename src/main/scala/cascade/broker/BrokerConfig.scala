@@ -124,6 +124,8 @@ object BrokerConfig:
         loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(clientAuth = TlsClientAuth.parse(value)))))
       case "--tls-protocols" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(enabledProtocols = splitCsv(value)))))
+      case "--ssl-reload-ms" :: value :: tail =>
+        loop(tail, config.copy(security = config.security.copy(tls = config.security.tls.copy(reloadIntervalMillis = value.toLong))))
       case "--peer-security-protocol" :: value :: tail =>
         loop(tail, config.copy(security = config.security.copy(peer = config.security.peer.copy(protocol = PeerSecurityProtocol.parse(value)))))
       case "--peer-identity-file" :: value :: tail =>
