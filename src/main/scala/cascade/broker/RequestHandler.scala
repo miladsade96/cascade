@@ -369,9 +369,9 @@ final class RequestHandler(
     val groupId = cursor.readString()
     val generationId = cursor.readInt()
     val memberId = cursor.readString()
-    cursor.readNullableString()
+    val groupInstanceId = cursor.readNullableString()
     cursor.ensureFullyRead()
-    val error = if isCoordinator then groupCoordinator.heartbeat(groupId, generationId, memberId) else Errors.NotCoordinator
+    val error = if isCoordinator then groupCoordinator.heartbeat(groupId, generationId, memberId, groupInstanceId) else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def leaveGroup(cursor: ByteCursor): Option[Array[Byte]] =
@@ -385,11 +385,11 @@ final class RequestHandler(
     val groupId = cursor.readString()
     val generationId = cursor.readInt()
     val memberId = cursor.readString()
-    cursor.readNullableString()
+    val groupInstanceId = cursor.readNullableString()
     val assignments = cursor.readArray((cursor.readString(), cursor.readByteArray()))
     cursor.ensureFullyRead()
     val result =
-      if isCoordinator then groupCoordinator.sync(groupId, generationId, memberId, assignments)
+      if isCoordinator then groupCoordinator.sync(groupId, generationId, memberId, groupInstanceId, assignments)
       else SyncGroupResult(Errors.NotCoordinator, Array.emptyByteArray)
     Some(ByteWriter().writeInt(0).writeShort(result.errorCode).writeByteArray(result.assignment).result())
 
@@ -398,7 +398,7 @@ final class RequestHandler(
     val groupId = cursor.readString()
     val generationId = cursor.readInt()
     val memberId = cursor.readString()
-    cursor.readNullableString()
+    val groupInstanceId = cursor.readNullableString()
     val committedAt = System.currentTimeMillis()
     val requests = cursor.readArray {
       val topic = cursor.readString()
@@ -418,7 +418,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val validValues = requests.flatMap(_._2).filter(_.exists).map(_.value)
     val groupError =
-      if isCoordinator then groupCoordinator.commitOffsets(groupId, generationId, memberId, validValues)
+      if isCoordinator then groupCoordinator.commitOffsets(groupId, generationId, memberId, groupInstanceId, validValues)
       else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requests) { case (topic, partitions) =>

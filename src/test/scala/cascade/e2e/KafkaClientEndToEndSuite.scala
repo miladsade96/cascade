@@ -21,7 +21,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.config.ConfigResource
-import org.apache.kafka.common.errors.{InvalidReplicaAssignmentException, NoReassignmentInProgressException}
+import org.apache.kafka.common.errors.{FencedInstanceIdException, InvalidReplicaAssignmentException, NoReassignmentInProgressException}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
 
@@ -190,6 +190,46 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       assertEquals(seen.size(), 400)
       assertEquals(duplicates.get(), 0)
       assert(perConsumer.forall(_.get() > 0))
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
+  test("a duplicate static consumer identity fences its previous owner") {
+    val directory = Files.createTempDirectory("cascade-static-member-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try admin.createTopics(java.util.List.of(new NewTopic("static-member-events", 1, 1.toShort))).all().get()
+      finally admin.close(Duration.ofSeconds(5))
+
+      val firstProperties = groupConsumerProperties(broker.bootstrapServers, "static-workers")
+      firstProperties.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "worker-a")
+      firstProperties.put(ConsumerConfig.CLIENT_ID_CONFIG, "first-static-worker")
+      val secondProperties = groupConsumerProperties(broker.bootstrapServers, "static-workers")
+      secondProperties.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "worker-a")
+      secondProperties.put(ConsumerConfig.CLIENT_ID_CONFIG, "replacement-static-worker")
+
+      val first = KafkaConsumer[Array[Byte], Array[Byte]](firstProperties)
+      val second = KafkaConsumer[Array[Byte], Array[Byte]](secondProperties)
+      try
+        first.subscribe(java.util.List.of("static-member-events"))
+        awaitAssignment(first)
+
+        second.subscribe(java.util.List.of("static-member-events"))
+        awaitAssignment(second)
+
+        val deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos
+        var fenced = false
+        while !fenced && System.nanoTime() < deadline do
+          try first.poll(Duration.ofMillis(250)): Unit
+          catch case _: FencedInstanceIdException => fenced = true
+        assert(fenced, "the previous static member was not fenced")
+      finally
+        try first.close()
+        catch case _: FencedInstanceIdException => ()
+        second.close()
     finally
       broker.close()
       deleteTree(directory)
@@ -1320,6 +1360,12 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     val result = values.result()
     assertEquals(result.size, expected)
     result
+
+  private def awaitAssignment(consumer: KafkaConsumer[Array[Byte], Array[Byte]]): Unit =
+    val deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos
+    while consumer.assignment().isEmpty && System.nanoTime() < deadline do
+      consumer.poll(Duration.ofMillis(250)): Unit
+    assert(!consumer.assignment().isEmpty, "the consumer did not receive an assignment")
 
   private def produceValue(
       bootstrapServers: String,
