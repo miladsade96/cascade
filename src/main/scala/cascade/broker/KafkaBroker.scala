@@ -4,8 +4,8 @@ import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, 
 import cascade.coordinator.CoordinatorStateMachine
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
-import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics}
-import cascade.protocol.ProtocolException
+import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics, TrafficQuotaSnapshot}
+import cascade.protocol.{ApiKey, ProtocolException, ProtocolThrottle}
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
@@ -65,6 +65,21 @@ final class KafkaBroker(
   private val requestQuota = RequestQuota(
     config.security.resources.requestBytesPerSecond,
     config.security.resources.requestBurstBytes,
+    config.security.resources.maxThrottleMillis
+  )
+  private val responseQuota = RequestQuota(
+    config.security.resources.responseBytesPerSecond,
+    config.security.resources.responseBurstBytes,
+    config.security.resources.maxThrottleMillis
+  )
+  private val produceQuota = RequestQuota(
+    config.security.resources.produceBytesPerSecond,
+    config.security.resources.produceBurstBytes,
+    config.security.resources.maxThrottleMillis
+  )
+  private val fetchQuota = RequestQuota(
+    config.security.resources.fetchBytesPerSecond,
+    config.security.resources.fetchBurstBytes,
     config.security.resources.maxThrottleMillis
   )
   private val registry = TopicRegistry(
@@ -189,6 +204,12 @@ final class KafkaBroker(
 
   def requestQuotaSnapshot: RequestQuotaSnapshot = requestQuota.snapshot
 
+  def responseQuotaSnapshot: RequestQuotaSnapshot = responseQuota.snapshot
+
+  def produceQuotaSnapshot: RequestQuotaSnapshot = produceQuota.snapshot
+
+  def fetchQuotaSnapshot: RequestQuotaSnapshot = fetchQuota.snapshot
+
   def metricsSnapshot: BrokerMetricsSnapshot =
     val cluster = Option(clusterManager)
     val topicNames = try cluster.map(_.topicNames).getOrElse(registry.topicNames) catch case _: Throwable => Vector.empty
@@ -233,7 +254,8 @@ final class KafkaBroker(
       heapMaxBytes = runtime.maxMemory(),
       peerSecurity = peerSecurityMetrics.snapshot,
       authentication = authenticationMetrics.snapshot,
-      tlsReload = tlsContext.map(_.snapshot).getOrElse(cascade.security.TlsReloadSnapshot.Empty)
+      tlsReload = tlsContext.map(_.snapshot).getOrElse(cascade.security.TlsReloadSnapshot.Empty),
+      trafficQuotas = TrafficQuotaSnapshot(requestQuota.snapshot, responseQuota.snapshot, produceQuota.snapshot, fetchQuota.snapshot)
     )
 
   def healthSnapshot: BrokerHealth =
@@ -313,12 +335,10 @@ final class KafkaBroker(
             throw ProtocolException(s"invalid request frame size: $size")
           val frame = new Array[Byte](size)
           input.readFully(frame)
-          requestQuota.evaluate(session.principal, size + Integer.BYTES) match
-            case QuotaDecision.Rejected(_) => connected = false
-            case QuotaDecision.Throttle(delayMillis) =>
-              Thread.sleep(delayMillis)
-              connected = handleAdmitted(frame, session, output)
-            case QuotaDecision.Allowed => connected = handleAdmitted(frame, session, output)
+          val apiKey = requestApiKey(frame)
+          connected = applyIngressQuota(requestQuota, session, size + Integer.BYTES) &&
+            (apiKey != ApiKey.Produce || applyIngressQuota(produceQuota, session, size + Integer.BYTES)) &&
+            handleAdmitted(frame, apiKey, session, output)
         catch
           case _: EOFException => connected = false
     catch
@@ -329,6 +349,7 @@ final class KafkaBroker(
 
   private def handleAdmitted(
       frame: Array[Byte],
+      apiKey: Short,
       session: ConnectionSession,
       output: DataOutputStream
   ): Boolean =
@@ -341,6 +362,12 @@ final class KafkaBroker(
           val currentHandler = handler
           if currentHandler == null then throw IllegalStateException("request handler is not initialized")
           currentHandler.handle(frame, session).foreach { response =>
+            val ingressDelay = session.consumeThrottleMillis().toLong
+            val responseDelay = egressDelay(responseQuota, session.principal, response.length)
+            val fetchDelay = if apiKey == ApiKey.Fetch then egressDelay(fetchQuota, session.principal, response.length) else 0L
+            val egressThrottle = Math.addExact(responseDelay, fetchDelay)
+            ProtocolThrottle.add(response, apiKey, Math.addExact(ingressDelay, egressThrottle))
+            if egressThrottle > 0L then Thread.sleep(egressThrottle)
             output.write(response)
             output.flush()
             trafficMetrics.recordResponse(response.length)
@@ -353,6 +380,25 @@ final class KafkaBroker(
         finally
           trafficMetrics.recordDuration(System.nanoTime() - started)
           lease.close()
+
+  private def applyIngressQuota(quota: RequestQuota, session: ConnectionSession, bytes: Int): Boolean =
+    quota.evaluate(session.principal, bytes) match
+      case QuotaDecision.Rejected(_) => false
+      case QuotaDecision.Throttle(delayMillis) =>
+        session.addThrottle(delayMillis)
+        if delayMillis > 0L then Thread.sleep(delayMillis)
+        true
+      case QuotaDecision.Allowed => true
+
+  private def egressDelay(quota: RequestQuota, principal: String, bytes: Int): Long =
+    quota.evaluate(principal, bytes, rejectExcess = false) match
+      case QuotaDecision.Throttle(delayMillis) => delayMillis
+      case QuotaDecision.Allowed               => 0L
+      case QuotaDecision.Rejected(_)           => throw IllegalStateException("egress quota unexpectedly rejected traffic")
+
+  private def requestApiKey(frame: Array[Byte]): Short =
+    if frame.length < 2 then -1.toShort
+    else (((frame(0) & 0xff) << 8) | (frame(1) & 0xff)).toShort
 
   private def connectionSession(socket: Socket): ConnectionSession =
     val transportPrincipal = socket match

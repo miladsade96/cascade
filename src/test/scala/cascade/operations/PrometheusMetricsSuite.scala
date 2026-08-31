@@ -1,6 +1,6 @@
 package cascade.operations
 
-import cascade.security.TlsReloadSnapshot
+import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
 import munit.FunSuite
 
 final class PrometheusMetricsSuite extends FunSuite:
@@ -19,7 +19,8 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"SCRAM-SHA-256\",node_id=\"7\"} 2.0\n"))
     assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"OAUTHBEARER\",node_id=\"7\"} 8.0\n"))
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 50)
+    assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 66)
   }
 
   private val snapshot = BrokerMetricsSnapshot(
@@ -62,5 +63,11 @@ final class PrometheusMetricsSuite extends FunSuite:
         MechanismAuthenticationSnapshot("UNKNOWN", 0L, 7L)
       )
     ),
-    tlsReload = TlsReloadSnapshot(enabled = true, generation = 4L, successfulReloads = 3L, failedReloads = 2L)
+    tlsReload = TlsReloadSnapshot(enabled = true, generation = 4L, successfulReloads = 3L, failedReloads = 2L),
+    trafficQuotas = TrafficQuotaSnapshot(
+      RequestQuotaSnapshot(4L, 5L, 600L, 2),
+      RequestQuotaSnapshot(10L, 11L, 1200L, 3),
+      RequestQuotaSnapshot(14L, 15L, 1600L, 4),
+      RequestQuotaSnapshot(19L, 20L, 2100L, 5)
+    )
   )

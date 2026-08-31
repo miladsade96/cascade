@@ -1,6 +1,6 @@
 package cascade.operations
 
-import cascade.security.TlsReloadSnapshot
+import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
 final case class TrafficSnapshot(
@@ -42,6 +42,21 @@ final class TrafficMetrics:
       requestNanos.get()
     )
 
+final case class TrafficQuotaSnapshot(
+    request: RequestQuotaSnapshot,
+    response: RequestQuotaSnapshot,
+    produce: RequestQuotaSnapshot,
+    fetch: RequestQuotaSnapshot
+)
+
+object TrafficQuotaSnapshot:
+  val Empty: TrafficQuotaSnapshot = TrafficQuotaSnapshot(
+    RequestQuotaSnapshot.Empty,
+    RequestQuotaSnapshot.Empty,
+    RequestQuotaSnapshot.Empty,
+    RequestQuotaSnapshot.Empty
+  )
+
 final case class BrokerMetricsSnapshot(
     nodeId: Int,
     uptimeMillis: Long,
@@ -74,7 +89,8 @@ final case class BrokerMetricsSnapshot(
     heapMaxBytes: Long,
     peerSecurity: PeerSecuritySnapshot = PeerSecuritySnapshot.Empty,
     authentication: AuthenticationSnapshot = AuthenticationSnapshot.Empty,
-    tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty
+    tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty,
+    trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty
 )
 
 object PrometheusMetrics:
@@ -116,6 +132,18 @@ object PrometheusMetrics:
     counter(builder, "cascade_quota_throttled_requests_total", "Requests delayed by principal quotas.", snapshot.quotaThrottledRequests.toDouble, labels)
     counter(builder, "cascade_quota_rejected_requests_total", "Requests shed because required quota delay was too large.", snapshot.quotaRejectedRequests.toDouble, labels)
     counter(builder, "cascade_quota_throttle_seconds_total", "Cumulative principal quota delay.", snapshot.quotaThrottleMillis / 1000d, labels)
+    Vector(
+      "request" -> snapshot.trafficQuotas.request,
+      "response" -> snapshot.trafficQuotas.response,
+      "produce" -> snapshot.trafficQuotas.produce,
+      "fetch" -> snapshot.trafficQuotas.fetch
+    ).foreach { case (quota, value) =>
+      val quotaLabels = labels.updated("quota", quota)
+      gauge(builder, "cascade_traffic_quota_principals", "Principals with active traffic quota buckets.", value.principals.toDouble, quotaLabels)
+      counter(builder, "cascade_traffic_quota_throttled_total", "Traffic quota reservations delayed.", value.throttled.toDouble, quotaLabels)
+      counter(builder, "cascade_traffic_quota_rejected_total", "Traffic quota reservations rejected.", value.rejected.toDouble, quotaLabels)
+      counter(builder, "cascade_traffic_quota_throttle_seconds_total", "Cumulative traffic quota delay.", value.throttleMillis / 1000d, quotaLabels)
+    }
     counter(builder, "cascade_flush_operations_total", "Completed storage force operations.", snapshot.flushOperations.toDouble, labels)
     counter(builder, "cascade_flush_bytes_total", "Bytes covered by completed force operations.", snapshot.flushBytes.toDouble, labels)
     counter(builder, "cascade_flush_seconds_total", "Cumulative storage force duration.", snapshot.flushNanos / 1_000_000_000d, labels)

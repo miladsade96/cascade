@@ -2,6 +2,7 @@ package cascade.broker
 
 import cascade.TestRecordBatch
 import cascade.protocol.*
+import cascade.security.ResourceLimits
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
 import java.net.Socket
 import java.nio.file.Files
@@ -127,6 +128,62 @@ final class BrokerIntegrationSuite extends FunSuite:
         assertEquals(fetched.readNullableBytes().map(_.length), Some(batch.length))
       finally socket.close()
     }
+  }
+
+  test("applies response, Produce, and Fetch quotas and reports Kafka throttle fields") {
+    val directory = Files.createTempDirectory("cascade-traffic-quotas")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory,
+        security = cascade.security.BrokerSecurityConfig(
+          resources = ResourceLimits(
+            responseBytesPerSecond = 1_000_000L,
+            responseBurstBytes = 1L,
+            produceBytesPerSecond = 1_000_000L,
+            produceBurstBytes = 1L,
+            fetchBytesPerSecond = 1_000_000L,
+            fetchBurstBytes = 1L,
+            maxThrottleMillis = 100L
+          )
+        )
+      )
+    )
+    try
+      broker.start()
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("quota-events", 1))
+
+        val produced = request(output, input, produceRequest("quota-events", TestRecordBatch.single(), 2))
+        produced.readInt()
+        produced.readArray {
+          produced.readString()
+          produced.readArray {
+            produced.readInt()
+            produced.readShort()
+            produced.readLong()
+            produced.readLong()
+          }
+        }
+        assert(produced.readInt() > 0)
+        produced.ensureFullyRead()
+
+        val fetched = request(output, input, fetchRequest("quota-events", 3))
+        fetched.readInt()
+        assert(fetched.readInt() > 0)
+        assert(broker.responseQuotaSnapshot.throttled >= 3L)
+        assertEquals(broker.responseQuotaSnapshot.rejected, 0L)
+        assertEquals(broker.produceQuotaSnapshot.throttled, 1L)
+        assertEquals(broker.fetchQuotaSnapshot.throttled, 1L)
+      finally socket.close()
+    finally
+      broker.close()
+      deleteTree(directory)
   }
 
   test("decodes Kafka flexible voter administration requests and responses") {
