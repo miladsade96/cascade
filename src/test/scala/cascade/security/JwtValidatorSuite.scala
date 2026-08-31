@@ -57,6 +57,32 @@ final class JwtValidatorSuite extends munit.FunSuite:
     }
   }
 
+  test("JWT validator maps only operator-approved role claims") {
+    val directory = Files.createTempDirectory("cascade-jwt-roles")
+    val path = directory.resolve("jwks.json")
+    val pair = OAuthTestSupport.keyPair()
+    OAuthTestSupport.writeJwks(path, Vector("active" -> pair))
+    val config = OAuthConfig(
+      jwksUri = Some(path.toUri),
+      issuer = Some("https://issuer.example"),
+      audience = Some("cascade"),
+      roleClaim = Some("groups"),
+      roleMappings = Map("engineering" -> "publisher", "operations" -> "reader"),
+      jwksRefreshMillis = 60000L
+    )
+    val keys = ReloadableJwks(config)
+    try
+      val claims = OAuthTestSupport.claims(
+        "https://issuer.example", "\"cascade\"", "alice", now, now + 60,
+        extra = "\"groups\":[\"engineering\",\"untrusted-admin\"]"
+      )
+      val validator = JwtValidator(config, keys, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC))
+      assertEquals(validator.validate(OAuthTestSupport.token(pair.getPrivate, "active", claims)).map(_.roles), Right(Set("publisher")))
+    finally
+      keys.close()
+      SecurityTestSupport.deleteTree(directory)
+  }
+
   test("OAUTHBEARER authenticator requires the GS2 authorization identity to match the token principal") {
     withValidator() { (pair, validator) =>
       val config = OAuthConfig(maximumTokenBytes = 16 * 1024)

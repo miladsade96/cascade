@@ -8,7 +8,7 @@ import java.util.Base64
 import scala.util.control.NoStackTrace
 import scala.util.control.NonFatal
 
-final case class OAuthIdentity(principal: String, expiresAtEpochMillis: Long, scopes: Set[String])
+final case class OAuthIdentity(principal: String, expiresAtEpochMillis: Long, scopes: Set[String], roles: Set[String] = Set.empty)
 
 enum JwtValidationError:
   case Malformed, UnsupportedAlgorithm, UnknownKey, InvalidSignature, InvalidIssuer, InvalidAudience,
@@ -65,10 +65,11 @@ final class JwtValidator(config: OAuthConfig, keys: ReloadableJwks, clock: Clock
       .getOrElse(reject(JwtValidationError.InvalidPrincipal))
     val tokenScopes = scopes(claims)
     if !config.requiredScopes.subsetOf(tokenScopes) then reject(JwtValidationError.MissingScope)
+    val tokenRoles = roles(claims)
     val expirationMillis =
       try Math.multiplyExact(Math.addExact(expiration, skew), 1000L)
       catch case _: ArithmeticException => reject(JwtValidationError.Malformed)
-    OAuthIdentity(principal, expirationMillis, tokenScopes)
+    OAuthIdentity(principal, expirationMillis, tokenScopes, tokenRoles)
 
   private def decodeSegment(value: String, maximumBytes: Int): Array[Byte] =
     if value.isEmpty || value.length > maximumBytes * 2 || value.exists(character => !isBase64Url(character)) then
@@ -110,6 +111,24 @@ final class JwtValidator(config: OAuthConfig, keys: ReloadableJwks, clock: Clock
         case _                            => throw IllegalArgumentException("JWT scope is invalid")
       }.toSet
     case _ => throw IllegalArgumentException("JWT scope is invalid")
+
+  private def roles(fields: Map[String, JsonValue]): Set[String] = config.roleClaim match
+    case None => Set.empty
+    case Some(claim) =>
+      val claimed = fields.get(claim) match
+        case None => Vector.empty
+        case Some(JsonValue.StringValue(value)) => Vector(value)
+        case Some(JsonValue.ArrayValue(values)) if values.size <= 256 => values.map {
+          case JsonValue.StringValue(value) => value
+          case _ => throw IllegalArgumentException("JWT role claim is invalid")
+        }
+        case _ => throw IllegalArgumentException("JWT role claim is invalid")
+      claimed.iterator.map(validateRoleClaim).flatMap(config.roleMappings.get).toSet
+
+  private def validateRoleClaim(value: String): String =
+    if value.isEmpty || value.length > 256 || value.exists(_.isWhitespace) then
+      throw IllegalArgumentException("JWT role claim is invalid")
+    value
 
   private def validateScope(value: String): String =
     if value.isEmpty || value.length > 256 || value.exists(_.isWhitespace) then

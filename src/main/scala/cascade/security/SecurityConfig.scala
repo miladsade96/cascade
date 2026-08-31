@@ -86,6 +86,8 @@ final case class OAuthConfig(
     audience: Option[String] = None,
     principalClaim: String = "sub",
     scopeClaim: String = "scope",
+    roleClaim: Option[String] = None,
+    roleMappings: Map[String, String] = Map.empty,
     requiredScopes: Set[String] = Set.empty,
     allowedAlgorithms: Set[JwtAlgorithm] = Set(JwtAlgorithm.Rs256),
     clockSkewSeconds: Long = 30L,
@@ -97,6 +99,14 @@ final case class OAuthConfig(
   require(audience.forall(value => value.nonEmpty && value.length <= 512 && !value.exists(_.isControl)), "OAuth audience is invalid")
   require(principalClaim.nonEmpty && principalClaim.length <= 128, "OAuth principal claim must contain 1-128 characters")
   require(scopeClaim.nonEmpty && scopeClaim.length <= 128, "OAuth scope claim must contain 1-128 characters")
+  require(roleClaim.forall(value => value.nonEmpty && value.length <= 128 && !value.exists(_.isWhitespace)), "OAuth role claim is invalid")
+  require(
+    roleMappings.forall { case (claim, role) =>
+      claim.nonEmpty && claim.length <= 256 && !claim.exists(_.isWhitespace) &&
+        role.nonEmpty && role.length <= 128 && !role.exists(character => character.isWhitespace || character.isControl)
+    },
+    "OAuth role mappings are invalid"
+  )
   require(requiredScopes.forall(scope => scope.nonEmpty && scope.length <= 256 && !scope.exists(_.isWhitespace)), "OAuth scopes are invalid")
   require(allowedAlgorithms.nonEmpty, "at least one JWT algorithm must be allowed")
   require(clockSkewSeconds >= 0L && clockSkewSeconds <= 300L, "OAuth clock skew must be between 0 and 300 seconds")
@@ -190,6 +200,10 @@ final case class BrokerSecurityConfig(
       "SASL SCRAM requires a SCRAM credentials file"
     )
     val oauthEnabled = protocol.sasl && authentication.mechanisms.exists(_.oauth)
+    require(
+      authentication.oauth.roleMappings.isEmpty == authentication.oauth.roleClaim.isEmpty,
+      "OAuth role claim and role mappings must be configured together"
+    )
     require(!oauthEnabled || protocol == SecurityProtocol.SaslSsl, "SASL OAUTHBEARER requires SASL_SSL")
     require(!oauthEnabled || authentication.oauth.jwksUri.nonEmpty, "SASL OAUTHBEARER requires a JWKS URI")
     require(!oauthEnabled || authentication.oauth.issuer.exists(_.nonEmpty), "SASL OAUTHBEARER requires an issuer")

@@ -148,6 +148,8 @@ final class BrokerConfigSuite extends FunSuite:
           "--oauth-audience", "cascade",
           "--oauth-principal-claim", "preferred_username",
           "--oauth-scope-claim", "scp",
+          "--oauth-role-claim", "groups",
+          "--oauth-role-map", "engineering=publisher,operations=reader",
           "--oauth-required-scopes", "cascade.read,cascade.write",
           "--oauth-allowed-algorithms", "RS256,RS512",
           "--oauth-clock-skew-seconds", "45",
@@ -188,6 +190,8 @@ final class BrokerConfigSuite extends FunSuite:
       assertEquals(config.security.authentication.oauth.audience, Some("cascade"))
       assertEquals(config.security.authentication.oauth.principalClaim, "preferred_username")
       assertEquals(config.security.authentication.oauth.scopeClaim, "scp")
+      assertEquals(config.security.authentication.oauth.roleClaim, Some("groups"))
+      assertEquals(config.security.authentication.oauth.roleMappings, Map("engineering" -> "publisher", "operations" -> "reader"))
       assertEquals(config.security.authentication.oauth.requiredScopes, Set("cascade.read", "cascade.write"))
       assertEquals(config.security.authentication.oauth.allowedAlgorithms, Set(JwtAlgorithm.Rs256, JwtAlgorithm.Rs512))
       assertEquals(config.security.authentication.oauth.maximumTokenBytes, 32768)

@@ -148,6 +148,10 @@ object BrokerConfig:
         loop(tail, updateOAuth(config)(_.copy(principalClaim = value)))
       case "--oauth-scope-claim" :: value :: tail =>
         loop(tail, updateOAuth(config)(_.copy(scopeClaim = value)))
+      case "--oauth-role-claim" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(roleClaim = Some(value))))
+      case "--oauth-role-map" :: value :: tail =>
+        loop(tail, updateOAuth(config)(_.copy(roleMappings = parseMappings(value))))
       case "--oauth-required-scopes" :: value :: tail =>
         loop(tail, updateOAuth(config)(_.copy(requiredScopes = splitCsv(value).toSet)))
       case "--oauth-allowed-algorithms" :: value :: tail =>
@@ -226,6 +230,15 @@ object BrokerConfig:
 
   private def splitCsv(value: String): Vector[String] =
     value.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
+
+  private def parseMappings(value: String): Map[String, String] =
+    val entries = splitCsv(value).map { entry =>
+      entry.split("=", 2).toList match
+        case claim :: role :: Nil if claim.nonEmpty && role.nonEmpty => claim -> role
+        case _ => throw IllegalArgumentException(s"invalid OAuth role mapping: $entry")
+    }
+    if entries.map(_._1).distinct.size != entries.size then throw IllegalArgumentException("duplicate OAuth role mapping")
+    entries.toMap
 
   private def updateOAuth(config: BrokerConfig)(update: OAuthConfig => OAuthConfig): BrokerConfig =
     val authentication = config.security.authentication
