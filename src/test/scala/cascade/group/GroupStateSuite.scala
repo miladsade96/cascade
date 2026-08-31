@@ -3,6 +3,12 @@ package cascade.group
 import munit.FunSuite
 
 final class GroupStateSuite extends FunSuite:
+  test("classic-only group images keep the rolling-compatible format") {
+    val encoded = GroupCodec.encode(GroupImage.Empty)
+    assertEquals(cascade.protocol.ByteCursor(encoded).readShort(), 1.toShort)
+    assertEquals(GroupCodec.decode(encoded), GroupImage.Empty)
+  }
+
   test("group images preserve membership, assignments, pending identities, and offsets") {
     val image = GroupImage(
       version = 12L,
@@ -36,16 +42,37 @@ final class GroupStateSuite extends FunSuite:
           GroupOffsetKey("analytics", "events", 2),
           CommittedOffset(41L, 3, Some("checkpoint"), 7000L)
         )
+      ),
+      consumerGroups = Vector(
+        StoredConsumerGroup(
+          "modern",
+          7,
+          Vector(
+            StoredConsumerMember(
+              "member-a",
+              Some("instance-a"),
+              Some("rack-a"),
+              30_000,
+              Vector("events"),
+              "uniform",
+              7,
+              8_000L,
+              Vector(ConsumerTopicPartitions(ConsumerTopicId(10L, 20L), Vector(0, 2)))
+            )
+          )
+        )
       )
     )
 
-    assertEquals(GroupCodec.decode(GroupCodec.encode(image)), image)
+    val encoded = GroupCodec.encode(image)
+    assertEquals(cascade.protocol.ByteCursor(encoded).readShort(), 2.toShort)
+    assertEquals(GroupCodec.decode(encoded), image)
   }
 
   test("group images reject unknown formats") {
     val bytes = GroupCodec.encode(GroupImage.Empty)
-    bytes(1) = 2
-    interceptMessage[cascade.protocol.ProtocolException]("unsupported group-state format: 2") {
+    bytes(1) = 3
+    interceptMessage[cascade.protocol.ProtocolException]("unsupported group-state format: 3") {
       GroupCodec.decode(bytes)
     }
   }
