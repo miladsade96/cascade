@@ -6,7 +6,7 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12:nonroot
 FROM --platform=$BUILDPLATFORM ${JDK_IMAGE} AS application-build
 
 WORKDIR /workspace
-COPY sbt build.sbt ./
+COPY sbt build.sbt VERSION ./
 COPY project/build.properties project/build.properties
 RUN chmod 0755 sbt && ./sbt update
 
@@ -26,7 +26,7 @@ RUN "$JAVA_HOME/bin/jlink" \
 
 FROM ${RUNTIME_IMAGE} AS runtime
 
-ARG VERSION=1.0.0
+ARG VERSION=1.1.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 

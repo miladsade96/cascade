@@ -156,7 +156,7 @@ object PeerCapabilities:
   val Legacy100: PeerCapabilities = PeerCapabilities("1.0.0", 1, 6, Map.empty)
 
   val Current: PeerCapabilities = PeerCapabilities(
-    "1.1.0-dev",
+    cascade.BuildInfo.Version,
     MetadataCodec.MinimumReadableFormat,
     MetadataCodec.CurrentFormat,
     Map(

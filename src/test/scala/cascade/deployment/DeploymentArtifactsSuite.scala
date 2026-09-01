@@ -4,9 +4,32 @@ import java.nio.file.{Files, Paths}
 import munit.FunSuite
 
 final class DeploymentArtifactsSuite extends FunSuite:
+  private val releaseVersion = read("VERSION").trim
   private val deployment = read("deploy/kubernetes/statefulsets.yaml")
 
-  test("Kubernetes brokers use independent durable identities and secret material") {
+  test("release metadata and Kubernetes broker identities stay aligned") {
+    val build = read("build.sbt")
+    val dockerfile = read("Dockerfile")
+    val containerGuide = read("docs/containers.md")
+    val nodeCompatibilityManifest = read("compatibility/node/package.json")
+    val nodeCompatibilityLock = read("compatibility/node/package-lock.json")
+    val readme = read("README.md")
+    val releaseWorkflow = read(".github/workflows/container.yml")
+
+    assert(releaseVersion.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?"))
+    assertEquals(cascade.BuildInfo.Version, releaseVersion)
+    assert(build.contains("IO.read(file(\"VERSION\")).trim"))
+    assert(dockerfile.contains("COPY sbt build.sbt VERSION ./"))
+    assert(dockerfile.contains(s"ARG VERSION=$releaseVersion"))
+    assertEquals(occurrences(deployment, s"image: miladsade96/cascade:$releaseVersion"), 3)
+    assert(containerGuide.contains(s"docker pull miladsade96/cascade:$releaseVersion"))
+    assert(containerGuide.contains(s"--build-arg VERSION=$releaseVersion"))
+    assert(nodeCompatibilityManifest.contains(s"\"version\": \"$releaseVersion\""))
+    assertEquals(occurrences(nodeCompatibilityLock, s"\"version\": \"$releaseVersion\""), 2)
+    assert(readme.contains(s"The current release is `$releaseVersion`"))
+    assert(releaseWorkflow.contains("version: ${{ steps.release.outputs.version }}"))
+    assert(releaseWorkflow.contains("VERSION=${{ needs.verify.outputs.version }}"))
+
     assertEquals(occurrences(deployment, "kind: StatefulSet"), 3)
     (1 to 3).foreach { nodeId =>
       assert(deployment.contains(s"name: cascade-$nodeId"))

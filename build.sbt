@@ -1,5 +1,10 @@
 ThisBuild / organization := "dev.cascade"
-ThisBuild / version := "1.0.0"
+lazy val cascadeVersion = {
+  val value = IO.read(file("VERSION")).trim
+  require(value.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?"), s"invalid Cascade version: $value")
+  value
+}
+ThisBuild / version := cascadeVersion
 ThisBuild / scalaVersion := "3.3.8"
 
 lazy val stage = taskKey[File]("Build the dependency-complete runtime tree used by the container image")
@@ -21,6 +26,18 @@ lazy val root = (project in file("."))
       "-Wunused:privates",
       "-Wvalue-discard"
     ),
+    Compile / sourceGenerators += Def.task {
+      val output = (Compile / sourceManaged).value / "cascade" / "BuildInfo.scala"
+      IO.write(
+        output,
+        s"""|package cascade
+            |
+            |object BuildInfo:
+            |  val Version: String = "$cascadeVersion"
+            |""".stripMargin
+      )
+      Seq(output)
+    }.taskValue,
     libraryDependencies ++= Seq(
       "org.scalameta" %% "munit" % "1.3.4" % Test,
       "org.apache.kafka" % "kafka-clients" % "4.3.1" % Test,

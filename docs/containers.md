@@ -20,7 +20,7 @@ The default operations listener stays on `127.0.0.1` inside the container. Docke
 ## Pull and run one broker
 
 ```bash
-docker pull miladsade96/cascade:latest
+docker pull miladsade96/cascade:1.1.0
 docker volume create cascade-data
 docker run --detach \
   --name cascade \
@@ -33,7 +33,7 @@ docker run --detach \
   --memory 4g \
   --publish 9092:9092 \
   --mount type=volume,source=cascade-data,target=/var/lib/cascade \
-  miladsade96/cascade:latest \
+  miladsade96/cascade:1.1.0 \
   --host 0.0.0.0 \
   --port 9092 \
   --advertised-host localhost \
@@ -154,16 +154,16 @@ docker login --username YOUR_DOCKERHUB_USERNAME
 docker buildx create --name cascade-release --driver docker-container --use
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=1.0.0 \
+  --build-arg VERSION=1.1.0 \
   --build-arg REVISION=GIT_COMMIT_SHA \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.0.0 \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.1.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.1 \
   --tag YOUR_DOCKERHUB_USERNAME/cascade:latest \
   --provenance=mode=max \
   --sbom=true \
   --push \
   .
-docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.0.0
+docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.1.0
 ```
 
 The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes build and smoke-test without publishing. A `v*` tag publishes semantic-version, Git-SHA, and `latest` tags; a manual workflow run publishes `manual` and Git-SHA tags. The release job does not run unless the complete test and container smoke jobs pass.
