@@ -18,7 +18,8 @@ $baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-StringData
 $currentVersion = (Get-Content -LiteralPath (Join-Path $repository 'VERSION') -Raw).Trim()
 $currentRevision = (& git -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the current Git revision.' }
-if ((& git -C $repository status --porcelain).Count -gt 0) {
+$workingTreeChanges = @(& git -C $repository status --porcelain)
+if ($workingTreeChanges.Count -gt 0) {
     $currentRevision = "$currentRevision+working-tree"
 }
 
