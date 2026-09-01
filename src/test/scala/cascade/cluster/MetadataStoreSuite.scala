@@ -180,6 +180,30 @@ final class MetadataStoreSuite extends FunSuite:
     assert(error.getMessage.contains("requires format 6"))
   }
 
+  test("default persistence stays rollback-compatible until a feature is activated") {
+    val compatible = ClusterMetadata(
+      24L,
+      Vector(TopicMetadata(
+        "orders",
+        Vector(PartitionMetadata(0, 1, 0, Vector(1, 2, 3), Vector(1, 2, 3))),
+        Some(TopicLifecyclePolicy(CleanupPolicy.Compact, -1L, -1L))
+      )),
+      controllerTerm = 12L,
+      membership = Some(QuorumMembership.bootstrap(Vector(
+        ClusterNode(1, "node-1", 9092),
+        ClusterNode(2, "node-2", 9093),
+        ClusterNode(3, "node-3", 9094)
+      )))
+    )
+    assertEquals(ByteCursor(MetadataCodec.encode(compatible)).readShort(), 6.toShort)
+
+    val activated = compatible.copy(
+      version = 25L,
+      featureLevels = Map(ClusterFeature.CoordinatorFailover -> 1.toShort)
+    )
+    assertEquals(ByteCursor(MetadataCodec.encode(activated)).readShort(), 8.toShort)
+  }
+
   test("rolling capability negotiation selects only common formats and features") {
     val old = PeerCapabilities("1.0.0", 1, 6, Map("online-snapshot" -> 0.toShort))
     val current = PeerCapabilities("1.1.0", 1, 7, Map("online-snapshot" -> 1.toShort, "consumer-v2" -> 1.toShort))

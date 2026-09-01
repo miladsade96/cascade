@@ -99,7 +99,7 @@ kubectl --namespace cascade rollout status statefulset/cascade-3
 
 The operations pack includes a bearer-authenticated ServiceMonitor, Prometheus rules, and a Grafana dashboard ConfigMap. It expects the Prometheus Operator CRDs and a dashboard sidecar that discovers `grafana_dashboard=1`. I keep Alertmanager receivers and credentials outside the repository.
 
-For a rolling change I delete one pod at a time because the StatefulSets use `OnDelete`. I wait for the replacement to become ready, confirm it is synchronized and unfenced, and verify `acks=all` traffic before touching the next broker. This is an operational restart procedure, not a mixed-binary compatibility claim; I still require an automated upgrade/downgrade matrix before using different Cascade versions in one quorum.
+For a rolling change I delete one pod at a time because the StatefulSets use `OnDelete`. I wait for the replacement to become ready, confirm it is synchronized and unfenced, and verify `acks=all` traffic before touching the next broker. The pinned 1.0.0-to-1.1.0 process matrix now qualifies that exact release boundary, including rollback before activation and safe downgrade rejection afterward. I follow the [rolling upgrade runbook](rolling-upgrades.md) and require a new archived campaign for every later adjacent release pair.
 
 ## Authenticated remote operations
 

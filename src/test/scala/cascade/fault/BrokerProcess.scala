@@ -32,16 +32,34 @@ final class BrokerProcess private (val process: Process, outputLines: Concurrent
       if !process.waitFor(10L, TimeUnit.SECONDS) then
         throw IllegalStateException(s"broker process $pid did not terminate")
 
+  def stop(timeoutSeconds: Long = 30L): Unit =
+    if process.isAlive then
+      process.destroy()
+      if !process.waitFor(timeoutSeconds, TimeUnit.SECONDS) then
+        kill()
+
+  def awaitExit(timeoutSeconds: Long): Boolean = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+
+  def exitCode: Option[Int] = Option.when(!process.isAlive)(process.exitValue())
+
   override def close(): Unit = kill()
 
 object BrokerProcess:
   def start(arguments: Seq[String]): BrokerProcess =
+    startWithClassPath(System.getProperty("java.class.path"), arguments)
+
+  def startRuntime(runtimeDirectory: Path, arguments: Seq[String]): BrokerProcess =
+    val libraryDirectory = runtimeDirectory.resolve("lib")
+    require(java.nio.file.Files.isDirectory(libraryDirectory), s"runtime library directory does not exist: $libraryDirectory")
+    startWithClassPath(libraryDirectory.toString + java.io.File.separator + "*", arguments)
+
+  private def startWithClassPath(classPath: String, arguments: Seq[String]): BrokerProcess =
     val javaHome = Path.of(System.getProperty("java.home"))
     val executable = javaHome.resolve("bin").resolve(if System.getProperty("os.name").startsWith("Windows") then "java.exe" else "java")
     val command = Seq(
       executable.toString,
       "-cp",
-      System.getProperty("java.class.path"),
+      classPath,
       "cascade.Main"
     ) ++ arguments
     val process = ProcessBuilder(command*).redirectErrorStream(true).start()

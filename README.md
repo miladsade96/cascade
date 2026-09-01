@@ -15,7 +15,7 @@ The current release is `1.1.0`. I use the root `VERSION` file as the release sou
 So far, I've implemented broker-assigned offsets, magic-v2 record batches, classic and server-assigned consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, rendezvous-sharded coordinator ownership, coordinator failover, online partition reassignment, dynamic broker/voter membership, rolling feature negotiation, crash-safe storage lifecycle management, record-level/gzip compaction with tombstone grace and cleanup throttling, TLS, Kafka PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, Kafka ACL Admin APIs, security auditing, conservative cluster-shared principal quotas, Prometheus metrics, health/readiness checks, structured events, Kubernetes artifacts, capacity alerts, offline backup/restore, and write-barrier online snapshots.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. The code now has peer capability negotiation, a negotiated metadata-format floor, coordinator sharding, Kafka's ConsumerGroupHeartbeat v0 path, Metadata v9-v12 topic IDs, online point-in-time broker snapshots, record-level/gzip compaction, tombstone grace, cleanup throttling, conservative cluster-shared quotas, and repeatable soak/power-loss probes. I have run the automated smoke and recovery gates, but I have not run old and new release binaries together, a multi-day soak, or a physical power/device-loss campaign. A cluster-wide snapshot still needs one artifact from every replica host, and compaction for Snappy/LZ4/Zstd batches is still conservative.
+> Cascade isn't a production Kafka replacement yet. The code now has peer capability negotiation, a negotiated metadata-format floor, coordinator sharding, Kafka's ConsumerGroupHeartbeat v0 path, Metadata v9-v12 topic IDs, online point-in-time broker snapshots, record-level/gzip compaction, tombstone grace, cleanup throttling, conservative cluster-shared quotas, and repeatable soak/power-loss probes. I have run the pinned 1.0.0-to-1.1.0 binary upgrade, pre-activation rollback, feature-activation, and rejected-downgrade gate, but I have not run a multi-day soak or a physical power/device-loss campaign. A cluster-wide snapshot still needs one artifact from every replica host, and compaction for Snappy/LZ4/Zstd batches is still conservative.
 
 ## Performance I measured
 
@@ -514,6 +514,8 @@ After the security, quota, per-topic policy, static-member, fuzz, deployment, an
 
 After the rolling-feature, coordinator-sharding, consumer-heartbeat-v0, online-snapshot, advanced-compaction, distributed-quota, and qualification-harness work, I ran the complete suite again on 2026-08-31: **307/307 passed** in **2 minutes 8 seconds**. The gate includes Kafka 4.3.1 server-side consumer assignment, secure controller failover after live TLS rotation, and classic/transactional coordinator failover under sharding. Coordinator eligibility is now quorum committed, so clients stop routing shards to a broker after its failure is committed. I still treat the 72-hour soak and physical power/device-loss campaigns as unexecuted external release gates.
 
+On 2026-09-01 I built the real 1.0.0 source at `c61264bf304719403b77c9b60709801be544373e` beside 1.1.0 and ran the three-broker rolling gate. It upgraded one broker, rolled it back before activation, upgraded all three brokers one at a time, activated the 1.1.0 feature map, rejected an unsafe 1.0.0 downgrade after activation, kept traffic moving on the majority, restored the new broker, and consumed exactly **40/40** ordered records. The campaign found an eager metadata-format rewrite that made pre-activation rollback unsafe; default persistence now stays on the minimum required format until a feature is committed.
+
 I then reran the one-million default-path regression with 1 KiB LZ4 payloads, eight partitions, four producers, four consumers, `acks=all`, and periodic flushing. It consumed exactly **1,000,000 / 1,000,000** records at **396,006 produced records/s** (**386.7 MiB/s**) and **186,386 consumed records/s** (**182.0 MiB/s**). Produce took 2.525 seconds, consume took 5.365 seconds, maximum acknowledgement latency was 778.271 ms, and peak heap was 1,789.6 MiB. I use this single-node development-machine run as an exactness/hot-path regression, not as replicated production capacity.
 
 ### Reproduce the load test
@@ -536,7 +538,7 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current test suite passes **307/307 tests** in five layers:
+The current test suite passes **308/308 tests** in five layers:
 
 - Unit tests for binary codecs, the frozen 1.0.0 API contract, record batches, storage/coordinator recovery, delivery semantics, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA/EC/Ed25519 JWT validation, role mapping, credential and peer policy, TLS reload/rejection, quotas, metrics, health/readiness, capacity evaluation, structured-log rotation, backup integrity, deployment artifacts, and maintenance commands.
 - TCP integration tests for discovery, Produce/Fetch, idempotence, OffsetCommit v5-v7 and OffsetFetch v4-v5, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, OAUTHBEARER, malformed exchanges, peer impersonation rejection, live TLS/identity/credential/key/ACL rotation, auditing, directional quotas, and operational HTTP state.
@@ -544,25 +546,24 @@ The current test suite passes **307/307 tests** in five layers:
 - Qualification tests that force-kill real broker JVMs, interrupt durable-store shutdown, corrupt persisted tails, partition stable and joint quorums, exercise retention and low-disk rejection, tamper with backup contents, and verify exact recovery, minority fencing, transition resumption, and dual-majority write safety.
 - External process tests for KafkaJS, confluent-kafka Python, franz-go, and Confluent.Kafka .NET, each with exact 25/25 record validation and broker-side protocol-error rejection.
 
-The load harness separately checks exact record counts at one million and ten million records. The container workflow builds the image, enforces its non-root metadata, crosses the Docker boundary with real clients, restarts the broker, and verifies exact recovery from the same named volume. CI also renders every Kubernetes resource and parses the Grafana dashboard.
+The load harness separately checks exact record counts at one million and ten million records. The rolling workflow builds the pinned 1.0.0 and current runtimes, rotates three real broker processes, and archives its JSON evidence. The container workflow builds the image, enforces its non-root metadata, crosses the Docker boundary with real clients, restarts the broker, and verifies exact recovery from the same named volume. CI also renders every Kubernetes resource and parses the Grafana dashboard.
 
 ## What I plan to build next
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Rolling safety | Archive real 1.0.0/1.1.x binary upgrade, feature-activation, rollback, and downgrade evidence |
-| 2 | Coordinator scale | High-cardinality churn and failover benchmarks for the sharded coordinator path |
-| 3 | Qualification | Run and archive the 72-hour multi-tenant soak, physical power/device-loss probe, restore drill, arbitrary packet impairment, and dedicated-host RF=3 benchmark |
-| 4 | Consumer groups | Add administrative group APIs and continue expanding ConsumerGroupHeartbeat beyond v0 |
-| 5 | Storage lifecycle | Snappy/LZ4/Zstd record rewriting and replicated retention coordination |
-| 6 | Operations/security | A cross-node snapshot coordinator/manifest, scheduled retention, opaque-token introspection, OIDC discovery, and a built-in or documented external TLS boundary for operations |
-| 7 | Profile-driven optimization | Zero-copy Fetch, selector/worker pools, multi-device log placement, and further changes justified by profiling |
+| 1 | Coordinator scale | High-cardinality churn and failover benchmarks for the sharded coordinator path |
+| 2 | Qualification | Run and archive the 72-hour multi-tenant soak, physical power/device-loss probe, restore drill, arbitrary packet impairment, and dedicated-host RF=3 benchmark |
+| 3 | Consumer groups | Add administrative group APIs and continue expanding ConsumerGroupHeartbeat beyond v0 |
+| 4 | Storage lifecycle | Snappy/LZ4/Zstd record rewriting and replicated retention coordination |
+| 5 | Operations/security | A cross-node snapshot coordinator/manifest, scheduled retention, opaque-token introspection, OIDC discovery, and a built-in or documented external TLS boundary for operations |
+| 6 | Profile-driven optimization | Zero-copy Fetch, selector/worker pools, multi-device log placement, and further changes justified by profiling |
 
 I track the release gates in [docs/production-readiness.md](docs/production-readiness.md). I won't call Cascade a production Kafka replacement until every blocking gate passes on the deployment topology I document.
 
 ## What is still missing
 
-- Dynamic membership, peer capability exchange, metadata-format negotiation, and quorum-committed feature activation are implemented. Automatic broker registration, real old/new binary upgrade-downgrade runs, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
+- Dynamic membership, peer capability exchange, metadata-format negotiation, quorum-committed feature activation, and the pinned 1.0.0-to-1.1.0 rolling/rollback gate are implemented. Automatic broker registration, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
 - Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
 - Coordinator ownership is rendezvous-sharded while state remains one full quorum image. The journals are bounded and offsets expire, but I still need high-cardinality churn/failover evidence before treating it like Kafka's partitioned internal topics.
 - Compaction rewrites individual uncompressed/gzip records, preserves keyless records, applies tombstone grace, recalculates CRC32C, and supports an I/O ceiling. Snappy/LZ4/Zstd, control, and transactional batches remain opaque.
@@ -570,7 +571,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - I split each configured principal rate and burst conservatively across the current quorum, which bounds aggregate traffic without a central hot-path service. I still need long authenticated multi-tenant qualification and reclaiming unused shares without exceeding the cluster limit.
 - The built-in operations listener is HTTP, so I still require an external TLS/mTLS boundary for non-loopback deployments. Online snapshots now stop admitted writes, force every local partition, and pass exact restore tests. A full cluster backup still needs coordinated per-host artifacts, scheduled retention, encrypted off-host transfer, and repeated restore drills.
 - I support classic groups and `ConsumerGroupHeartbeat` v0 with broker-side assignment; later protocol versions and the administrative group APIs remain.
-- The automated client matrix covers one pinned release each of Java, JavaScript, Python, Go, and .NET; broader version matrices and rolling broker-version tests remain.
+- The automated client matrix covers one pinned release each of Java, JavaScript, Python, Go, and .NET, and the 1.0.0-to-1.1.0 broker matrix passes; broader client versions and every future adjacent broker-version pair remain.
 - The performance figures are single-node, shared-JVM development-machine measurements; replicated-cluster capacity has not been benchmarked.
 - The forced-kill suite validates process loss and torn tails, and the two-phase physical probe records every acknowledged offset on an independent witness device. The probe is implemented, but I will not claim power/device-loss qualification until I cut real host/device power and the post-restart verifier passes on the target hardware.
 
@@ -675,6 +676,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - [Production-readiness gates](docs/production-readiness.md)
 - [External Kafka client compatibility matrix](compatibility/README.md)
 - [Container deployment runbook](docs/containers.md)
+- [Rolling upgrade and downgrade runbook](docs/rolling-upgrades.md)
 - [TLS key and trust rotation runbook](docs/tls-rotation.md)
 - [OAuth and OIDC authentication runbook](docs/oauth-oidc.md)
 - [SCRAM authentication runbook](docs/scram-authentication.md)

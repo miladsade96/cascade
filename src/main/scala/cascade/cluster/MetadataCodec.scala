@@ -8,7 +8,7 @@ object MetadataCodec:
   val CurrentFormat: Short = 8
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
-    encode(metadata, CurrentFormat)
+    encode(metadata, minimumRequiredFormat(metadata))
 
   def encode(metadata: ClusterMetadata, format: Short): Array[Byte] =
     if format < MinimumReadableFormat || format > CurrentFormat then

@@ -11,5 +11,6 @@ data/
 node_modules/
 **/bin/
 **/obj/
+/artifacts/
 
 /docs/launch-announcement.md
