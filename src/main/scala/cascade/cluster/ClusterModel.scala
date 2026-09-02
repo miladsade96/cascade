@@ -1,6 +1,7 @@
 package cascade.cluster
 
 import cascade.storage.TopicLifecyclePolicy
+import cascade.coordinator.CoordinatorShard
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.security.MessageDigest
@@ -106,15 +107,22 @@ final case class TopicMetadata(
 
 final case class TopicConfigResult(errorCode: Short, message: Option[String])
 
-/** One quorum-committed image for every coordinator service hosted by the elected controller. */
+/** Atomic quorum image with independent conflict versions for each virtual coordinator shard. */
 final case class CoordinatorMetadata(
     version: Long,
     ownerTerm: Long,
     groupState: Vector[Byte],
-    deliveryState: Vector[Byte]
+    deliveryState: Vector[Byte],
+    shardVersions: Vector[Long] = Vector.empty
 ):
   require(version >= 0L, "coordinator version must be non-negative")
   require(ownerTerm >= 0L, "coordinator owner term must be non-negative")
+  require(shardVersions.isEmpty || shardVersions.size == CoordinatorShard.Count, "invalid coordinator shard layout")
+  require(shardVersions.forall(_ >= 0L), "shard versions must be non-negative")
+
+  def shardVersion(id: Int): Long =
+    require(CoordinatorShard.valid(id), "invalid coordinator shard ID")
+    if shardVersions.isEmpty then version else shardVersions(id)
 
 object CoordinatorMetadata:
   val Empty: CoordinatorMetadata = CoordinatorMetadata(0L, 0L, Vector.empty, Vector.empty)
