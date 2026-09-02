@@ -16,10 +16,12 @@ final case class CoordinatorScaleReport(
     seconds: Double, p50Millis: Double, p95Millis: Double, p99Millis: Double,
     checkpointAttempts: Long, checkpointFailures: Long, deltaBytes: Long, fullImageBytes: Long,
     owners: Vector[Int], controllerFailover: Boolean, restartRecovery: Boolean,
-    revision: String, startedAt: Instant
+    revision: String, startedAt: Instant,
+    journalDeltaBytes: Long, journalFullBytes: Long, journalCheckpointBytes: Long,
+    replicationDeltaBytes: Long, replicationFullBytes: Long, replicationFallbacks: Long
 ):
   def json: String =
-    f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery}"""
+    f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
 
 object CoordinatorScaleQualification:
   def main(arguments: Array[String]): Unit =
@@ -95,8 +97,8 @@ object CoordinatorScaleQualification:
       val controller = CoordinatorProbe.controller(cluster.nodes)
       write(cluster.bootstrapServers, 0, rounds)
       verify(cluster.bootstrapServers, 0, rounds)
-      val initialMetrics = cluster.nodes.map(n => n.id -> cluster.broker(n.id).metricsSnapshot.coordinator).toMap
-      val owners = initialMetrics.collect { case (id, metrics) if metrics.attempts > 0L => id }.toVector.sorted
+      val initialMetrics = cluster.nodes.map(n => n.id -> cluster.broker(n.id).metricsSnapshot).toMap
+      val owners = initialMetrics.collect { case (id, metrics) if metrics.coordinator.attempts > 0L => id }.toVector.sorted
       if groupCount >= 30 then require(owners.size == 3, s"not every broker served coordinator writes: $owners")
       cluster.stop(controller.id)
       val survivors = cluster.nodes.filterNot(_.id == controller.id)
@@ -106,8 +108,11 @@ object CoordinatorScaleQualification:
       write(bootstrap, 1, 1)
       verify(bootstrap, 1, 1)
       val metrics = cluster.nodes.map { node =>
-        if node.id == controller.id then initialMetrics(node.id) else cluster.broker(node.id).metricsSnapshot.coordinator
+        if node.id == controller.id then initialMetrics(node.id) else cluster.broker(node.id).metricsSnapshot
       }
+      val coordinatorMetrics = metrics.map(_.coordinator)
+      require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
+      require(metrics.map(_.metadataTransfers.deltaBytes).sum > 0L, "incremental replication path was not exercised")
       // Restart every process from its existing disk, including the controller that missed the last phase.
       survivors.foreach(n => cluster.stop(n.id))
       cluster.startAll()
@@ -116,8 +121,11 @@ object CoordinatorScaleQualification:
       val sorted = latencies.asScala.toVector.sorted
       def percentile(p: Double): Double = sorted(math.min(sorted.size - 1, math.ceil(sorted.size * p).toInt - 1)) / 1000000d
       CoordinatorScaleReport(groupCount, concurrency, rounds, groupCount, groupCount * (rounds + 1), writeNanos / 1e9,
-        percentile(0.50), percentile(0.95), percentile(0.99), metrics.map(_.attempts).sum, metrics.map(_.failures).sum,
-        metrics.map(_.deltaBytes).sum, metrics.map(_.fullImageBytes).sum, owners, true, true, revision, startedAt)
+        percentile(0.50), percentile(0.95), percentile(0.99), coordinatorMetrics.map(_.attempts).sum, coordinatorMetrics.map(_.failures).sum,
+        coordinatorMetrics.map(_.deltaBytes).sum, coordinatorMetrics.map(_.fullImageBytes).sum, owners, true, true, revision, startedAt,
+        metrics.map(_.metadataJournal.deltaBytes).sum, metrics.map(_.metadataJournal.fullBytes).sum,
+        metrics.map(_.metadataJournal.checkpointBytes).sum, metrics.map(_.metadataTransfers.deltaBytes).sum,
+        metrics.map(_.metadataTransfers.fullBytes).sum, metrics.map(_.metadataTransfers.fallbacks).sum)
     finally
       executor.shutdownNow()
       executor.awaitTermination(10L, TimeUnit.SECONDS)
