@@ -168,6 +168,7 @@ object PeerCapabilities:
     MetadataCodec.MinimumReadableFormat,
     MetadataCodec.CurrentFormat,
     Map(
+      ClusterFeature.IncrementalCoordinator -> 1,
       ClusterFeature.CoordinatorDeltas -> 1,
       ClusterFeature.CoordinatorSharding -> 1,
       ClusterFeature.CoordinatorFailover -> 1,
@@ -179,6 +180,7 @@ object PeerCapabilities:
   )
 
 object ClusterFeature:
+  val IncrementalCoordinator = "incremental-coordinator"
   val CoordinatorDeltas = "coordinator-deltas"
   val CoordinatorSharding = "coordinator-sharding"
   val CoordinatorFailover = "coordinator-failover"

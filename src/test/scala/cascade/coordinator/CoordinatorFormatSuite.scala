@@ -29,5 +29,18 @@ final class CoordinatorFormatSuite extends FunSuite:
     assert(!mixed.supports(ClusterFeature.CoordinatorDeltas))
     val upgraded = NegotiatedCapabilities.across(Vector(current, current, current)).toOption.get
     assert(upgraded.supports(ClusterFeature.CoordinatorDeltas))
-    assertEquals(upgraded.metadataFormat, 9.toShort)
+    assertEquals(upgraded.metadataFormat, MetadataCodec.CurrentFormat)
+  }
+
+  test("incremental persistence requires a format-ten floor and unanimous feature support") {
+    val features = Map(ClusterFeature.IncrementalCoordinator -> 1.toShort, ClusterFeature.CoordinatorDeltas -> 1.toShort)
+    val metadata = ClusterMetadata.Empty.copy(featureLevels = features)
+    assertEquals(MetadataCodec.minimumRequiredFormat(metadata), 10.toShort)
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(metadata)), metadata)
+    intercept[ProtocolException](MetadataCodec.encode(metadata, 9))
+    val previous = PeerCapabilities.Current.copy(maxMetadataFormat = 9,
+      featureLevels = PeerCapabilities.Current.featureLevels - ClusterFeature.IncrementalCoordinator)
+    val mixed = NegotiatedCapabilities.across(Vector(previous, PeerCapabilities.Current)).toOption.get
+    assert(!mixed.supports(ClusterFeature.IncrementalCoordinator))
+    assert(mixed.supports(ClusterFeature.CoordinatorDeltas))
   }

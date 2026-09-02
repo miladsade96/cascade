@@ -5,7 +5,7 @@ import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 
 object MetadataCodec:
   val MinimumReadableFormat: Short = 1
-  val CurrentFormat: Short = 9
+  val CurrentFormat: Short = 10
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     encode(metadata, minimumRequiredFormat(metadata))
@@ -59,7 +59,8 @@ object MetadataCodec:
     writer.result()
 
   def minimumRequiredFormat(metadata: ClusterMetadata): Short =
-    if metadata.coordinator.shardVersions.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorDeltas) then 9
+    if metadata.featureLevels.contains(ClusterFeature.IncrementalCoordinator) then 10
+    else if metadata.coordinator.shardVersions.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorDeltas) then 9
     else if metadata.unavailableBrokerIds.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorFailover) then 8
     else if metadata.featureLevels.nonEmpty then 7
     else if metadata.topics.exists(_.lifecyclePolicy.nonEmpty) then 6
