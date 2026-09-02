@@ -1,6 +1,7 @@
 package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
+import cascade.coordinator.CoordinatorMetricsSnapshot
 import java.util.concurrent.atomic.AtomicLong
 
 final case class TrafficSnapshot(
@@ -90,7 +91,8 @@ final case class BrokerMetricsSnapshot(
     peerSecurity: PeerSecuritySnapshot = PeerSecuritySnapshot.Empty,
     authentication: AuthenticationSnapshot = AuthenticationSnapshot.Empty,
     tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty,
-    trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty
+    trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty,
+    coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty
 )
 
 object PrometheusMetrics:
@@ -104,6 +106,12 @@ object PrometheusMetrics:
     gauge(builder, "cascade_broker_clustered", "Whether cluster mode is enabled.", if snapshot.clustered then 1d else 0d, labels)
     gauge(builder, "cascade_broker_controller_id", "Current metadata controller node ID.", snapshot.controllerId.toDouble, labels)
     gauge(builder, "cascade_broker_fenced", "Whether this broker is fenced.", if snapshot.brokerFenced then 1d else 0d, labels)
+    counter(builder, "cascade_coordinator_checkpoints_total", "Coordinator checkpoint attempts on this broker.", snapshot.coordinator.attempts.toDouble, labels)
+    counter(builder, "cascade_coordinator_checkpoint_failures_total", "Rejected or failed coordinator checkpoints.", snapshot.coordinator.failures.toDouble, labels)
+    counter(builder, "cascade_coordinator_delta_bytes_total", "Encoded proposed coordinator delta bytes.", snapshot.coordinator.deltaBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_full_image_bytes_total", "Equivalent full coordinator state bytes before delta selection.", snapshot.coordinator.fullImageBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_changed_shards_total", "Shard replacements proposed by coordinator checkpoints.", snapshot.coordinator.changedShards.toDouble, labels)
+    counter(builder, "cascade_coordinator_checkpoint_seconds_total", "Cumulative coordinator checkpoint time.", snapshot.coordinator.nanos / 1_000_000_000d, labels)
     gauge(builder, "cascade_topics", "Topics visible to this broker.", snapshot.topics.toDouble, labels)
     gauge(builder, "cascade_partitions", "Local partitions opened by this broker.", snapshot.partitions.toDouble, labels)
     gauge(builder, "cascade_connections_active", "Currently active client connections.", snapshot.activeConnections.toDouble, labels)
