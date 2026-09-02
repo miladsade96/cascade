@@ -2,6 +2,7 @@ package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
 import cascade.coordinator.CoordinatorMetricsSnapshot
+import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
 final case class TrafficSnapshot(
@@ -92,7 +93,9 @@ final case class BrokerMetricsSnapshot(
     authentication: AuthenticationSnapshot = AuthenticationSnapshot.Empty,
     tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty,
     trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty,
-    coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty
+    coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty,
+    metadataJournal: MetadataJournalSnapshot = MetadataJournalSnapshot.Empty,
+    metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty
 )
 
 object PrometheusMetrics:
@@ -112,6 +115,15 @@ object PrometheusMetrics:
     counter(builder, "cascade_coordinator_full_image_bytes_total", "Equivalent full coordinator state bytes before delta selection.", snapshot.coordinator.fullImageBytes.toDouble, labels)
     counter(builder, "cascade_coordinator_changed_shards_total", "Shard replacements proposed by coordinator checkpoints.", snapshot.coordinator.changedShards.toDouble, labels)
     counter(builder, "cascade_coordinator_checkpoint_seconds_total", "Cumulative coordinator checkpoint time.", snapshot.coordinator.nanos / 1_000_000_000d, labels)
+    counter(builder, "cascade_metadata_journal_delta_records_total", "Forced incremental metadata records.", snapshot.metadataJournal.deltaRecords.toDouble, labels)
+    counter(builder, "cascade_metadata_journal_full_records_total", "Forced complete metadata records.", snapshot.metadataJournal.fullRecords.toDouble, labels)
+    counter(builder, "cascade_metadata_journal_delta_bytes_total", "Forced delta bytes including journal framing.", snapshot.metadataJournal.deltaBytes.toDouble, labels)
+    counter(builder, "cascade_metadata_journal_full_bytes_total", "Forced complete-image bytes including journal framing.", snapshot.metadataJournal.fullBytes.toDouble, labels)
+    counter(builder, "cascade_metadata_checkpoint_bytes_total", "Forced compaction checkpoint bytes including framing.", snapshot.metadataJournal.checkpointBytes.toDouble, labels)
+    gauge(builder, "cascade_metadata_journal_bytes", "Current metadata journal size.", snapshot.metadataJournal.journalBytes.toDouble, labels)
+    counter(builder, "cascade_metadata_replication_delta_bytes_total", "Attempted outbound delta RPC body bytes.", snapshot.metadataTransfers.deltaBytes.toDouble, labels)
+    counter(builder, "cascade_metadata_replication_full_bytes_total", "Attempted outbound full commit and snapshot RPC body bytes.", snapshot.metadataTransfers.fullBytes.toDouble, labels)
+    counter(builder, "cascade_metadata_replication_fallbacks_total", "Delta base rejections retried as complete snapshots.", snapshot.metadataTransfers.fallbacks.toDouble, labels)
     gauge(builder, "cascade_topics", "Topics visible to this broker.", snapshot.topics.toDouble, labels)
     gauge(builder, "cascade_partitions", "Local partitions opened by this broker.", snapshot.partitions.toDouble, labels)
     gauge(builder, "cascade_connections_active", "Currently active client connections.", snapshot.activeConnections.toDouble, labels)

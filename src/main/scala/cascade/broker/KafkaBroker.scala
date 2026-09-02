@@ -275,7 +275,9 @@ final class KafkaBroker(
       authentication = authenticationMetrics.snapshot,
       tlsReload = tlsContext.map(_.snapshot).getOrElse(cascade.security.TlsReloadSnapshot.Empty),
       trafficQuotas = TrafficQuotaSnapshot(requestQuota.snapshot, responseQuota.snapshot, produceQuota.snapshot, fetchQuota.snapshot),
-      coordinator = Option(coordinatorStateMachine).map(_.metricsSnapshot).getOrElse(cascade.coordinator.CoordinatorMetricsSnapshot.Empty)
+      coordinator = Option(coordinatorStateMachine).map(_.metricsSnapshot).getOrElse(cascade.coordinator.CoordinatorMetricsSnapshot.Empty),
+      metadataJournal = cluster.map(_.metadataJournalSnapshot).getOrElse(cascade.cluster.MetadataJournalSnapshot.Empty),
+      metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty)
     )
 
   def healthSnapshot: BrokerHealth =

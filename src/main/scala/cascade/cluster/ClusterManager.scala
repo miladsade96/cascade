@@ -73,6 +73,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     Option.when(enabled)(ControllerStateStore(config.dataDirectory.resolve(".cascade").resolve("controller-state.log")))
   @volatile private var current = metadataStore.map(_.metadata).getOrElse(ClusterMetadata.Empty)
   private var lastMetadataDelta: Option[MetadataDelta] = None
+  private val metadataTransfers = MetadataTransferMetrics()
+
+  def metadataJournalSnapshot: MetadataJournalSnapshot = metadataStore.map(_.snapshot).getOrElse(MetadataJournalSnapshot.Empty)
+  def metadataTransferSnapshot: MetadataTransferSnapshot = metadataTransfers.snapshot
 
   private val recoveredControllerState = controllerStore.map(_.state).getOrElse(ControllerState.Empty)
   private val initialControllerState =
@@ -710,11 +714,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   private def metadataSnapshot(cursor: ByteCursor): Array[Byte] =
     cursor.ensureFullyRead()
-    ByteWriter()
+    val response = ByteWriter()
       .writeLong(currentTerm)
       .writeInt(electedControllerId)
       .writeByteArray(MetadataCodec.encode(current))
       .result()
+    metadataTransfers.recordFull(response.length)
+    response
 
   private def metadataDeltaCommit(cursor: ByteCursor): Array[Byte] =
     val term = cursor.readLong()
@@ -1112,6 +1118,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         }
         val committed = callPeers(preparedPeers, config.peerTimeoutMillis) { node =>
           def send(api: Short, payload: Array[Byte]): (Long, Short) =
+            if api == InternalApi.MetadataDeltaCommit then metadataTransfers.recordDelta(payload.length)
+            else metadataTransfers.recordFull(payload.length)
             val response = peerClient.call(node, api, payload, config.peerTimeoutMillis)
             val result = response.readLong() -> response.readShort()
             response.ensureFullyRead()
@@ -1122,6 +1130,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           // A lagging/restarted follower needs a complete base. Never bypass a newer controller term.
           val result =
             if deltaPayload.nonEmpty && first == (term -> Errors.InvalidRequest) then
+              metadataTransfers.recordFallback()
               send(InternalApi.MetadataCommit, commitPayload)
             else first
           (result._1, result._2 == Errors.None)
@@ -1299,14 +1308,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           false
         else
           val metadataFormat = math.min(MetadataCodec.CurrentFormat.toInt, capability.maxMetadataFormat.toInt).toShort
+          val payload = ByteWriter().writeLong(term).writeInt(config.nodeId)
+            .writeByteArray(MetadataCodec.encode(metadata, metadataFormat)).result()
+          metadataTransfers.recordFull(payload.length)
           val response = peerClient.call(
             node,
             InternalApi.MetadataCommit,
-            ByteWriter()
-              .writeLong(term)
-              .writeInt(config.nodeId)
-              .writeByteArray(MetadataCodec.encode(metadata, metadataFormat))
-              .result(),
+            payload,
             config.peerTimeoutMillis
           )
           val responseTerm = response.readLong()
