@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Report,
+    [ValidateSet('1.0.0', 'format9')][string]$Baseline = '1.0.0',
     [switch]$KeepData
 )
 
@@ -13,8 +14,8 @@ if ([string]::IsNullOrWhiteSpace($Report)) {
 }
 $Report = [IO.Path]::GetFullPath($Report)
 
-$baselinePath = Join-Path $repository 'compatibility/releases/1.0.0.properties'
-$baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-StringData
+$baselinePath = Join-Path $repository "compatibility/releases/$Baseline.properties"
+$baselineRelease = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-StringData
 $currentVersion = (Get-Content -LiteralPath (Join-Path $repository 'VERSION') -Raw).Trim()
 $currentRevision = (& git -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the current Git revision.' }
@@ -58,13 +59,13 @@ function Invoke-CascadeSbt {
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "cascade-rolling-$([Guid]::NewGuid().ToString('N'))"
-$oldCheckout = Join-Path $temporaryRoot 'cascade-1.0.0'
+$oldCheckout = Join-Path $temporaryRoot "cascade-$Baseline"
 $worktreeAdded = $false
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 
 try {
-    & git -C $repository worktree add --detach $oldCheckout $baseline.revision
-    if ($LASTEXITCODE -ne 0) { throw "Could not create the $($baseline.version) worktree." }
+    & git -C $repository worktree add --detach $oldCheckout $baselineRelease.revision
+    if ($LASTEXITCODE -ne 0) { throw "Could not create the $($baselineRelease.version) worktree." }
     $worktreeAdded = $true
 
     Invoke-CascadeSbt -Directory $oldCheckout -Commands @('stage')
@@ -79,12 +80,13 @@ try {
         'Test / runMain cascade.qualification.RollingUpgradeQualification',
         '--old-runtime', ('"' + $oldRuntimeArgument + '"'),
         '--current-runtime', ('"' + $currentRuntimeArgument + '"'),
-        '--old-version', $baseline.version,
+        '--old-version', $baselineRelease.version,
         '--current-version', $currentVersion,
-        '--old-revision', $baseline.revision,
+        '--old-revision', $baselineRelease.revision,
         '--current-revision', $currentRevision,
         '--report', ('"' + $reportArgument + '"')
     ) -join ' '
+    if ($baselineRelease.ContainsKey('features')) { $runner += " --old-features $($baselineRelease.features)" }
     if ($KeepData) { $runner += ' --keep-data' }
     Invoke-CascadeSbt -Directory $repository -Commands @($runner)
 }

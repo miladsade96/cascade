@@ -89,6 +89,10 @@ jobs:
   rolling-upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: ["1.0.0", "format9"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,13 +102,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: sbt
-      - name: Run the pinned 1.0.0 to 1.1.0 rolling qualification
+      - name: Qualify pinned baseline against current release
         shell: pwsh
-        run: ./scripts/qualify-rolling-upgrade.ps1 -Report artifacts/rolling-upgrade.json
+        run: ./scripts/qualify-rolling-upgrade.ps1 -Baseline '${{ matrix.baseline }}' -Report artifacts/rolling-upgrade.json
       - name: Archive rolling-upgrade evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rolling-upgrade-evidence
+          name: rolling-upgrade-evidence-${{ matrix.baseline }}
           path: artifacts/rolling-upgrade.json
           if-no-files-found: warn

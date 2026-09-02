@@ -13,7 +13,7 @@ import java.time.Instant
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
-import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
@@ -28,7 +28,8 @@ final case class RollingUpgradeConfig(
     oldRevision: String,
     currentRevision: String,
     reportPath: Path,
-    keepData: Boolean = false
+    keepData: Boolean = false,
+    oldFeatures: Map[String, Short] = Map.empty
 )
 
 object RollingUpgradeConfig:
@@ -42,6 +43,8 @@ object RollingUpgradeConfig:
         case option :: _ => throw IllegalArgumentException(s"unknown or incomplete rolling-upgrade option: $option")
 
     val (options, keepData) = loop(arguments.toList, Map.empty, false)
+    val allowed = Set("old-runtime", "current-runtime", "old-version", "current-version", "old-revision", "current-revision", "report", "old-features")
+    require(options.keySet.subsetOf(allowed), "unknown rolling-upgrade option")
     def required(name: String): String = options.getOrElse(name, throw IllegalArgumentException(s"missing --$name"))
     RollingUpgradeConfig(
       Paths.get(required("old-runtime")).toAbsolutePath.normalize(),
@@ -51,8 +54,22 @@ object RollingUpgradeConfig:
       required("old-revision"),
       required("current-revision"),
       Paths.get(required("report")).toAbsolutePath.normalize(),
-      keepData
+      keepData,
+      parseFeatures(options.getOrElse("old-features", ""))
     )
+
+  def parseFeatures(value: String): Map[String, Short] =
+    if value.isEmpty then Map.empty
+    else
+      val entries = value.split(",", -1).toVector.map { item =>
+        val pair = item.split(":", -1)
+        require(pair.length == 2 && pair(0).matches("[a-z][a-z0-9-]*"), "invalid baseline feature")
+        val level = pair(1).toShort
+        require(level > 0, "baseline feature levels must be positive")
+        pair(0) -> level
+      }
+      require(entries.map(_._1).distinct.size == entries.size, "duplicate baseline feature")
+      entries.toMap
 
 final case class RollingUpgradeReport(
     status: String,
@@ -219,7 +236,7 @@ object RollingUpgradeQualification:
       var matches = false
       while !matches && System.nanoTime() < deadline do
         observed = dataDirectories.map(readMetadata).map(_.featureLevels)
-        matches = if active then observed.forall(_ == PeerCapabilities.Current.featureLevels) else observed.forall(_.isEmpty)
+        matches = if active then observed.forall(_ == PeerCapabilities.Current.featureLevels) else observed.forall(_ == config.oldFeatures)
         if !matches then Thread.sleep(100L)
       if !matches then
         throw IllegalStateException(s"unexpected feature state: active=$active observed=$observed")
@@ -239,6 +256,7 @@ object RollingUpgradeQualification:
           expected += value
         }
       finally producer.close(Duration.ofSeconds(10))
+      commitProgress(bootstrap, expected.size.toLong)
       phases += label
       recordProgress(expected.size)
 
@@ -250,7 +268,7 @@ object RollingUpgradeQualification:
     try
       (1 to 3).foreach(startNode(_, config.oldRuntime))
       awaitReady()
-      produce("1.0.0-baseline")
+      produce(s"${config.oldVersion}-baseline")
       assertFeatures(active = false)
 
       restart(3, config.currentRuntime)
@@ -281,7 +299,7 @@ object RollingUpgradeQualification:
       val downgrade = BrokerProcess.startRuntime(config.oldRuntime, arguments(3))
       try
         if !downgrade.awaitExit(10L) then
-          throw IllegalStateException("1.0.0 did not fail closed after feature activation")
+          throw IllegalStateException(s"${config.oldVersion} did not fail closed after feature activation")
         val output = downgrade.output.mkString("\n")
         if !output.contains("unsupported cluster metadata format") then
           throw IllegalStateException(s"downgrade failed without the expected format rejection: $output")
@@ -293,7 +311,7 @@ object RollingUpgradeQualification:
       produce("traffic-after-rejected-downgrade")
       startNode(3, config.currentRuntime)
       awaitReady()
-      produce("recover-node-3-on-1.1.0")
+      produce(s"recover-node-3-on-${config.currentVersion}")
       consumeExact(bootstrap, expected.toVector)
       phases += "exact-consume-after-rolling-campaign"
       expected.size
@@ -315,7 +333,7 @@ object RollingUpgradeQualification:
     ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG -> classOf[ByteArraySerializer].getName,
     ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG -> classOf[ByteArraySerializer].getName,
     ProducerConfig.ACKS_CONFIG -> "all",
-    ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG -> "false",
+    ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG -> "true",
     ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG -> "60000",
     ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG -> "5000",
     "enable.metrics.push" -> "false"
@@ -327,6 +345,7 @@ object RollingUpgradeQualification:
       ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG -> classOf[ByteArrayDeserializer].getName,
       ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG -> classOf[ByteArrayDeserializer].getName,
       ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG -> "false",
+      ConsumerConfig.GROUP_ID_CONFIG -> "rolling-progress",
       ConsumerConfig.AUTO_OFFSET_RESET_CONFIG -> "earliest",
       "enable.metrics.push" -> "false"
     ))
@@ -345,6 +364,19 @@ object RollingUpgradeQualification:
         }
       if actual.toVector != expected then
         throw IllegalStateException(s"exact consume mismatch: expected ${expected.size}, got ${actual.size}")
+      val committed = consumer.committed(java.util.Set.of(partition)).get(partition)
+      require(committed != null && committed.offset() == expected.size.toLong, "rolling consumer offset was not recovered exactly")
+    finally consumer.close()
+
+  private def commitProgress(bootstrap: String, offset: Long): Unit =
+    val consumer = KafkaConsumer[Array[Byte], Array[Byte]](properties(
+      ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG -> bootstrap,
+      ConsumerConfig.GROUP_ID_CONFIG -> "rolling-progress",
+      ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG -> "false",
+      ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG -> classOf[ByteArrayDeserializer].getName,
+      ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG -> classOf[ByteArrayDeserializer].getName
+    ))
+    try consumer.commitSync(Map(TopicPartition(TrafficTopic, 0) -> OffsetAndMetadata(offset)).asJava)
     finally consumer.close()
 
   private def readMetadata(dataDirectory: Path): cascade.cluster.ClusterMetadata =
