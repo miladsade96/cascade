@@ -17,6 +17,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   private var channel = openChannel()
   private var closed = false
   private var appendPosition = 0L
+  private var checkpointBytes = 0L
   private var current =
     try recover()
     catch
@@ -35,7 +36,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
       channel.force(false)
       appendPosition += frame.length
       current = next
-      if appendPosition >= compactionBytes then compactCurrent()
+      if appendPosition - checkpointBytes >= compactionBytes then compactCurrent()
   }
 
   def journalSize: Long = synchronized(channel.size())
@@ -77,6 +78,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
             if decoded.version <= latest.version then
               throw ProtocolException(s"non-monotonic metadata version ${decoded.version} at $position")
             latest = decoded
+            if position == 0L then checkpointBytes = frameSize
             position += frameSize
     if position < fileSize then
       channel.truncate(position)
@@ -123,6 +125,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
     AtomicFileLifecycle.replace(temporary, path)
     channel = openChannel()
     appendPosition = frame.length
+    checkpointBytes = frame.length
 
   private def encodeFrame(payload: Array[Byte]): Array[Byte] =
     if payload.length <= 0 || payload.length > MaximumImageBytes then

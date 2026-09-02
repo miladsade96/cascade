@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.coordinator.*
-import cascade.group.*
+import cascade.group.IncrementalGroupFixture
 import munit.FunSuite
 
 object MetadataDeltaFixture:
@@ -10,15 +10,9 @@ object MetadataDeltaFixture:
 
   def update(base: ClusterMetadata, group: String = "workers", offset: Long = 1L): (MetadataDelta, ClusterMetadata) =
     val id = CoordinatorShard.group(group)
-    val before = CoordinatorShardState.payloads(base.coordinator.groupState, base.coordinator.deliveryState)
-    val existing = if base.coordinator.groupState.isEmpty then Vector.empty else GroupCodec.decode(base.coordinator.groupState.toArray).offsets
-    val offsets = existing.filterNot(_.key.groupId == group) :+
-      OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, 1L))
-    val groups = GroupCodec.encode(GroupImage(0L, Vector.empty, offsets)).toVector
-    val payload = GroupShardCodec.split(groups)(id)
+    val payload = IncrementalGroupFixture.offsetShard(base.coordinator.groupState, group, offset)
     val delta = MetadataDelta(base.version, base.coordinator.version,
       CoordinatorDelta(base.controllerTerm, Vector(CoordinatorShardUpdate(id, base.coordinator.shardVersion(id), payload))))
-    require(before.size == CoordinatorShard.Count)
     delta -> delta.applyTo(base).toOption.get
 
 final class MetadataDeltaSuite extends FunSuite:
