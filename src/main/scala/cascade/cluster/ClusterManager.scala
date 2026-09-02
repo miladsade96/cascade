@@ -93,6 +93,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var replicationManager: ReplicationManager | Null = null
   @volatile private var coordinatorInstaller: CoordinatorImageInstaller | Null = null
   @volatile private var installedCoordinatorVersion = -1L
+  @volatile private var installedCoordinatorState = CoordinatorMetadata.Empty
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
   private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
@@ -115,12 +116,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       if coordinatorInstaller != null then throw IllegalStateException("coordinator installer is already attached")
       coordinatorInstaller = CoordinatorImageInstaller { metadata =>
         installer(metadata)
-        markCoordinatorInstalled(metadata.version)
+        coordinatorStateInstalled(metadata)
       }
       current.coordinator
     }
     installer(initial)
-    markCoordinatorInstalled(initial.version)
+    coordinatorStateInstalled(initial)
 
   def start(): Unit =
     if enabled && replicationManager == null then throw IllegalStateException("replication manager is not attached")
@@ -159,7 +160,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def ownsCoordinator(key: String): Boolean =
     coordinatorNode(key).exists(_.id == config.nodeId) && !isBrokerFenced &&
-      installedCoordinatorVersion >= current.coordinator.version
+      installedCoordinatorVersion >= 0L &&
+      (if supportsFeature(ClusterFeature.CoordinatorDeltas) then
+        CoordinatorShardState.readyForKey(installedCoordinatorState, current.coordinator, key)
+      else installedCoordinatorVersion >= current.coordinator.version)
 
   def controllerId: Int = electedControllerId
 
@@ -1134,8 +1138,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     Option(coordinatorInstaller).foreach(_.offer(metadata.coordinator))
   }
 
-  private def markCoordinatorInstalled(version: Long): Unit = synchronized {
-    installedCoordinatorVersion = math.max(installedCoordinatorVersion, version)
+  private[cascade] def coordinatorStateInstalled(metadata: CoordinatorMetadata): Unit = synchronized {
+    if metadata.version >= installedCoordinatorVersion then
+      installedCoordinatorState = metadata
+      installedCoordinatorVersion = metadata.version
   }
 
   private def commitCoordinatorOnController(

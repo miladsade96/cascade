@@ -15,7 +15,8 @@ final class CoordinatorImageInstallerSuite extends FunSuite:
     val installer = CoordinatorImageInstaller { image =>
       if image.version == 1L then
         entered.countDown()
-        assert(release.await(5L, TimeUnit.SECONDS))
+        // Do not call the suite's assertion machinery from the worker while the test thread waits on a latch.
+        release.await()
       versions.add(image.version)
       if image.version == 1000L then complete.countDown()
     }

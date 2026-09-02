@@ -7,6 +7,12 @@ import cascade.protocol.ByteCursor
 import scala.util.control.NonFatal
 
 object CoordinatorShardState:
+  /** The public coordinator lookup is shared by group and transaction APIs; check both key domains. */
+  def readyForKey(installed: CoordinatorMetadata, current: CoordinatorMetadata, key: String): Boolean =
+    Vector(CoordinatorShard.group(key), CoordinatorShard.transaction(key)).forall { id =>
+      installed.shardVersion(id) >= current.shardVersion(id)
+    }
+
   def payloads(groupState: Vector[Byte], deliveryState: Vector[Byte]): Vector[Vector[Byte]] =
     GroupShardCodec.split(groupState) ++ DeliveryShardCodec.split(deliveryState)
 

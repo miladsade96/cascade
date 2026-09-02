@@ -76,4 +76,5 @@ final class CoordinatorStateMachine(
       installedVersion = metadata.version
       installed = metadata
       baseline = CoordinatorShardState.payloads(groups.snapshotBytes.toVector, delivery.snapshotBytes.toVector)
+      cluster.coordinatorStateInstalled(metadata)
   }

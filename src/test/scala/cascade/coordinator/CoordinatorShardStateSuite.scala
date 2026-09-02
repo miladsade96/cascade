@@ -38,3 +38,14 @@ final class CoordinatorShardStateSuite extends FunSuite:
     val bad = CoordinatorDelta(7L, Vector(CoordinatorShardUpdate(1, 0L, Vector.empty)))
     assert(CoordinatorShardState.merge(empty, bad, 7L).isLeft)
   }
+
+  test("unrelated installation lag does not fence a ready key but relevant shard lag does") {
+    val key = "orders"
+    val base = empty.copy(shardVersions = Vector.fill(CoordinatorShard.Count)(0L))
+    val unrelated = base.copy(version = 1L, shardVersions = base.shardVersions.updated(0, 1L))
+    assert(CoordinatorShardState.readyForKey(base, unrelated, key))
+    val groupChange = unrelated.copy(shardVersions = unrelated.shardVersions.updated(CoordinatorShard.group(key), 1L))
+    assert(!CoordinatorShardState.readyForKey(base, groupChange, key))
+    val transactionChange = unrelated.copy(shardVersions = unrelated.shardVersions.updated(CoordinatorShard.transaction(key), 1L))
+    assert(!CoordinatorShardState.readyForKey(base, transactionChange, key))
+  }
