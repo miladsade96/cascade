@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Report,
-    [ValidateSet('1.0.0', 'format9')][string]$Baseline = '1.0.0',
+    [ValidateSet('1.0.0', 'format9', 'format10')][string]$Baseline = '1.0.0',
     [switch]$KeepData
 )
 
