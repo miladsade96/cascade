@@ -178,6 +178,7 @@ object PeerCapabilities:
   )
 
 object ClusterFeature:
+  val CoordinatorDeltas = "coordinator-deltas"
   val CoordinatorSharding = "coordinator-sharding"
   val CoordinatorFailover = "coordinator-failover"
   val ConsumerProtocol = "consumer-protocol"

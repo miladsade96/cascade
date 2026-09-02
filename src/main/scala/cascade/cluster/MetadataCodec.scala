@@ -5,7 +5,7 @@ import cascade.storage.{CleanupPolicy, TopicLifecyclePolicy}
 
 object MetadataCodec:
   val MinimumReadableFormat: Short = 1
-  val CurrentFormat: Short = 8
+  val CurrentFormat: Short = 9
 
   def encode(metadata: ClusterMetadata): Array[Byte] =
     encode(metadata, minimumRequiredFormat(metadata))
@@ -55,10 +55,12 @@ object MetadataCodec:
         writer.writeString(name).writeShort(level): Unit
       }
     if format >= 8 then writer.writeArray(metadata.unavailableBrokerIds.toVector.sorted)(writer.writeInt)
+    if format >= 9 then writer.writeArray(metadata.coordinator.shardVersions)(writer.writeLong)
     writer.result()
 
   def minimumRequiredFormat(metadata: ClusterMetadata): Short =
-    if metadata.unavailableBrokerIds.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorFailover) then 8
+    if metadata.coordinator.shardVersions.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorDeltas) then 9
+    else if metadata.unavailableBrokerIds.nonEmpty || metadata.featureLevels.contains(ClusterFeature.CoordinatorFailover) then 8
     else if metadata.featureLevels.nonEmpty then 7
     else if metadata.topics.exists(_.lifecyclePolicy.nonEmpty) then 6
     else if metadata.coordinator != CoordinatorMetadata.Empty then 5
@@ -119,8 +121,9 @@ object MetadataCodec:
     val unavailableBrokerIds =
       if format >= 8 then cursor.readArray(cursor.readInt()).toSet
       else Set.empty[Int]
+    val shardVersions = if format >= 9 then cursor.readArray(cursor.readLong()) else Vector.empty
     cursor.ensureFullyRead()
-    ClusterMetadata(version, topics, controllerTerm, membership, coordinator, featureLevels, unavailableBrokerIds)
+    ClusterMetadata(version, topics, controllerTerm, membership, coordinator.copy(shardVersions = shardVersions), featureLevels, unavailableBrokerIds)
 
   private def writeVoters(writer: ByteWriter, voters: Vector[QuorumVoter]): Unit =
     writer.writeArray(voters) { voter =>
