@@ -27,9 +27,16 @@ final class IncrementalMetadataStoreSuite extends FunSuite:
         store.commit(second)
         assertEquals(store.journalSize - before, MetadataDeltaCodec.encode(delta).length.toLong + 8L)
         assertEquals(store.metadata, second)
+        assertEquals(store.snapshot.fullRecords, 1L)
+        assertEquals(store.snapshot.deltaRecords, 2L)
+        assertEquals(store.snapshot.journalBytes, store.journalSize)
+        assertEquals(store.snapshot.fullBytes + store.snapshot.deltaBytes, store.journalSize)
       finally store.close()
       val recovered = MetadataStore(path)
-      try assertEquals(recovered.metadata, second)
+      try
+        assertEquals(recovered.metadata, second)
+        assertEquals(recovered.snapshot.deltaRecords, 0L)
+        assertEquals(recovered.snapshot.journalBytes, Files.size(path))
       finally recovered.close()
     }
   }

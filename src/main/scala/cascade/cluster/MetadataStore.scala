@@ -18,6 +18,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   private var closed = false
   private var appendPosition = 0L
   private var checkpointBytes = 0L
+  private var statistics = MetadataJournalSnapshot.Empty
   private var current =
     try recover()
     catch
@@ -35,11 +36,16 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
       writeFully(ByteBuffer.wrap(frame), appendPosition)
       channel.force(false)
       appendPosition += frame.length
+      statistics =
+        if MetadataDeltaCodec.isDelta(payload) then statistics.copy(deltaRecords = statistics.deltaRecords + 1L, deltaBytes = statistics.deltaBytes + frame.length)
+        else statistics.copy(fullRecords = statistics.fullRecords + 1L, fullBytes = statistics.fullBytes + frame.length)
       current = next
       if appendPosition - checkpointBytes >= compactionBytes then compactCurrent()
   }
 
   def journalSize: Long = synchronized(channel.size())
+
+  def snapshot: MetadataJournalSnapshot = synchronized(statistics.copy(journalBytes = appendPosition))
 
   override def close(): Unit = synchronized {
     if !closed then
@@ -126,6 +132,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
     channel = openChannel()
     appendPosition = frame.length
     checkpointBytes = frame.length
+    statistics = statistics.copy(checkpointBytes = statistics.checkpointBytes + frame.length)
 
   private def encodeFrame(payload: Array[Byte]): Array[Byte] =
     if payload.length <= 0 || payload.length > MaximumImageBytes then
