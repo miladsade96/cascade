@@ -21,3 +21,13 @@ final class CoordinatorFormatSuite extends FunSuite:
     val old = PeerCapabilities.Current.copy(maxMetadataFormat = 8, featureLevels = Map.empty)
     assertEquals(NegotiatedCapabilities.across(Vector(old, PeerCapabilities.Current)).toOption.get.metadataFormat, 8.toShort)
   }
+
+  test("delta commits activate only when every voter advertises support") {
+    val current = PeerCapabilities.Current
+    val previous = current.copy(maxMetadataFormat = 8, featureLevels = current.featureLevels - ClusterFeature.CoordinatorDeltas)
+    val mixed = NegotiatedCapabilities.across(Vector(current, current, previous)).toOption.get
+    assert(!mixed.supports(ClusterFeature.CoordinatorDeltas))
+    val upgraded = NegotiatedCapabilities.across(Vector(current, current, current)).toOption.get
+    assert(upgraded.supports(ClusterFeature.CoordinatorDeltas))
+    assertEquals(upgraded.metadataFormat, 9.toShort)
+  }

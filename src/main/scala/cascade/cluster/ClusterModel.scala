@@ -168,6 +168,7 @@ object PeerCapabilities:
     MetadataCodec.MinimumReadableFormat,
     MetadataCodec.CurrentFormat,
     Map(
+      ClusterFeature.CoordinatorDeltas -> 1,
       ClusterFeature.CoordinatorSharding -> 1,
       ClusterFeature.CoordinatorFailover -> 1,
       ClusterFeature.ConsumerProtocol -> 1,
