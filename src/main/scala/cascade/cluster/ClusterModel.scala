@@ -243,5 +243,6 @@ object InternalApi:
   val AlterTopicConfig: Short = -118
   val PeerFeatures: Short = -119
   val CoordinatorDeltaCommit: Short = -120
+  val MetadataDeltaCommit: Short = -121
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorDeltaCommit
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= MetadataDeltaCommit

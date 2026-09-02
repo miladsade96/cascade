@@ -72,6 +72,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val controllerStore =
     Option.when(enabled)(ControllerStateStore(config.dataDirectory.resolve(".cascade").resolve("controller-state.log")))
   @volatile private var current = metadataStore.map(_.metadata).getOrElse(ClusterMetadata.Empty)
+  private var lastMetadataDelta: Option[MetadataDelta] = None
 
   private val recoveredControllerState = controllerStore.map(_.state).getOrElse(ControllerState.Empty)
   private val initialControllerState =
@@ -373,6 +374,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       ByteWriter().writeShort(error).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
+    case InternalApi.MetadataDeltaCommit => metadataDeltaCommit(cursor)
     case InternalApi.MetadataSnapshot => metadataSnapshot(cursor)
     case InternalApi.CreateTopic =>
       val name = cursor.readString()
@@ -706,6 +708,26 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       .writeInt(electedControllerId)
       .writeByteArray(MetadataCodec.encode(current))
       .result()
+
+  private def metadataDeltaCommit(cursor: ByteCursor): Array[Byte] =
+    val term = cursor.readLong()
+    val leaderId = cursor.readInt()
+    val delta = MetadataDeltaCodec.decode(cursor.readByteArray())
+    cursor.ensureFullyRead()
+    val accepted = synchronized {
+      if !MetadataDelta.enabled(current) || term != delta.change.controllerTerm || !acceptLeaderLocked(term, leaderId) then false
+      else if lastMetadataDelta.contains(delta) then
+        controllerReady = true
+        true
+      else delta.applyTo(current) match
+        case Left(_) => false
+        case Right(metadata) =>
+          commitLocal(metadata)
+          lastMetadataDelta = Some(delta)
+          controllerReady = true
+          true
+    }
+    ByteWriter().writeLong(currentTerm).writeShort(if accepted then Errors.None else Errors.InvalidRequest).result()
 
   private def acceptLeaderLocked(term: Long, leaderId: Int): Boolean =
     if !effectiveMembership.contains(leaderId) || term < currentTerm then false
@@ -1132,6 +1154,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   private def commitLocal(metadata: ClusterMetadata): Unit = synchronized {
     metadataStore.foreach(_.commit(metadata))
+    lastMetadataDelta = None
     current = metadata
     applyMetadata(metadata)
     // The bounded installer never acquires the service lock on this publication thread.
