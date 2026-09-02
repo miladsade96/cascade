@@ -554,7 +554,7 @@ The load harness separately checks exact record counts at one million and ten mi
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Coordinator capacity | Independent shard persistence/replication, finer-grained service locks, membership/transaction churn at scale, and dedicated-host capacity qualification beyond the local offset campaign |
+| 1 | Coordinator capacity | Independent per-shard consensus and journals beyond the incremental shared journal, finer-grained service locks, membership/transaction churn at scale, and dedicated-host capacity qualification |
 | 2 | Qualification | Run and archive the 72-hour multi-tenant soak, physical power/device-loss probe, restore drill, arbitrary packet impairment, and dedicated-host RF=3 benchmark |
 | 3 | Consumer groups | Add administrative group APIs and continue expanding ConsumerGroupHeartbeat beyond v0 |
 | 4 | Storage lifecycle | Snappy/LZ4/Zstd record rewriting and replicated retention coordination |
@@ -567,7 +567,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 
 - Dynamic membership, peer capability exchange, metadata-format negotiation, quorum-committed feature activation, and the pinned 1.0.0-to-1.1.0 rolling/rollback gate are implemented. Automatic broker registration, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
 - Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
-- Coordinator ownership is rendezvous-sharded and changed shards have independent conflict versions. Local concurrent offset/failover/restart qualification passes, but publication, replication, storage, and service locking still share one full-image architecture. I still need independent shard persistence and dedicated-host membership/transaction churn evidence before treating it like Kafka's partitioned internal topics.
+- Coordinator ownership is rendezvous-sharded and changed shards have independent conflict versions. [Incremental coordinator persistence and replication](docs/incremental-coordinator.md) now avoid full images for consecutive coordinator-only writes, with exact-base replay and snapshot fallback. Publication, in-memory state, and service locks remain shared. I still need independent per-shard consensus/journals and dedicated-host membership/transaction churn evidence before treating it like Kafka's partitioned internal topics.
 - Compaction rewrites individual uncompressed/gzip records, preserves keyless records, applies tombstone grace, recalculates CRC32C, and supports an I/O ceiling. Snappy/LZ4/Zstd, control, and transactional batches remain opaque.
 - Client authentication supports PLAIN, SCRAM-SHA-256/512, and signed OAUTHBEARER JWTs with RSA, EC, and Ed25519 keys plus approved claim-to-role mapping. I still need opaque-token introspection, automatic OIDC discovery, and revocation integration.
 - I split each configured principal rate and burst conservatively across the current quorum, which bounds aggregate traffic without a central hot-path service. I still need long authenticated multi-tenant qualification and reclaiming unused shares without exceeding the cluster limit.

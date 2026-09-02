@@ -7,6 +7,15 @@ import cascade.protocol.ByteCursor
 import scala.util.control.NonFatal
 
 object CoordinatorShardState:
+  /** Equal shard versions need content identity: failed quorum attempts can reuse a version. */
+  def includes(current: CoordinatorMetadata, delta: CoordinatorDelta): Boolean =
+    lazy val state = payloads(current.groupState, current.deliveryState)
+    delta.updates.forall { update =>
+      val version = current.shardVersion(update.id)
+      version > update.expectedVersion &&
+        (version - update.expectedVersion > 1L || state(update.id) == update.payload)
+    }
+
   /** The public coordinator lookup is shared by group and transaction APIs; check both key domains. */
   def readyForKey(installed: CoordinatorMetadata, current: CoordinatorMetadata, key: String): Boolean =
     Vector(CoordinatorShard.group(key), CoordinatorShard.transaction(key)).forall { id =>

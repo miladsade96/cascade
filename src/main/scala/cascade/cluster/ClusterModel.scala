@@ -141,6 +141,7 @@ final case class ClusterMetadata(
   require(featureLevels.values.forall(_ > 0), "active feature levels must be positive")
   require(unavailableBrokerIds.forall(_ >= 0), "unavailable broker IDs must be non-negative")
   lazy val byName: Map[String, TopicMetadata] = topics.map(topic => topic.name -> topic).toMap
+  lazy val fingerprint: Vector[Byte] = MessageDigest.getInstance("SHA-256").digest(MetadataCodec.encode(this)).toVector
 
 object ClusterMetadata:
   val Empty: ClusterMetadata = ClusterMetadata(0L, Vector.empty)

@@ -8,6 +8,7 @@ I use Java 21 or newer and run:
 
 ```powershell
 ./scripts/qualify-rolling-upgrade.ps1 -Report artifacts/rolling-upgrade.json
+./scripts/qualify-rolling-upgrade.ps1 -Baseline format9 -Report artifacts/rolling-format9.json
 ```
 
 The script creates an isolated detached worktree at the pinned revision, builds the real 1.0.0 runtime, builds the current runtime, and starts three separate broker JVMs with replication factor three, minimum ISR two, synchronous flushing, and independent data directories. It never edits the historical source. Temporary worktrees and broker data are removed after the run unless I add `-KeepData`.
@@ -16,7 +17,9 @@ CI runs the same script with full Git history and archives the JSON report. The 
 
 ## What the gate proves
 
-The campaign:
+The original 1.0.0-to-1.1.0 campaign below is historical. The runner now targets the current `VERSION`, commits consumer offsets during each traffic phase, and verifies those offsets after recovery. It retains non-idempotent `acks=all` traffic because historical binaries restrict anonymous producer initialization to the controller. Current-binary idempotence has separate tests. CI also selects the pinned format-9 source predecessor with `-Baseline format9`; that predecessor is not the published format-8 Docker Hub image.
+
+The historical campaign:
 
 1. Starts three pinned 1.0.0 brokers and verifies replicated `acks=all` traffic.
 2. Upgrades broker 3 to 1.1.0 while the other two brokers remain on 1.0.0.
@@ -32,9 +35,9 @@ After adding coordinator deltas and format 9, I repeated this campaign on 2026-0
 
 ## Operational boundary
 
-I can roll a broker back only while the quorum feature map is still empty. Cascade negotiates format 6 while any 1.0.0 voter remains, so a replacement 1.0.0 binary can read the journal and rejoin.
+I can roll a broker back only while the quorum feature map and metadata floor still fit the baseline binary. For the 1.0.0 baseline this means an empty feature map and format 6. For the pinned format-9 predecessor, the existing feature map stays active but `incremental-coordinator` must remain inactive.
 
-The original 1.1.0 feature set requires format 8. The current source adds `coordinator-deltas` level 1 and format 9; it activates only when every voter supports it. A cluster containing an older format-8 broker keeps using whole-image coordinator commits. Once delta support is activated, shard conflict versions are durable and neither a format-6 nor a format-8 binary can safely read that image. From that point I roll forward. I never bypass the format check or edit the metadata journal. If I must return to an older binary after activation, I restore a verified pre-activation cluster backup into an isolated environment and follow the disaster-recovery runbook.
+The original 1.1.0 feature set requires format 8. `coordinator-deltas` raises the floor to format 9; `incremental-coordinator` raises it to format 10 and permits incremental journal/peer records. Each feature activates only when every voter supports it. A format-8 peer keeps whole-image coordinator commits; a format-9 peer permits shard proposals but keeps full-image persistence/replication. Once the new floor is active, I roll forward. I never bypass the format check or edit the metadata journal. If I must return to an older binary after activation, I restore a verified pre-activation cluster backup into an isolated environment and follow the disaster-recovery runbook.
 
 The new source is now versioned 1.2.0 with a local Docker image, but I have not published it to Docker Hub. Earlier qualification artifacts used the 1.1.0 version string, so I identify them by Git revision and jar/image digest. The 1.1.0-to-1.2.0 boundary still needs a pinned format-8 predecessor campaign before I call that adjacent release pair qualified; building a new image does not provide that evidence.
 

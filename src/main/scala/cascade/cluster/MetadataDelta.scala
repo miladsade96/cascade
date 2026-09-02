@@ -4,14 +4,16 @@ import cascade.coordinator.{CoordinatorDelta, CoordinatorShardState}
 import scala.util.control.NonFatal
 
 /** An atomic coordinator-only transition in the existing ordered metadata quorum. */
-final case class MetadataDelta(baseVersion: Long, baseCoordinatorVersion: Long, change: CoordinatorDelta):
+final case class MetadataDelta(baseVersion: Long, baseCoordinatorVersion: Long, baseFingerprint: Vector[Byte], change: CoordinatorDelta):
   require(baseVersion >= 0L && baseCoordinatorVersion >= 0L, "negative metadata delta base")
+  require(baseFingerprint.size == 32, "metadata delta requires a SHA-256 base fingerprint")
 
   def applyTo(base: ClusterMetadata): Either[String, ClusterMetadata] =
     if !MetadataDelta.enabled(base) then Left("incremental coordinator feature is not active")
     else if base.version != baseVersion || base.coordinator.version != baseCoordinatorVersion then
       Left("metadata delta base version mismatch")
     else if base.controllerTerm != change.controllerTerm then Left("metadata delta base term mismatch")
+    else if base.fingerprint != baseFingerprint then Left("metadata delta base fingerprint mismatch")
     else
       CoordinatorShardState.merge(base.coordinator, change, base.controllerTerm).flatMap { coordinator =>
         try Right(base.copy(version = Math.addExact(baseVersion, 1L), coordinator = coordinator))
@@ -31,6 +33,6 @@ object MetadataDelta:
         val before = CoordinatorShardState.payloads(base.coordinator.groupState, base.coordinator.deliveryState)
         val after = CoordinatorShardState.payloads(next.coordinator.groupState, next.coordinator.deliveryState)
         CoordinatorShardState.changes(base.coordinator, before, after, next.controllerTerm)
-          .map(MetadataDelta(base.version, base.coordinator.version, _))
+          .map(MetadataDelta(base.version, base.coordinator.version, base.fingerprint, _))
           .filter(_.applyTo(base).contains(next))
       catch case NonFatal(_) => None

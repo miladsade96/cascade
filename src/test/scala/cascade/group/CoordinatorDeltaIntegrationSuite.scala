@@ -8,7 +8,7 @@ import munit.FunSuite
 
 final class CoordinatorDeltaIntegrationSuite extends FunSuite:
   private def payload(group: String, offset: Long): Vector[Byte] =
-    val value = OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, 1L))
+    val value = OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, System.currentTimeMillis()))
     GroupShardCodec.split(GroupCodec.encode(GroupImage(0L, Vector.empty, Vector(value))).toVector)(CoordinatorShard.group(group))
 
   test("a live quorum merges independent stale-global-version proposals and recovers them after controller loss") {

@@ -20,7 +20,7 @@ final class MetadataDeltaCodecSuite extends FunSuite:
     intercept[ProtocolException](MetadataDeltaCodec.decode(bytes :+ 0.toByte))
     intercept[ProtocolException](MetadataDeltaCodec.decode(bytes.updated(0, 0.toByte)))
     val update = delta.change.updates.head
-    val duplicate = ByteWriter().writeShort(-10).writeLong(10L).writeLong(0L).writeShort(1).writeLong(4L).writeInt(2)
+    val duplicate = ByteWriter().writeShort(-10).writeLong(10L).writeLong(0L).writeBytes(delta.baseFingerprint.toArray).writeShort(1).writeLong(4L).writeInt(2)
     (0 until 2).foreach { _ => duplicate.writeInt(update.id).writeLong(update.expectedVersion).writeByteArray(update.payload.toArray): Unit }
     intercept[IllegalArgumentException](MetadataDeltaCodec.decode(duplicate.result()))
   }

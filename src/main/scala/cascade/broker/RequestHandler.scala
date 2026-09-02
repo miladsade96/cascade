@@ -588,8 +588,10 @@ final class RequestHandler(
             writer.writeShort(partitionError)
             writer.writeInt(partition.partition)
             writer.writeInt(partition.leaderId)
+            if version >= 7 then writer.writeInt(partition.leaderEpoch)
             writer.writeArray(partition.replicas)(writer.writeInt)
             writer.writeArray(partition.inSyncReplicas)(writer.writeInt)
+            if version >= 5 then writer.writeArray(Vector.empty[Int])(writer.writeInt)
           }
       else localPartitions match
         case None =>
@@ -599,10 +601,14 @@ final class RequestHandler(
           writer.writeShort(Errors.None).writeString(topic).writeBoolean(topic.startsWith("__"))
           writer.writeArray(partitions.indices) { index =>
             writer.writeShort(Errors.None).writeInt(index).writeInt(config.nodeId)
+            if version >= 7 then writer.writeInt(0)
             writer.writeArray(Vector(config.nodeId))(writer.writeInt)
-            writer.writeArray(Vector(config.nodeId))(writer.writeInt): Unit
+            writer.writeArray(Vector(config.nodeId))(writer.writeInt)
+            if version >= 5 then writer.writeArray(Vector.empty[Int])(writer.writeInt)
           }
+      if version >= 8 then writer.writeInt(0)
     }
+    if version >= 8 then writer.writeInt(0)
     Some(writer.result())
 
   private def flexibleMetadata(version: Short, requestedTopics: Option[Vector[String]], session: ConnectionSession): Array[Byte] =
@@ -1366,10 +1372,16 @@ final class RequestHandler(
     val transactionalId = cursor.readNullableString()
     val timeoutMillis = cursor.readInt()
     cursor.ensureFullyRead()
-    val result =
-      if transactionalId.fold(!clusterManager.isEnabled || clusterManager.isActiveController)(isCoordinatorFor) then
+    val initialized =
+      if transactionalId.fold(!clusterManager.isBrokerFenced)(isCoordinatorFor) then
         deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
       else InitProducerIdResult(Errors.NotCoordinator, -1L, -1)
+    // Anonymous IDs use the quorum allocator, not a transaction coordinator. A retry must not
+    // direct Kafka clients to look up a null transactional ID after fencing or a shard conflict.
+    val result =
+      if transactionalId.isEmpty && Set(Errors.NotCoordinator, Errors.CoordinatorNotAvailable).contains(initialized.errorCode) then
+        initialized.copy(errorCode = Errors.CoordinatorLoadInProgress)
+      else initialized
     Some(
       ByteWriter()
         .writeInt(0)

@@ -47,7 +47,8 @@ final class MetadataDeltaRecoverySuite extends FunSuite:
       val (delta, _) = update(base)
       val baseline = frame(MetadataCodec.encode(base))
       val record = frame(MetadataDeltaCodec.encode(delta))
-      Vector(record, baseline ++ frame(MetadataDeltaCodec.encode(delta.copy(baseVersion = 99L))), baseline ++ record ++ record)
+      Vector(record, baseline ++ frame(MetadataDeltaCodec.encode(delta.copy(baseVersion = 99L))), baseline ++ record ++ record,
+        frame(MetadataCodec.encode(base.copy(unavailableBrokerIds = Set(3)))) ++ record)
         .foreach { bytes =>
           Files.write(path, bytes): Unit
           intercept[ProtocolException](MetadataStore(path))

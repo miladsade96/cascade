@@ -15,7 +15,7 @@ I require deterministic layout/distribution tests; wire and metadata round trips
 
 ## Remaining limits
 
-This is shard-scoped conflict isolation and transfer, not independent consensus groups. The controller still serializes metadata publication, the journal and replication path still carry a complete committed image, and each broker still retains the coordinator state. Local group/delivery services still share their atomicity lock. I do not claim linear horizontal throughput scaling or dedicated-host production capacity from this milestone.
+This is shard-scoped conflict isolation and transfer, not independent consensus groups. The controller still serializes metadata publication and each broker retains the complete coordinator state. The subsequent [incremental persistence milestone](incremental-coordinator.md) adds delta journal records and peer replication; full snapshots remain for structural changes, checkpoints, and recovery. Local group/delivery services still share their atomicity lock. I do not claim linear horizontal throughput scaling or dedicated-host production capacity.
 
 ## Implemented layout and rollout
 

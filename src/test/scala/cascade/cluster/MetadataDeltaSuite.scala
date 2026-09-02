@@ -11,7 +11,7 @@ object MetadataDeltaFixture:
   def update(base: ClusterMetadata, group: String = "workers", offset: Long = 1L): (MetadataDelta, ClusterMetadata) =
     val id = CoordinatorShard.group(group)
     val payload = IncrementalGroupFixture.offsetShard(base.coordinator.groupState, group, offset)
-    val delta = MetadataDelta(base.version, base.coordinator.version,
+    val delta = MetadataDelta(base.version, base.coordinator.version, base.fingerprint,
       CoordinatorDelta(base.controllerTerm, Vector(CoordinatorShardUpdate(id, base.coordinator.shardVersion(id), payload))))
     delta -> delta.applyTo(base).toOption.get
 
@@ -42,4 +42,20 @@ final class MetadataDeltaSuite extends FunSuite:
     assert(MetadataDelta.between(base, next.copy(unavailableBrokerIds = Set(2))).isEmpty)
     assert(MetadataDelta.between(base.copy(featureLevels = Map.empty), next).isEmpty)
     assert(MetadataDelta.between(base, base.copy(version = base.version + 1L)).isEmpty)
+  }
+
+  test("same-position divergent histories cannot splice unrelated acknowledged state") {
+    val first = update(base, "original", 1L)._2
+    val names = Iterator.from(0).map(i => s"different-$i").filter(id => CoordinatorShard.group(id) != CoordinatorShard.group("original")).take(2).toVector
+    val left = update(first, names.head, 10L)._2
+    val right = update(first, names.last, 20L)._2
+    assertEquals(left.version, right.version)
+    assertEquals(left.coordinator.version, right.coordinator.version)
+    val (delta, _) = update(left, "original", 2L)
+    assert(delta.applyTo(right).isLeft, "version numbers alone are not an exact base identity")
+    val (acknowledged, correct) = update(first, "original", 2L)
+    val conflicting = update(first, "original", 3L)._2
+    assertEquals(correct.coordinator.shardVersions, conflicting.coordinator.shardVersions)
+    assert(CoordinatorShardState.includes(correct.coordinator, acknowledged.change))
+    assert(!CoordinatorShardState.includes(conflicting.coordinator, acknowledged.change))
   }

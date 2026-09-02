@@ -223,13 +223,12 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           response.ensureFullyRead()
           // The quorum replication usually installed this write before its coordinator reply arrived.
           // Refresh after rejection or when this owner missed replication; never infer success from local state alone.
-          val alreadyReplicated = accepted && synchronized {
-            current.controllerTerm == delta.controllerTerm && delta.updates.forall { update =>
-              current.coordinator.shardVersion(update.id) > update.expectedVersion
-            }
+          def includesAcknowledgedWrite: Boolean = synchronized {
+            current.controllerTerm == delta.controllerTerm && CoordinatorShardState.includes(current.coordinator, delta)
           }
+          val alreadyReplicated = accepted && includesAcknowledgedWrite
           val refreshed = alreadyReplicated || synchronizeFrom(controller)
-          accepted && refreshed
+          accepted && refreshed && includesAcknowledgedWrite
         catch case _: Throwable => false
       case None => false
 

@@ -333,7 +333,7 @@ object RollingUpgradeQualification:
     ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG -> classOf[ByteArraySerializer].getName,
     ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG -> classOf[ByteArraySerializer].getName,
     ProducerConfig.ACKS_CONFIG -> "all",
-    ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG -> "true",
+    ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG -> "false",
     ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG -> "60000",
     ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG -> "5000",
     "enable.metrics.push" -> "false"
