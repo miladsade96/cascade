@@ -7,6 +7,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.nio.file.{Files, Path}
 import java.util.zip.CRC32C
+import scala.util.control.NonFatal
 
 /** Forced atomic journal of full checkpoints and exact-base coordinator deltas. */
 final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) extends AutoCloseable:
@@ -15,7 +16,8 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   Option(path.getParent).foreach(directory => Files.createDirectories(directory): Unit)
   Option(path.getParent).foreach(AtomicFileLifecycle.recoverReplacements)
   private var channel = openChannel()
-  private var closed = false
+  @volatile private var closed = false
+  @volatile private var failure: Throwable = null
   private var appendPosition = 0L
   private var checkpointBytes = 0L
   private var checkpointObjectBytes = 0L
@@ -35,23 +37,30 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
         throw error
 
   def metadata: ClusterMetadata = synchronized(current)
+  def isHealthy: Boolean = !closed && failure == null
 
   def commit(next: ClusterMetadata): Unit = synchronized {
     ensureOpen()
-    if next.version > current.version then
-      val prepared = Option.when(ShardMetadataRecord.enabled(next))(ShardMetadataRecord.prepare(current, next, objects))
-      val payload = prepared.map(_.bytes).getOrElse(
-        MetadataDelta.between(current, next).map(MetadataDeltaCodec.encode).getOrElse(MetadataCodec.encode(next)))
-      val frame = encodeFrame(payload)
-      writeFully(ByteBuffer.wrap(frame), appendPosition)
-      channel.force(false)
-      appendPosition += frame.length
-      statistics =
-        if prepared.exists(_.isDelta) || MetadataDeltaCodec.isDelta(payload) then statistics.copy(deltaRecords = statistics.deltaRecords + 1L, deltaBytes = statistics.deltaBytes + frame.length)
-        else statistics.copy(fullRecords = statistics.fullRecords + 1L, fullBytes = statistics.fullBytes + frame.length)
-      current = next
-      val objectReplayBytes = shardObjects.map(_.snapshot.liveBytes - checkpointObjectBytes).getOrElse(0L)
-      if appendPosition - checkpointBytes + math.max(0L, objectReplayBytes) >= compactionBytes then compactCurrent()
+    try
+      if next.version > current.version then
+        val prepared = Option.when(ShardMetadataRecord.enabled(next))(ShardMetadataRecord.prepare(current, next, objects))
+        val payload = prepared.map(_.bytes).getOrElse(
+          MetadataDelta.between(current, next).map(MetadataDeltaCodec.encode).getOrElse(MetadataCodec.encode(next)))
+        val frame = encodeFrame(payload)
+        writeFully(ByteBuffer.wrap(frame), appendPosition)
+        channel.force(false)
+        appendPosition += frame.length
+        statistics =
+          if prepared.exists(_.isDelta) || MetadataDeltaCodec.isDelta(payload) then statistics.copy(deltaRecords = statistics.deltaRecords + 1L, deltaBytes = statistics.deltaBytes + frame.length)
+          else statistics.copy(fullRecords = statistics.fullRecords + 1L, fullBytes = statistics.fullBytes + frame.length)
+        current = next
+        val objectReplayBytes = shardObjects.map(_.snapshot.liveBytes - checkpointObjectBytes).getOrElse(0L)
+        if appendPosition - checkpointBytes + math.max(0L, objectReplayBytes) >= compactionBytes then compactCurrent()
+    catch
+      case NonFatal(error) =>
+        // Publication may already be durable. Never let a retry reuse its position with different state.
+        failure = error
+        throw error
   }
 
   def journalSize: Long = synchronized(channel.size())
@@ -111,6 +120,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
 
   private def ensureOpen(): Unit =
     if closed then throw IllegalStateException("metadata store is closed")
+    if failure != null then throw IllegalStateException("metadata store failed; restart and recover before writing", failure)
 
   private def writeFully(buffer: ByteBuffer, start: Long): Unit =
     var position = start

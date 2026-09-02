@@ -209,7 +209,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def isActiveController: Boolean =
     !enabled || synchronized {
-      role == ControllerRole.Leader && electedControllerId == config.nodeId && controllerReady && hasQuorumLeaseLocked()
+      metadataStore.forall(_.isHealthy) && role == ControllerRole.Leader && electedControllerId == config.nodeId && controllerReady && hasQuorumLeaseLocked()
     }
 
   def commitCoordinatorDelta(delta: CoordinatorDelta): Boolean =
@@ -235,13 +235,15 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def isBrokerFenced: Boolean =
     enabled && synchronized {
-      val now = System.nanoTime()
-      role match
-        case ControllerRole.Leader =>
-          !controllerReady || current.controllerTerm != currentTerm || leaseExpired(lastQuorumContactNanos, now)
-        case _ =>
-          !controllerReady || electedControllerId < 0 || current.controllerTerm != currentTerm ||
-            leaseExpired(lastControllerContactNanos, now)
+      if metadataStore.exists(!_.isHealthy) then true
+      else
+        val now = System.nanoTime()
+        role match
+          case ControllerRole.Leader =>
+            !controllerReady || current.controllerTerm != currentTerm || leaseExpired(lastQuorumContactNanos, now)
+          case _ =>
+            !controllerReady || electedControllerId < 0 || current.controllerTerm != currentTerm ||
+              leaseExpired(lastControllerContactNanos, now)
     }
 
   def topicNames: Vector[String] = if enabled then current.topics.map(_.name).sorted else registry.topicNames

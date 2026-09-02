@@ -18,7 +18,7 @@ final class ShardMetadataRecordSuite extends FunSuite:
       assertEquals(delta.references.size, 1)
       assert(delta.bytes.length < 160)
       assertEquals(ShardMetadataRecord.replay(delta.bytes, active, objects).metadata, next)
-      intercept[ProtocolException](ShardMetadataRecord.replay(delta.bytes, next, objects))
+      intercept[ProtocolException](ShardMetadataRecord.replay(delta.bytes, next, objects)): Unit
     }
   }
 
@@ -42,6 +42,6 @@ final class ShardMetadataRecordSuite extends FunSuite:
       intercept[ProtocolException](ShardMetadataRecord.replay(record :+ 0.toByte, active, objects))
       val unknown = record.clone()
       unknown(2) = 2
-      intercept[ProtocolException](ShardMetadataRecord.replay(unknown, active, objects))
+      intercept[ProtocolException](ShardMetadataRecord.replay(unknown, active, objects)): Unit
     }
   }
