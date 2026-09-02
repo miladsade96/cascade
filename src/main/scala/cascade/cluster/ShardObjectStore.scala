@@ -18,7 +18,7 @@ final class ShardObjectStore(val directory: Path):
   private val reclaimedObjects = AtomicLong()
   require(!Files.isSymbolicLink(directory), "shard object directory must not be a symbolic link")
   Files.createDirectories(directory)
-  ShardObjectStore.forceDirectory(directory.getParent)
+  ShardObjectStore.forceDirectory(directory.getParent): Unit
   private val liveBytes = AtomicLong(objectPaths().map(Files.size).sum)
 
   def snapshot: ShardObjectSnapshot = ShardObjectSnapshot(writtenBytes.get(), writtenObjects.get(),
@@ -44,7 +44,7 @@ final class ShardObjectStore(val directory: Path):
           finally channel.close()
           AtomicFileLifecycle.replace(temporary, target)
           // Publish the directory entry before a journal marker may reference it.
-          ShardObjectStore.forceDirectory(directory)
+          ShardObjectStore.forceDirectory(directory): Unit
           writtenBytes.addAndGet(bytes.length.toLong): Unit
           writtenObjects.incrementAndGet(): Unit
           liveBytes.addAndGet(bytes.length.toLong): Unit
@@ -83,7 +83,7 @@ final class ShardObjectStore(val directory: Path):
     try paths.iterator().asScala.filter(path => path.getFileName.toString.matches("prepare-[0-9]+\\.pending"))
       .filter(path => Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)).foreach(path => Files.deleteIfExists(path): Unit)
     finally paths.close()
-    ShardObjectStore.forceDirectory(directory)
+    ShardObjectStore.forceDirectory(directory): Unit
 
   private def objectPaths(): Vector[Path] =
     val paths = Files.list(directory)
@@ -99,11 +99,13 @@ object ShardObjectStore:
   def pathFor(journal: Path): Path = journal.resolveSibling(journal.getFileName.toString + ".shards")
 
   /** Windows/JDK cannot open directories for fsync; physical durability remains a hardware gate. */
-  private[cluster] def forceDirectory(path: Path): Unit =
+  private[cluster] def forceDirectory(path: Path): Boolean =
     if path != null then
       try
         val channel = FileChannel.open(path, StandardOpenOption.READ)
         try channel.force(true)
         finally channel.close()
+        true
       catch
-        case _: AccessDeniedException if System.getProperty("os.name").startsWith("Windows") => ()
+        case _: AccessDeniedException if System.getProperty("os.name").startsWith("Windows") => false
+    else false

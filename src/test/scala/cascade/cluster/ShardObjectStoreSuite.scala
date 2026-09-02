@@ -48,7 +48,7 @@ final class ShardObjectStoreSuite extends FunSuite:
       intercept[ProtocolException](store.put(1, Array[Byte](1, 2, 3)))
       Files.delete(path)
       intercept[ProtocolException](store.read(ref))
-      intercept[ProtocolException](store.read(ref.copy(shard = 2)))
+      intercept[ProtocolException](store.read(ref.copy(shard = 2))): Unit
     }
   }
 

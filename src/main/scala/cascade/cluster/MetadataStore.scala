@@ -148,9 +148,13 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
     channel.close()
     AtomicFileLifecycle.replace(temporary, path)
     channel = openChannel()
+    val checkpointEntryForced = ShardObjectStore.forceDirectory(path.toAbsolutePath.getParent)
     appendPosition = frame.length
     checkpointBytes = frame.length
     statistics = statistics.copy(checkpointBytes = statistics.checkpointBytes + frame.length)
+    // Without a durable rename, old journal frames might return after host power loss.
+    // Retain their objects on filesystems where directory forcing is unavailable.
+    if checkpointEntryForced then prepared.foreach(value => objects.retain(value.references))
     checkpointObjectBytes = shardObjects.map(_.snapshot.liveBytes).getOrElse(0L)
 
   private def encodeFrame(payload: Array[Byte]): Array[Byte] =
