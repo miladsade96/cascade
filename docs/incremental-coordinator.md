@@ -16,7 +16,7 @@ Physical power loss, independent shard consensus, fine-grained service locks, mu
 
 ## Encoding and recovery
 
-`incremental-coordinator` level 1 raises the complete-image compatibility floor to format 10. It requires `coordinator-deltas` and unanimous voter support. The journal continues using length/payload/CRC32C frames; a payload beginning with signed short `-10` contains the exact metadata/coordinator base versions and the existing atomic shard delta. Older binaries reject the format instead of interpreting incremental records as full images.
+`incremental-coordinator` level 1 raises the complete-image compatibility floor to format 10. It requires `coordinator-deltas` and unanimous voter support. The journal continues using length/payload/CRC32C frames; a payload beginning with signed short `-10` contains the exact metadata/coordinator base versions, the 32-byte SHA-256 base fingerprint, and the existing atomic shard delta. Older binaries reject the format instead of interpreting incremental records as full images.
 
 I use deltas only for consecutive coordinator-only changes in the same controller term. Feature activation, topology changes, elections, and non-consecutive recovery retain full snapshots. A follower acknowledges only after forcing its journal frame. Repeated delivery of its last delta is idempotent; a missing base returns an explicit rejection and the controller retries with a complete snapshot under the same quorum rules. A lost connection is not treated as a base rejection or a successful acknowledgement.
 
@@ -31,6 +31,8 @@ I expose node-only metrics for forced full/delta record counts and bytes, checkp
 ```
 
 The report aggregates each broker's counters before that broker stops. Its byte totals cover startup, writes, verification, and controller failover, but not the final full-cluster restart. Its latency/throughput still includes per-group client creation and closure. Verifier client churn can exhaust a small host port range, so this remains a shared-host correctness campaign. A byte reduction is not evidence of independent consensus or production throughput.
+
+I archive the [qualification results](performance/2026-09-02-incremental-coordinator.md), including full-suite, rolling-upgrade, cross-language/container, and load evidence. Full-image encoding still occurs for base fingerprinting and state comparison; this milestone reduces steady-state persistence/transfer bytes, not all O(total coordinator state) CPU work.
 
 ## Upgrade gate
 

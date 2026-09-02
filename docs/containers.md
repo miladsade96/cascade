@@ -21,6 +21,8 @@ The default operations listener stays on `127.0.0.1` inside the container. Docke
 
 Version 1.2.0 is currently a local `linux/amd64` build, tagged as both `miladsade96/cascade:1.2.0` and `cascade:1.2.0`. I have not pushed it to Docker Hub. On this machine I skip the pull below; on another machine I first build it with `docker build --tag miladsade96/cascade:1.2.0 .` or wait for publication. The Kubernetes examples also reference 1.2.0, so those nodes need the image loaded locally or available in their registry before deployment. This build does not qualify the 1.1.0-to-1.2.0 rolling upgrade boundary.
 
+The tested image was rebuilt from `fbe4e98a7b9c55680a365453041ee084c0a6efbf`: local image/index ID `sha256:0d316f03b5b8730213e5bfd72fb314b06859fbef8c8d2f6fb330e6a5ab970921`, Docker-reported size **39,164,217 bytes**. Java 4.3.1, KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0 each verified 25 records. Java verified the same data after restart. I ran as UID/GID 65532 with a read-only root, all capabilities dropped, `no-new-privileges`, a writable data volume, and a 2 GiB memory limit. I removed the disposable test container and volume after qualification; both image tags remain local. See the [qualification report](performance/2026-09-02-incremental-coordinator.md) for build pins and limitations.
+
 ```bash
 # After the 1.2.0 tag has been published:
 docker pull miladsade96/cascade:1.2.0

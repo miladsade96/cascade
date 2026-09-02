@@ -1,0 +1,28 @@
+{
+  "status": "passed",
+  "started_at": "2026-09-02T15:53:13.808631200Z",
+  "elapsed_seconds": 8.933,
+  "old_version": "1.1.0",
+  "old_revision": "8c8ff4cc63955d23eb566683bc1ac473e767bae3",
+  "old_artifact_sha256": "23b1e6f427ee46bd42fe43325fd6d5ed2bcda4a2b7e8f1e9e0acd11abe5c68e8",
+  "current_version": "1.2.0",
+  "current_revision": "fbe4e98a7b9c55680a365453041ee084c0a6efbf",
+  "current_artifact_sha256": "866955e643cdafbc1be321eb091d01fccdb65ee6569ec22c3570404ebdad8fb6",
+  "records": 40,
+  "rollback_succeeded": true,
+  "features_activated": true,
+  "downgrade_rejected": true,
+  "phases": [
+    "1.1.0-baseline",
+    "upgrade-node-3",
+    "rollback-node-3-before-activation",
+    "upgrade-node-3-again",
+    "upgrade-node-2",
+    "upgrade-node-1-and-activate",
+    "reject-downgrade-after-activation",
+    "traffic-after-rejected-downgrade",
+    "recover-node-3-on-1.2.0",
+    "exact-consume-after-rolling-campaign"
+  ],
+  "error": null
+}
