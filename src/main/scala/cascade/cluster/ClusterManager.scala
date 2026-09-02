@@ -678,7 +678,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     val accepted = synchronized {
       if !acceptLeaderLocked(term, leaderId) || metadata.controllerTerm != term then false
       else if metadata.version > current.version then
-        commitLocal(metadata, installCoordinatorSynchronously = false)
+        commitLocal(metadata)
         controllerReady = true
         true
       else
@@ -1122,20 +1122,17 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     )
 
 
-  private def commitLocal(metadata: ClusterMetadata, installCoordinatorSynchronously: Boolean = true): Unit = synchronized {
+  private def commitLocal(metadata: ClusterMetadata): Unit = synchronized {
     metadataStore.foreach(_.commit(metadata))
     current = metadata
     applyMetadata(metadata)
     Option(coordinatorInstaller).foreach { installer =>
-      if installCoordinatorSynchronously then
-        installer(metadata.coordinator)
-        markCoordinatorInstalled(metadata.coordinator.version)
-      else
-        peerExecutor.submit(new Runnable:
-          override def run(): Unit =
-            installer(metadata.coordinator)
-            markCoordinatorInstalled(metadata.coordinator.version)
-        ): Unit
+      // Never acquire the service lock while holding the cluster lock: a service may be waiting on a peer RPC.
+      peerExecutor.submit(new Runnable:
+        override def run(): Unit =
+          installer(metadata.coordinator)
+          markCoordinatorInstalled(metadata.coordinator.version)
+      ): Unit
     }
   }
 
