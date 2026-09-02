@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaCodec, CoordinatorShardState}
+import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorShardState}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -91,7 +91,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var electionDeadlineNanos = Long.MaxValue
   @volatile private var nextHeartbeatNanos = 0L
   @volatile private var replicationManager: ReplicationManager | Null = null
-  @volatile private var coordinatorInstaller: (CoordinatorMetadata => Unit) | Null = null
+  @volatile private var coordinatorInstaller: CoordinatorImageInstaller | Null = null
   @volatile private var installedCoordinatorVersion = -1L
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
@@ -113,7 +113,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def attachCoordinatorInstaller(installer: CoordinatorMetadata => Unit): Unit =
     val initial = synchronized {
       if coordinatorInstaller != null then throw IllegalStateException("coordinator installer is already attached")
-      coordinatorInstaller = installer
+      coordinatorInstaller = CoordinatorImageInstaller { metadata =>
+        installer(metadata)
+        markCoordinatorInstalled(metadata.version)
+      }
       current.coordinator
     }
     installer(initial)
@@ -500,6 +503,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
       }
       peerExecutor.shutdownNow(): Unit
+      Option(coordinatorInstaller).foreach(_.close())
       peerExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
       controllerStore.foreach(_.close())
       metadataStore.foreach(_.close())
@@ -1126,14 +1130,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     metadataStore.foreach(_.commit(metadata))
     current = metadata
     applyMetadata(metadata)
-    Option(coordinatorInstaller).foreach { installer =>
-      // Never acquire the service lock while holding the cluster lock: a service may be waiting on a peer RPC.
-      peerExecutor.submit(new Runnable:
-        override def run(): Unit =
-          installer(metadata.coordinator)
-          markCoordinatorInstalled(metadata.coordinator.version)
-      ): Unit
-    }
+    // The bounded installer never acquires the service lock on this publication thread.
+    Option(coordinatorInstaller).foreach(_.offer(metadata.coordinator))
   }
 
   private def markCoordinatorInstalled(version: Long): Unit = synchronized {
