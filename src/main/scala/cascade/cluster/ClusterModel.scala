@@ -169,6 +169,7 @@ object PeerCapabilities:
     MetadataCodec.MinimumReadableFormat,
     MetadataCodec.CurrentFormat,
     Map(
+      ClusterFeature.ShardObjectStorage -> 1,
       ClusterFeature.IncrementalCoordinator -> 1,
       ClusterFeature.CoordinatorDeltas -> 1,
       ClusterFeature.CoordinatorSharding -> 1,
@@ -181,6 +182,7 @@ object PeerCapabilities:
   )
 
 object ClusterFeature:
+  val ShardObjectStorage = "shard-object-storage"
   val IncrementalCoordinator = "incremental-coordinator"
   val CoordinatorDeltas = "coordinator-deltas"
   val CoordinatorSharding = "coordinator-sharding"
