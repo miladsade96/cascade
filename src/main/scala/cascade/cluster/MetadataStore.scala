@@ -8,7 +8,7 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.{Files, Path}
 import java.util.zip.CRC32C
 
-/** Forced, checksum-protected journal of committed full metadata images. */
+/** Forced atomic journal of full checkpoints and exact-base coordinator deltas. */
 final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) extends AutoCloseable:
   require(compactionBytes >= 1024L, "metadata compaction threshold must be at least 1 KiB")
   private val MaximumImageBytes = 64 * 1024 * 1024
@@ -17,14 +17,20 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   private var channel = openChannel()
   private var closed = false
   private var appendPosition = 0L
-  private var current = recover()
+  private var current =
+    try recover()
+    catch
+      case error: Throwable =>
+        channel.close()
+        throw error
 
   def metadata: ClusterMetadata = synchronized(current)
 
   def commit(next: ClusterMetadata): Unit = synchronized {
     ensureOpen()
     if next.version > current.version then
-      val frame = encodeFrame(next)
+      val payload = MetadataDelta.between(current, next).map(MetadataDeltaCodec.encode).getOrElse(MetadataCodec.encode(next))
+      val frame = encodeFrame(payload)
       writeFully(ByteBuffer.wrap(frame), appendPosition)
       channel.force(false)
       appendPosition += frame.length
@@ -63,7 +69,11 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
           checksum.update(payload, 0, payload.length)
           if checksum.getValue.toInt != expected then scanning = false
           else
-            val decoded = MetadataCodec.decode(payload)
+            val decoded =
+              if MetadataDeltaCodec.isDelta(payload) then
+                MetadataDeltaCodec.decode(payload).applyTo(latest)
+                  .fold(message => throw ProtocolException(s"invalid metadata delta at $position: $message"), identity)
+              else MetadataCodec.decode(payload)
             if decoded.version <= latest.version then
               throw ProtocolException(s"non-monotonic metadata version ${decoded.version} at $position")
             latest = decoded
@@ -100,7 +110,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
       position += read
 
   private def compactCurrent(): Unit =
-    val frame = encodeFrame(current)
+    val frame = encodeFrame(MetadataCodec.encode(current))
     val temporary = path.resolveSibling(path.getFileName.toString + ".cleaned")
     Files.deleteIfExists(temporary): Unit
     val output = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
@@ -114,8 +124,9 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
     channel = openChannel()
     appendPosition = frame.length
 
-  private def encodeFrame(metadata: ClusterMetadata): Array[Byte] =
-    val payload = MetadataCodec.encode(metadata)
+  private def encodeFrame(payload: Array[Byte]): Array[Byte] =
+    if payload.length <= 0 || payload.length > MaximumImageBytes then
+      throw ProtocolException("metadata journal frame exceeds the supported size")
     val checksum = CRC32C()
     checksum.update(payload, 0, payload.length)
     ByteWriter(payload.length + 8)
