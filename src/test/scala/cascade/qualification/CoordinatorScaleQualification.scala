@@ -78,7 +78,7 @@ object CoordinatorScaleQualification:
       properties.setProperty("default.api.timeout.ms", "30000")
       properties.setProperty("request.timeout.ms", "5000")
       properties.setProperty("enable.metrics.push", "false")
-      if persistent then properties.setProperty("connections.max.idle.ms", "3600000")
+      if persistent then properties.setProperty("connections.max.idle.ms", "3600000"): Unit
       val client = KafkaConsumer[Array[Byte], Array[Byte]](properties)
       clientsCreated.incrementAndGet(): Unit
       if persistent then clients(index) = client
@@ -158,8 +158,11 @@ object CoordinatorScaleQualification:
     finally
       executor.shutdownNow()
       executor.awaitTermination(10L, TimeUnit.SECONDS)
-      clients.iterator.filter(_ != null).foreach(_.close(java.time.Duration.ofSeconds(2L)))
-      cluster.close()
+      try clients.iterator.filter(_ != null).foreach { client =>
+        try client.close()
+        catch case scala.util.control.NonFatal(error) => System.err.println(s"benchmark client cleanup failed: ${error.getMessage}")
+      }
+      finally cluster.close()
 
   private def currentRevision(): String =
     def git(arguments: String*): String =

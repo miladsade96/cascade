@@ -9,7 +9,8 @@ import java.util.concurrent.atomic.AtomicLong
 import scala.jdk.CollectionConverters.*
 
 /** Immutable payload preparation. The caller serializes publication and reclamation. */
-final class ShardObjectStore(val directory: Path):
+final class ShardObjectStore(objectDirectory: Path):
+  val directory: Path = objectDirectory.toAbsolutePath.normalize()
   private val locks = Vector.fill(ShardObjectRef.DeliverySnapshot + 1)(Object())
   private val writtenBytes = AtomicLong()
   private val writtenObjects = AtomicLong()
@@ -26,7 +27,8 @@ final class ShardObjectStore(val directory: Path):
 
   def put(shard: Int, bytes: Array[Byte]): ShardObjectRef =
     require(bytes.length <= ShardObjectRef.MaximumBytes, "shard object exceeds size limit")
-    val ref = ShardObjectRef.identify(shard, bytes)
+    val captured = bytes.clone()
+    val ref = ShardObjectRef.identify(shard, captured)
     locks(shard).synchronized {
       val target = directory.resolve(ref.fileName)
       if Files.exists(target, LinkOption.NOFOLLOW_LINKS) then
@@ -37,7 +39,7 @@ final class ShardObjectStore(val directory: Path):
         try
           val channel = FileChannel.open(temporary, StandardOpenOption.WRITE)
           try
-            val buffer = ByteBuffer.wrap(bytes)
+            val buffer = ByteBuffer.wrap(captured)
             while buffer.hasRemaining do
               if channel.write(buffer) <= 0 then throw ProtocolException("shard object made no write progress")
             channel.force(true)

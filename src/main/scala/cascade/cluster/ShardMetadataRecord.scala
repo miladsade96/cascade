@@ -22,6 +22,7 @@ object ShardMetadataRecord:
     delta match
       case None => checkpoint(next, objects)
       case Some(value) =>
+        snapshotHeader(next) // Preserve the bounded full-image recovery/peer fallback contract.
         val references = value.change.updates.map(update => objects.put(update.id, update.payload.toArray))
         val writer = ByteWriter().writeShort(Format).writeByte(1)
           .writeLong(value.baseVersion).writeLong(value.baseCoordinatorVersion)
@@ -34,13 +35,20 @@ object ShardMetadataRecord:
 
   def checkpoint(metadata: ClusterMetadata, objects: ShardObjectStore): PreparedShardRecord =
     require(enabled(metadata), "shard storage feature is not active")
+    val header = snapshotHeader(metadata)
     val group = objects.put(ShardObjectRef.GroupSnapshot, metadata.coordinator.groupState.toArray)
     val delivery = objects.put(ShardObjectRef.DeliverySnapshot, metadata.coordinator.deliveryState.toArray)
-    val skeleton = metadata.copy(coordinator = metadata.coordinator.copy(groupState = Vector.empty, deliveryState = Vector.empty))
-    val writer = ByteWriter().writeShort(Format).writeByte(0).writeByteArray(MetadataCodec.encode(skeleton))
+    val writer = ByteWriter().writeShort(Format).writeByte(0).writeByteArray(header)
     ShardObjectRef.write(writer, group)
     ShardObjectRef.write(writer, delivery)
     PreparedShardRecord(writer.result(), Set(group, delivery), isDelta = false)
+
+  private def snapshotHeader(metadata: ClusterMetadata): Array[Byte] =
+    val skeleton = metadata.copy(coordinator = metadata.coordinator.copy(groupState = Vector.empty, deliveryState = Vector.empty))
+    val header = MetadataCodec.encode(skeleton)
+    if header.length.toLong + metadata.coordinator.groupState.size + metadata.coordinator.deliveryState.size > ShardObjectRef.MaximumBytes then
+      throw ProtocolException("coordinator image exceeds the bounded recovery limit")
+    header
 
   def replay(bytes: Array[Byte], base: ClusterMetadata, objects: ShardObjectStore): ReplayedShardRecord =
     if bytes.length > ShardObjectRef.MaximumBytes then throw ProtocolException("shard marker exceeds size limit")
