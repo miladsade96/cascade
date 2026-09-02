@@ -1,6 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
+import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaCodec, CoordinatorShardState}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -198,6 +199,21 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       role == ControllerRole.Leader && electedControllerId == config.nodeId && controllerReady && hasQuorumLeaseLocked()
     }
 
+  def commitCoordinatorDelta(delta: CoordinatorDelta): Boolean =
+    if !supportsFeature(ClusterFeature.CoordinatorDeltas) then false
+    else controllerNode match
+      case Some(controller) if controller.id == config.nodeId =>
+        metadataMutationLock.synchronized(commitCoordinatorDeltaOnController(delta) == Errors.None)
+      case Some(controller) =>
+        try
+          val response = peerClient.call(controller, InternalApi.CoordinatorDeltaCommit, CoordinatorDeltaCodec.encode(delta), config.peerTimeoutMillis)
+          val accepted = response.readShort() == Errors.None
+          response.ensureFullyRead()
+          val synchronized = synchronizeFrom(controller)
+          accepted && synchronized
+        catch case _: Throwable => false
+      case None => false
+
   def isBrokerFenced: Boolean =
     enabled && synchronized {
       val now = System.nanoTime()
@@ -343,6 +359,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val error = metadataMutationLock.synchronized {
         commitCoordinatorOnController(expectedVersion, groupState, deliveryState)
       }
+      ByteWriter().writeShort(error).result()
+    case InternalApi.CoordinatorDeltaCommit =>
+      val delta = CoordinatorDeltaCodec.decode(cursor)
+      val error = metadataMutationLock.synchronized(commitCoordinatorDeltaOnController(delta))
       ByteWriter().writeShort(error).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
@@ -1129,6 +1149,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       deliveryState: Vector[Byte]
   ): Short =
     if !isActiveController then Errors.NotController
+    else if supportsFeature(ClusterFeature.CoordinatorDeltas) then Errors.CoordinatorLoadInProgress
     else if current.coordinator.version != expectedVersion then Errors.CoordinatorLoadInProgress
     else
       val nextCoordinator = CoordinatorMetadata(
@@ -1143,6 +1164,15 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         coordinator = nextCoordinator
       )
       if propose(next) then Errors.None else Errors.RequestTimedOut
+
+  private def commitCoordinatorDeltaOnController(delta: CoordinatorDelta): Short =
+    if !isActiveController then Errors.NotController
+    else if !supportsFeature(ClusterFeature.CoordinatorDeltas) then Errors.UnsupportedVersion
+    else CoordinatorShardState.merge(current.coordinator, delta, currentTerm) match
+      case Left(_) => Errors.CoordinatorLoadInProgress
+      case Right(coordinator) =>
+        val next = current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, coordinator = coordinator)
+        if propose(next) then Errors.None else Errors.RequestTimedOut
 
   private def forwardCoordinatorCommit(
       controller: ClusterNode,
@@ -1163,7 +1193,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       )
       val accepted = response.readShort() == Errors.None
       response.ensureFullyRead()
-      accepted && synchronizeFrom(controller)
+      val synchronized = synchronizeFrom(controller)
+      accepted && synchronized
     catch case _: Throwable => false
 
   private def applyMetadata(metadata: ClusterMetadata): Unit =

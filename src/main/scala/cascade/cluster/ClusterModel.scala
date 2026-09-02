@@ -239,5 +239,6 @@ object InternalApi:
   val ReplicaTruncate: Short = -117
   val AlterTopicConfig: Short = -118
   val PeerFeatures: Short = -119
+  val CoordinatorDeltaCommit: Short = -120
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= PeerFeatures
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorDeltaCommit
