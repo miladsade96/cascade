@@ -1,6 +1,7 @@
 package cascade.group
 
 import cascade.coordinator.*
+import cascade.delivery.*
 import cascade.fault.FaultCluster
 import cascade.protocol.Errors
 import munit.FunSuite
@@ -36,5 +37,42 @@ final class CoordinatorDeltaIntegrationSuite extends FunSuite:
         CoordinatorShard.group(b), recovered.shardVersion(CoordinatorShard.group(b)), payload(b, 30L)
       )))
       assertEquals(CoordinatorProbe.commit(successor, staleTerm), Errors.CoordinatorLoadInProgress)
+    finally cluster.close()
+  }
+
+  test("transaction outcome and consumer offsets either both commit or neither commits") {
+    val cluster = FaultCluster(3)
+    try
+      cluster.startAll()
+      val controller = CoordinatorProbe.controller(cluster.nodes)
+      val (term, _, initial) = CoordinatorProbe.snapshot(controller)
+      val group = "transaction-workers"
+      val registration = ProducerRegistration(1L, 0, Some("orders"), 10000)
+      val pending = PendingOffset(group, "events", 0, 20L, -1, None)
+      val active = ActiveTransaction("orders", 1L, 0, 10000, System.currentTimeMillis(), Vector.empty, Vector.empty, Vector(group), Vector(pending))
+      val delivery = DeliveryImage(1L, 2L, Vector(registration), Vector(active), Vector.empty)
+      val before = CoordinatorShardState.payloads(initial.coordinator.groupState, initial.coordinator.deliveryState)
+      val start = CoordinatorShardState.payloads(Vector.empty, DeliveryCodec.encode(delivery).toVector)
+      assertEquals(CoordinatorProbe.commit(controller, CoordinatorShardState.changes(initial.coordinator, before, start, term).get), Errors.None)
+      val base = CoordinatorProbe.snapshot(controller)._3.coordinator
+      val groupShard = CoordinatorShard.group(group)
+      val conflicting = CoordinatorDelta(term, Vector(CoordinatorShardUpdate(groupShard, base.shardVersion(groupShard), payload(group, 15L))))
+      assertEquals(CoordinatorProbe.commit(controller, conflicting), Errors.None)
+      val completed = CompletedTransaction("orders", 1L, 0, committed = true, offsetsApplied = true, Vector.empty, Vector(pending))
+      val ended = delivery.copy(activeTransactions = Vector.empty, completedTransactions = Vector(completed))
+      val desiredGroups = GroupShardCodec.split(Vector.empty).updated(groupShard, payload(group, 20L))
+      val desired = desiredGroups ++ DeliveryShardCodec.split(DeliveryCodec.encode(ended).toVector)
+      val stale = CoordinatorShardState.changes(base, CoordinatorShardState.payloads(base.groupState, base.deliveryState), desired, term).get
+      assertEquals(CoordinatorProbe.commit(controller, stale), Errors.CoordinatorLoadInProgress)
+      val rejected = CoordinatorProbe.snapshot(controller)._3.coordinator
+      assertEquals(GroupCodec.decode(rejected.groupState.toArray).offsets.head.value.offset, 15L)
+      assertEquals(DeliveryCodec.decode(rejected.deliveryState.toArray).activeTransactions, Vector(active))
+      assertEquals(DeliveryCodec.decode(rejected.deliveryState.toArray).completedTransactions, Vector.empty)
+      val rebased = CoordinatorShardState.changes(rejected, CoordinatorShardState.payloads(rejected.groupState, rejected.deliveryState), desired, term).get
+      assertEquals(CoordinatorProbe.commit(controller, rebased), Errors.None)
+      val accepted = CoordinatorProbe.snapshot(controller)._3.coordinator
+      assertEquals(GroupCodec.decode(accepted.groupState.toArray).offsets.head.value.offset, 20L)
+      assertEquals(DeliveryCodec.decode(accepted.deliveryState.toArray).activeTransactions, Vector.empty)
+      assertEquals(DeliveryCodec.decode(accepted.deliveryState.toArray).completedTransactions, Vector(completed))
     finally cluster.close()
   }
