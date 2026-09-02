@@ -63,6 +63,29 @@ jobs:
           chmod +x sbt compatibility/run.sh
           compatibility/run.sh
 
+  coordinator-scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+      - name: Qualify concurrent coordinator writes, failover, and restart
+        run: |
+          chmod +x sbt
+          ./sbt "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency 8 --rounds 2 --report artifacts/coordinator-scale.json"
+          jq -e '.status == "passed" and .verified == 1000 and .writes == 3000 and .controller_failover and .restart_recovery and (.owner_ids | length) == 3 and .delta_bytes < .full_image_bytes' artifacts/coordinator-scale.json
+      - name: Archive coordinator qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coordinator-scale-evidence
+          path: artifacts/coordinator-scale.json
+          if-no-files-found: warn
+
   rolling-upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 30
