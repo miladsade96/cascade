@@ -9,7 +9,7 @@ import scala.util.control.NonFatal
 object CoordinatorShardState:
   /** Equal shard versions need content identity: failed quorum attempts can reuse a version. */
   def includes(current: CoordinatorMetadata, delta: CoordinatorDelta): Boolean =
-    lazy val state = payloads(current.groupState, current.deliveryState)
+    lazy val state = current.shardPayloads
     delta.updates.forall { update =>
       val version = current.shardVersion(update.id)
       version > update.expectedVersion &&
@@ -43,7 +43,7 @@ object CoordinatorShardState:
     else if delta.updates.exists(update => current.shardVersion(update.id) != update.expectedVersion) then Left("stale coordinator shard")
     else
       try
-        val before = payloads(current.groupState, current.deliveryState)
+        val before = current.shardPayloads
         val after = delta.updates.foldLeft(before)((state, update) => state.updated(update.id, update.payload))
         val oldAllocation = ByteCursor(before(CoordinatorShard.Allocator).toArray).readLong()
         val newAllocation = ByteCursor(after(CoordinatorShard.Allocator).toArray).readLong()

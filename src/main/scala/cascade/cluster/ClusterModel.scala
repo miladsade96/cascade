@@ -120,6 +120,10 @@ final case class CoordinatorMetadata(
   require(shardVersions.isEmpty || shardVersions.size == CoordinatorShard.Count, "invalid coordinator shard layout")
   require(shardVersions.forall(_ >= 0L), "shard versions must be non-negative")
 
+  /** Immutable image-local cache; copies never share a cache with changed payload bytes. */
+  lazy val shardPayloads: Vector[Vector[Byte]] =
+    cascade.coordinator.CoordinatorShardState.payloads(groupState, deliveryState)
+
   def shardVersion(id: Int): Long =
     require(CoordinatorShard.valid(id), "invalid coordinator shard ID")
     if shardVersions.isEmpty then version else shardVersions(id)

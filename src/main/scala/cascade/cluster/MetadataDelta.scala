@@ -30,8 +30,8 @@ object MetadataDelta:
     if !enabled(base) || next.copy(version = base.version, coordinator = base.coordinator) != base then None
     else
       try
-        val before = CoordinatorShardState.payloads(base.coordinator.groupState, base.coordinator.deliveryState)
-        val after = CoordinatorShardState.payloads(next.coordinator.groupState, next.coordinator.deliveryState)
+        val before = base.coordinator.shardPayloads
+        val after = next.coordinator.shardPayloads
         CoordinatorShardState.changes(base.coordinator, before, after, next.controllerTerm)
           .map(MetadataDelta(base.version, base.coordinator.version, base.fingerprint, _))
           .filter(_.applyTo(base).contains(next))
