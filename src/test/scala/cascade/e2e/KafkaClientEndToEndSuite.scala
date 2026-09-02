@@ -881,7 +881,11 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         brokers.foreach(_.start())
         val admin = Admin.create(adminProperties(bootstrapServers))
         try
-          admin.createTopics(java.util.List.of(new NewTopic("recovering-events", 2, 3.toShort))).all().get()
+          val startupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20L)
+          while brokers.exists(broker => !broker.healthSnapshot.ready) && System.nanoTime() < startupDeadline do
+            Thread.sleep(25L)
+          assert(brokers.forall(_.healthSnapshot.ready), "all replica brokers must be ready before starting the recovery scenario")
+          admin.createTopics(java.util.List.of(new NewTopic("recovering-events", 2, 3.toShort))).all().get(20L, TimeUnit.SECONDS)
           awaitInSyncReplicas(admin, "recovering-events", 1, Set(1, 2, 3))
 
           produceValue(bootstrapServers, "recovering-events", 1, "before-failure", expectedOffset = 0L)
