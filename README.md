@@ -121,7 +121,7 @@ In single-node and clustered modes I support this Kafka delivery-semantics path:
 - Transaction timeouts and automatic abort when a new epoch fences an old owner.
 - Applied checkpoints that recover an interrupted transactional offset commit without replaying old transactions over newer offsets.
 
-In cluster mode I commit producer registration, fencing epochs, active transaction ranges, outcomes, and transactional consumer offsets as one versioned coordinator image. A stale broker can only propose against the coordinator version it installed, so it cannot overwrite newer state. If the quorum rejects a transition, I restore the last acknowledged image and return a retriable coordinator error. My Kafka-client test commits an open transaction and its staged offset after the original coordinator stops, then verifies `read_committed` visibility and successor producer initialization.
+In cluster mode I commit producer registration, fencing epochs, active transaction ranges, outcomes, and transactional consumer offsets as one atomic coordinator image. After every voter activates `coordinator-deltas`, proposals carry only changed virtual shards and compare against the shard versions actually installed locally. Independent shards can advance from the same global starting image; a conflict in any touched shard rejects the whole transaction. Producer-ID allocation stays serialized in its own shard. If the quorum rejects a transition, I restore authoritative state and return a retriable coordinator error. My Kafka-client test commits an open transaction and its staged offset after the original coordinator stops, then verifies `read_committed` visibility and successor producer initialization.
 
 ### Consumer groups
 
@@ -168,14 +168,14 @@ If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic
 - Rollback of uncommitted `acks=all` appends so a transient replica miss cannot poison the next retry's base offset.
 - Real Kafka-client end-to-end verification across partition-leader loss, controller loss, stale-term rejection, metadata creation after election, and broker restart/rejoin.
 - One atomic, versioned coordinator image replicated by the metadata quorum and installed on every synchronized broker.
-- Optimistic coordinator-version fencing for state proposals forwarded by non-controller partition leaders.
+- Optimistic per-shard fencing for delta proposals, with whole-image fencing retained during mixed-version operation.
 - Controller-only group/transaction expiration so a follower timer cannot overwrite live coordinator state.
 - Injectable peer transports with deterministic directional API drops and partitions for repeatable fault qualification.
 - Subprocess force-kill recovery tests that distinguish clean and unclean startup without relying on shutdown hooks.
 - Exact data, transaction, and committed-offset recovery after a forced JVM kill, including conservative truncation of torn data and coordinator journal tails.
 - Majority availability through an active-controller partition, minority coordinator fencing, durable joint-transition resume, joint-controller loss, and rejection of metadata writes unless both joint voter majorities are present.
 
-The configured node list bootstraps the first committed voter set and gives observers discovery endpoints. After that, the committed metadata image is authoritative. Recovery is incremental at Kafka batch boundaries; only its final delta and ISR admission are partition-fenced. Coordinator mutations are acknowledged only after a quorum installs the combined group/offset/producer/transaction image. I route group and transaction keys with rendezvous hashing after every voter has quorum-activated the sharding feature; the full coordinator image is still replicated, so high-cardinality scale qualification remains.
+The configured node list bootstraps the first committed voter set and gives observers discovery endpoints. After that, the committed metadata image is authoritative. Recovery is incremental at Kafka batch boundaries; only its final delta and ISR admission are partition-fenced. Coordinator mutations are acknowledged only after a quorum persists the combined group/offset/producer/transaction image. I route keys with rendezvous hashing, isolate conflicts across 64 group shards, 64 transaction shards, and one allocator shard, and coalesce asynchronous installation to one pending image. The controller still serializes publication and replicates the full image: this is not Kafka-style independent internal-topic consensus. I document that boundary and the repeatable failover benchmark in [coordinator scaling](docs/coordinator-scaling.md).
 
 ### Operations and disaster recovery
 
@@ -538,7 +538,9 @@ The [complete 2026-08-05 report](docs/performance/2026-08-05-heavy-load.md) comp
 
 ## Verification
 
-The current test suite passes **308/308 tests** in five layers:
+On 2026-09-02 I qualified shard-scoped coordinator commits with **3,000 offset writes across 1,000 groups**, eight concurrent Kafka clients, all three coordinator owners, controller failover, and full-cluster restart. Every final offset matched. Proposed delta payloads were **98.2% smaller** than equivalent full images, but the churn-heavy local run measured only **30.455 writes/s** with **4,011.691 ms p99** while approaching the host's dynamic-port limit. I do not present that as a production-capacity pass. The [full report](docs/performance/2026-09-02-coordinator-scale.md) records the workload, constraints, and remaining full-image quorum bottleneck. The same milestone passed the one-million-record regression exactly and reran all ten rolling-upgrade phases with exact 40/40 records.
+
+The current Scala test suite passes **335/335 tests**, covering unit, TCP integration, Kafka-client end-to-end, and fault/recovery layers. The separate external-language matrix remains a CI gate:
 
 - Unit tests for binary codecs, the frozen 1.0.0 API contract, record batches, storage/coordinator recovery, delivery semantics, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA/EC/Ed25519 JWT validation, role mapping, credential and peer policy, TLS reload/rejection, quotas, metrics, health/readiness, capacity evaluation, structured-log rotation, backup integrity, deployment artifacts, and maintenance commands.
 - TCP integration tests for discovery, Produce/Fetch, idempotence, OffsetCommit v5-v7 and OffsetFetch v4-v5, flexible voter/config framing, TLS, PLAIN, both SCRAM mechanisms, OAUTHBEARER, malformed exchanges, peer impersonation rejection, live TLS/identity/credential/key/ACL rotation, auditing, directional quotas, and operational HTTP state.
@@ -552,7 +554,7 @@ The load harness separately checks exact record counts at one million and ten mi
 
 | Priority | Area | Planned work |
 | ---: | --- | --- |
-| 1 | Coordinator scale | High-cardinality churn and failover benchmarks for the sharded coordinator path |
+| 1 | Coordinator capacity | Independent shard persistence/replication, finer-grained service locks, membership/transaction churn at scale, and dedicated-host capacity qualification beyond the local offset campaign |
 | 2 | Qualification | Run and archive the 72-hour multi-tenant soak, physical power/device-loss probe, restore drill, arbitrary packet impairment, and dedicated-host RF=3 benchmark |
 | 3 | Consumer groups | Add administrative group APIs and continue expanding ConsumerGroupHeartbeat beyond v0 |
 | 4 | Storage lifecycle | Snappy/LZ4/Zstd record rewriting and replicated retention coordination |
@@ -565,7 +567,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 
 - Dynamic membership, peer capability exchange, metadata-format negotiation, quorum-committed feature activation, and the pinned 1.0.0-to-1.1.0 rolling/rollback gate are implemented. Automatic broker registration, real OS power-loss testing, and exhaustive failure schedules during every joint phase are not complete.
 - Replica recovery and reassignment transfer bounded record-batch chunks rather than zero-copy segment files; Produce is briefly fenced for the final delta and metadata transition.
-- Coordinator ownership is rendezvous-sharded while state remains one full quorum image. The journals are bounded and offsets expire, but I still need high-cardinality churn/failover evidence before treating it like Kafka's partitioned internal topics.
+- Coordinator ownership is rendezvous-sharded and changed shards have independent conflict versions. Local concurrent offset/failover/restart qualification passes, but publication, replication, storage, and service locking still share one full-image architecture. I still need independent shard persistence and dedicated-host membership/transaction churn evidence before treating it like Kafka's partitioned internal topics.
 - Compaction rewrites individual uncompressed/gzip records, preserves keyless records, applies tombstone grace, recalculates CRC32C, and supports an I/O ceiling. Snappy/LZ4/Zstd, control, and transactional batches remain opaque.
 - Client authentication supports PLAIN, SCRAM-SHA-256/512, and signed OAUTHBEARER JWTs with RSA, EC, and Ed25519 keys plus approved claim-to-role mapping. I still need opaque-token introspection, automatic OIDC discovery, and revocation integration.
 - I split each configured principal rate and burst conservatively across the current quorum, which bounds aggregate traffic without a central hot-path service. I still need long authenticated multi-tenant qualification and reclaiming unused shares without exceeding the cluster limit.
@@ -677,6 +679,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - [External Kafka client compatibility matrix](compatibility/README.md)
 - [Container deployment runbook](docs/containers.md)
 - [Rolling upgrade and downgrade runbook](docs/rolling-upgrades.md)
+- [Coordinator scaling and qualification](docs/coordinator-scaling.md)
 - [TLS key and trust rotation runbook](docs/tls-rotation.md)
 - [OAuth and OIDC authentication runbook](docs/oauth-oidc.md)
 - [SCRAM authentication runbook](docs/scram-authentication.md)
