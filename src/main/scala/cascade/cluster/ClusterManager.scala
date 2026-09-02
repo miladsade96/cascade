@@ -217,8 +217,15 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           val response = peerClient.call(controller, InternalApi.CoordinatorDeltaCommit, CoordinatorDeltaCodec.encode(delta), config.peerTimeoutMillis)
           val accepted = response.readShort() == Errors.None
           response.ensureFullyRead()
-          val synchronized = synchronizeFrom(controller)
-          accepted && synchronized
+          // The quorum replication usually installed this write before its coordinator reply arrived.
+          // Refresh after rejection or when this owner missed replication; never infer success from local state alone.
+          val alreadyReplicated = accepted && synchronized {
+            current.controllerTerm == delta.controllerTerm && delta.updates.forall { update =>
+              current.coordinator.shardVersion(update.id) > update.expectedVersion
+            }
+          }
+          val refreshed = alreadyReplicated || synchronizeFrom(controller)
+          accepted && refreshed
         catch case _: Throwable => false
       case None => false
 
