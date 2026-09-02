@@ -26,7 +26,7 @@ RUN "$JAVA_HOME/bin/jlink" \
 
 FROM ${RUNTIME_IMAGE} AS runtime
 
-ARG VERSION=1.1.0
+ARG VERSION=1.2.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 
