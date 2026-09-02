@@ -25,6 +25,8 @@ Development has moved to `1.3.0-SNAPSHOT` for [shard-object storage](shard-stora
 
 `deploy/VERSION` records that deployment pin separately from the source `VERSION`. Tests permit a different pin only for `-SNAPSHOT` development; a release must align both files, the manifests, and the documented image commands.
 
+For the shard-storage milestone I also ran the staged 1.3.0-SNAPSHOT jars inside a pinned Temurin JDK 21 container. Java, JavaScript, Python, Go, and .NET each verified 25 records, and Java recovered its exact records after restart. This tests the new runtime across a container boundary; it does not build, publish, or qualify a new distroless release image. The [current evidence](performance/2026-09-02-shard-storage.md) records this distinction.
+
 The tested image was rebuilt from `fbe4e98a7b9c55680a365453041ee084c0a6efbf`: local image/index ID `sha256:0d316f03b5b8730213e5bfd72fb314b06859fbef8c8d2f6fb330e6a5ab970921`, Docker-reported size **39,164,217 bytes**. Java 4.3.1, KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0 each verified 25 records. Java verified the same data after restart. I ran as UID/GID 65532 with a read-only root, all capabilities dropped, `no-new-privileges`, a writable data volume, and a 2 GiB memory limit. I removed the disposable test container and volume after qualification; both image tags remain local. See the [qualification report](performance/2026-09-02-incremental-coordinator.md) for build pins and limitations.
 
 ```bash

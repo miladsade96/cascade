@@ -1,6 +1,6 @@
 # Shard-isolated coordinator storage
 
-I am separating changed coordinator shard payloads from the ordered metadata commit journal. This is a staged capacity change: immutable, independently checksummed shard objects and small atomic commit references first; independent shard consensus and service locks remain separate work.
+I store changed coordinator shard payloads separately from the ordered metadata commit journal. This is a staged capacity change: immutable, independently checksummed shard objects and small atomic commit references first; independent shard consensus and service locks remain separate work.
 
 The feature is development work in `1.3.0-SNAPSHOT`, not part of the previously tested local 1.2.0 Docker image.
 
@@ -17,7 +17,7 @@ The feature is development work in `1.3.0-SNAPSHOT`, not part of the previously 
 
 ## Qualification plan
 
-I require object/record codec and size-bound tests, concurrent preparation, multi-shard atomicity, torn markers, orphan preparation, missing/corrupt object rejection, checkpoint/reclamation restart tests, feature negotiation, cluster failover, exact backup/restore, and the complete regression suite. A long-lived Kafka-client runner will separate connection churn from coordinator work, report latency and actual disk/wire counters, and verify offsets through failover and restart. The existing churn benchmark remains a regression workload.
+I require object/record codec and size-bound tests, concurrent preparation, multi-shard atomicity, torn markers, orphan preparation, missing/corrupt object rejection, checkpoint/reclamation restart tests, feature negotiation, cluster failover, exact backup/restore, and the complete regression suite. The long-lived Kafka-client runner separates connection churn from coordinator work, reports latency and actual disk/wire counters, and verifies offsets through failover and restart. The existing churn benchmark remains a regression workload. I archive the [measured qualification](performance/2026-09-02-shard-storage.md), including failed attempts and remaining limits.
 
 This work does not qualify multi-day soak, physical power/device loss, independent per-shard consensus, or dedicated-host production capacity. The force/rename contract must still be qualified on the target filesystem and devices.
 
@@ -62,4 +62,4 @@ All clients in this harness share one IP. Persistent mode explicitly provisions 
 ./scripts/qualify-shard-storage-linux.ps1
 ```
 
-The Linux script uses already-compiled classes and pinned JDK dependencies in disposable read-only containers. It requires directory forcing and actual reclamation to pass, then runs the storage/backup regression suites on Linux `/tmp`. The probe is not physical power-loss evidence or a target-device benchmark. For profiling I run the persistent benchmark with Java Flight Recorder enabled and keep the recording alongside the JSON report. I retain the existing format-9 and 1.0.0 rolling gates as regressions.
+The Linux script uses already-compiled classes and pinned JDK dependencies in disposable read-only containers. It requires directory forcing and actual reclamation to pass, then runs the storage/backup regression suites on Linux `/tmp` backed by tmpfs. The probe is code-path qualification, not physical power-loss evidence or a target-device benchmark. For profiling I run the persistent benchmark with Java Flight Recorder enabled and keep the recording alongside the JSON report. I retain the existing format-9 and 1.0.0 rolling gates as regressions.

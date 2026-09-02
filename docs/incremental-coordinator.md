@@ -1,5 +1,7 @@
 # Incremental coordinator persistence and replication
 
+This runbook describes the format-10 inline path qualified at 1.2.0. Development 1.3.0-SNAPSHOT adds the separately gated [format-11 shard-object storage path](shard-storage.md), while retaining this peer delta protocol and the existing atomic quorum. Its [qualification report](performance/2026-09-02-shard-storage.md) includes warmed persistent clients and actual object I/O; it does not claim independent consensus or removal of shared locks.
+
 I am removing complete coordinator images from the steady-state journal and peer commit paths. This is the next coordinator-capacity step, not independent per-shard consensus: publication, in-memory images, and service locks remain shared.
 
 ## Safety and acceptance contract

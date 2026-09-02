@@ -9,6 +9,7 @@ I use Java 21 or newer and run:
 ```powershell
 ./scripts/qualify-rolling-upgrade.ps1 -Report artifacts/rolling-upgrade.json
 ./scripts/qualify-rolling-upgrade.ps1 -Baseline format9 -Report artifacts/rolling-format9.json
+./scripts/qualify-rolling-upgrade.ps1 -Baseline format10 -Report artifacts/rolling-format10.json
 ```
 
 The script creates an isolated detached worktree at the selected pinned revision, builds that historical runtime and the current runtime, and starts three separate broker JVMs with replication factor three, minimum ISR two, synchronous flushing, and independent data directories. It never edits the historical source. Temporary worktrees and broker data are removed after the run unless I add `-KeepData`.
@@ -41,10 +42,12 @@ I can roll a broker back only while the quorum feature map and metadata floor st
 
 The original 1.1.0 feature set requires format 8. `coordinator-deltas` raises the floor to format 9; `incremental-coordinator` raises it to format 10 and permits incremental journal/peer records. Each feature activates only when every voter supports it. A format-8 peer keeps whole-image coordinator commits; a format-9 peer permits shard proposals but keeps full-image persistence/replication. Once the new floor is active, I roll forward. I never bypass the format check or edit the metadata journal. If I must return to an older binary after activation, I restore a verified pre-activation cluster backup into an isolated environment and follow the disaster-recovery runbook.
 
-The new source is now versioned 1.2.0 with a local Docker image, but I have not published it to Docker Hub. Earlier qualification artifacts used the 1.1.0 version string, so I identify them by Git revision and jar/image digest. The 1.1.0-to-1.2.0 boundary still needs a pinned format-8 predecessor campaign before I call that adjacent release pair qualified; building a new image does not provide that evidence.
+The last tested local Docker image is 1.2.0 and remains unpublished. Source development is now 1.3.0-SNAPSHOT. `-Baseline format10` pins the 1.2.0 source at `fbe4e98a7b9c55680a365453041ee084c0a6efbf`; its existing features remain active during a mixed cluster, while `shard-object-storage` must remain inactive. Unanimous activation raises the floor to format 11. Backup/restore and offline inspection must include the sibling shard-object directory. The 1.1.0-to-1.2.0 boundary still needs the published format-8 predecessor campaign; building a new image does not provide that evidence.
+
+The 2026-09-02 shard-storage campaign passed all three source baselines against 1.3.0-SNAPSHOT: format 10 in 9.559 seconds, format 9 in 8.877 seconds, and 1.0.0 in 8.953 seconds. Each completed ten phases and exact 40-record/offset checks, including pre-activation rollback and post-activation downgrade rejection. I archive [all reports and artifact hashes](performance/2026-09-02-shard-storage.md).
 
 ## Production procedure
 
 Before a rolling release I verify a current backup, record image digests, keep the old image available, and hold unrelated metadata administration. I replace one non-controller broker at a time, wait for readiness and ISR recovery, and verify `acks=all` traffic before continuing. I replace the controller last.
 
-I use the pre-activation window for rollback validation. Once all brokers are on the new binary, I allow a controlled metadata mutation, confirm activation and readiness on every broker, and declare the rollback window closed. The automated gate covers the pinned 1.0.0 and format-9 source baselines against 1.2.0; every other release pair needs its own pinned baseline and archived report.
+I use the pre-activation window for rollback validation. Once all brokers are on the new binary, I allow a controlled metadata mutation, confirm activation and readiness on every broker, and declare the rollback window closed. The automated gate now covers the pinned 1.0.0, format-9, and format-10 source baselines against 1.3.0-SNAPSHOT; every other release pair needs its own pinned baseline and archived report.
