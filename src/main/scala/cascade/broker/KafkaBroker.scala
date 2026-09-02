@@ -277,6 +277,7 @@ final class KafkaBroker(
       trafficQuotas = TrafficQuotaSnapshot(requestQuota.snapshot, responseQuota.snapshot, produceQuota.snapshot, fetchQuota.snapshot),
       coordinator = Option(coordinatorStateMachine).map(_.metricsSnapshot).getOrElse(cascade.coordinator.CoordinatorMetricsSnapshot.Empty),
       metadataJournal = cluster.map(_.metadataJournalSnapshot).getOrElse(cascade.cluster.MetadataJournalSnapshot.Empty),
+      shardObjects = cluster.map(_.shardObjectSnapshot).getOrElse(cascade.cluster.ShardObjectSnapshot()),
       metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty)
     )
 

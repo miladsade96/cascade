@@ -76,6 +76,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val metadataTransfers = MetadataTransferMetrics()
 
   def metadataJournalSnapshot: MetadataJournalSnapshot = metadataStore.map(_.snapshot).getOrElse(MetadataJournalSnapshot.Empty)
+  def shardObjectSnapshot: ShardObjectSnapshot = metadataStore.map(_.objectSnapshot).getOrElse(ShardObjectSnapshot())
   def metadataTransferSnapshot: MetadataTransferSnapshot = metadataTransfers.snapshot
 
   private val recoveredControllerState = controllerStore.map(_.state).getOrElse(ControllerState.Empty)

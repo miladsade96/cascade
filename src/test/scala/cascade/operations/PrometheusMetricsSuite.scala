@@ -21,12 +21,13 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 81)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 88)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
     val measured = snapshot.copy(
       metadataJournal = cascade.cluster.MetadataJournalSnapshot(2L, 3L, 40L, 50L, 60L, 70L),
+      shardObjects = cascade.cluster.ShardObjectSnapshot(writtenBytes = 100L, liveBytes = 90L, directoryForceSupported = true),
       metadataTransfers = cascade.cluster.MetadataTransferSnapshot(80L, 90L, 1L))
     val output = PrometheusMetrics.encode(measured)
     assert(output.contains("cascade_metadata_journal_delta_bytes_total{node_id=\"7\"} 50.0\n"))
@@ -34,6 +35,9 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_metadata_replication_full_bytes_total{node_id=\"7\"} 90.0\n"))
     assert(output.contains("cascade_metadata_replication_fallbacks_total{node_id=\"7\"} 1.0\n"))
     assert(!output.contains("group_id="))
+    assert(output.contains("cascade_coordinator_object_bytes_written_total{node_id=\"7\"} 100.0\n"))
+    assert(output.contains("cascade_coordinator_object_bytes{node_id=\"7\"} 90.0\n"))
+    assert(output.contains("cascade_coordinator_directory_force_supported{node_id=\"7\"} 1.0\n"))
   }
 
   private val snapshot = BrokerMetricsSnapshot(

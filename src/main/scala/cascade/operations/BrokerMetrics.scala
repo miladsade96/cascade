@@ -2,7 +2,7 @@ package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
 import cascade.coordinator.CoordinatorMetricsSnapshot
-import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot}
+import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot, ShardObjectSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
 final case class TrafficSnapshot(
@@ -95,7 +95,8 @@ final case class BrokerMetricsSnapshot(
     trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty,
     coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty,
     metadataJournal: MetadataJournalSnapshot = MetadataJournalSnapshot.Empty,
-    metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty
+    metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty,
+    shardObjects: ShardObjectSnapshot = ShardObjectSnapshot()
 )
 
 object PrometheusMetrics:
@@ -121,6 +122,13 @@ object PrometheusMetrics:
     counter(builder, "cascade_metadata_journal_full_bytes_total", "Forced complete-image bytes including journal framing.", snapshot.metadataJournal.fullBytes.toDouble, labels)
     counter(builder, "cascade_metadata_checkpoint_bytes_total", "Forced compaction checkpoint bytes including framing.", snapshot.metadataJournal.checkpointBytes.toDouble, labels)
     gauge(builder, "cascade_metadata_journal_bytes", "Current metadata journal size.", snapshot.metadataJournal.journalBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_object_bytes_written_total", "Newly forced shard and checkpoint object payload bytes; excludes journal markers.", snapshot.shardObjects.writtenBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_objects_written_total", "New immutable coordinator objects.", snapshot.shardObjects.writtenObjects.toDouble, labels)
+    counter(builder, "cascade_coordinator_objects_reused_total", "Validated immutable object reuse.", snapshot.shardObjects.reusedObjects.toDouble, labels)
+    counter(builder, "cascade_coordinator_object_bytes_reclaimed_total", "Unreferenced object bytes removed after durable checkpoints.", snapshot.shardObjects.reclaimedBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_objects_reclaimed_total", "Unreferenced objects removed after durable checkpoints.", snapshot.shardObjects.reclaimedObjects.toDouble, labels)
+    gauge(builder, "cascade_coordinator_object_bytes", "Observed stored object payload bytes, including retained history and orphans.", snapshot.shardObjects.liveBytes.toDouble, labels)
+    gauge(builder, "cascade_coordinator_directory_force_supported", "Whether directory forcing permits automatic object reclamation.", if snapshot.shardObjects.directoryForceSupported then 1d else 0d, labels)
     counter(builder, "cascade_metadata_replication_delta_bytes_total", "Attempted outbound delta RPC body bytes.", snapshot.metadataTransfers.deltaBytes.toDouble, labels)
     counter(builder, "cascade_metadata_replication_full_bytes_total", "Attempted outbound full commit and snapshot RPC body bytes.", snapshot.metadataTransfers.fullBytes.toDouble, labels)
     counter(builder, "cascade_metadata_replication_fallbacks_total", "Delta base rejections retried as complete snapshots.", snapshot.metadataTransfers.fallbacks.toDouble, labels)

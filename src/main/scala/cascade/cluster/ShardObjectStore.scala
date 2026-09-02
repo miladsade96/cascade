@@ -18,11 +18,11 @@ final class ShardObjectStore(val directory: Path):
   private val reclaimedObjects = AtomicLong()
   require(!Files.isSymbolicLink(directory), "shard object directory must not be a symbolic link")
   Files.createDirectories(directory)
-  ShardObjectStore.forceDirectory(directory.getParent): Unit
+  private val directoryForceSupported = ShardObjectStore.forceDirectory(directory.getParent)
   private val liveBytes = AtomicLong(objectPaths().map(Files.size).sum)
 
   def snapshot: ShardObjectSnapshot = ShardObjectSnapshot(writtenBytes.get(), writtenObjects.get(),
-    reusedObjects.get(), reclaimedBytes.get(), reclaimedObjects.get(), liveBytes.get())
+    reusedObjects.get(), reclaimedBytes.get(), reclaimedObjects.get(), liveBytes.get(), directoryForceSupported)
 
   def put(shard: Int, bytes: Array[Byte]): ShardObjectRef =
     require(bytes.length <= ShardObjectRef.MaximumBytes, "shard object exceeds size limit")

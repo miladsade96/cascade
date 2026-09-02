@@ -33,5 +33,6 @@ final case class ShardObjectSnapshot(
     reusedObjects: Long = 0L,
     reclaimedBytes: Long = 0L,
     reclaimedObjects: Long = 0L,
-    liveBytes: Long = 0L
+    liveBytes: Long = 0L,
+    directoryForceSupported: Boolean = false
 )
