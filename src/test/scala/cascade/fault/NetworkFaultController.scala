@@ -28,7 +28,8 @@ final class ArmedFault(
       false
 
 /** Thread-safe deterministic link control used by the cluster fault-qualification suites. */
-final class NetworkFaultController:
+final class NetworkFaultController(maxRecordedCalls: Int = 10000):
+  require(maxRecordedCalls >= 0, "recorded call limit must be non-negative")
   private var blocked = Set.empty[FaultSelector]
   private var observed = Vector.empty[PeerCall]
   private var armedFaults = Vector.empty[ArmedFault]
@@ -62,7 +63,7 @@ final class NetworkFaultController:
   def calls: Vector[PeerCall] = synchronized(observed)
 
   private[fault] def beforeCall(call: PeerCall): Unit = synchronized {
-    observed :+= call
+    if maxRecordedCalls > 0 then observed = (observed :+ call).takeRight(maxRecordedCalls)
     if blocked.exists(_.matches(call)) || armedFaults.exists(_.evaluate(call)) then
       throw SocketTimeoutException(
         s"injected peer partition ${call.sourceId}->${call.targetId} api=${call.apiKey}"

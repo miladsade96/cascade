@@ -13,7 +13,8 @@ final class FaultCluster(
     size: Int,
     initialVoters: Int = -1,
     defaultReplicationFactor: Int = 3,
-    minInSyncReplicas: Int = 2
+    minInSyncReplicas: Int = 2,
+    recordCalls: Boolean = true
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
   private val voterCount = if initialVoters < 0 then size else initialVoters
@@ -24,7 +25,7 @@ final class FaultCluster(
   }
   val directories = nodes.map(node => Files.createTempDirectory(s"cascade-fault-${node.id}"))
   val voterNodes: Vector[ClusterNode] = nodes.take(voterCount)
-  val faults = NetworkFaultController()
+  val faults = NetworkFaultController(if recordCalls then 10000 else 0)
   val configs: Vector[BrokerConfig] = nodes.zip(directories).map { case (node, directory) =>
     BrokerConfig(
       bindHost = node.host,
