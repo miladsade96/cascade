@@ -19,8 +19,11 @@ The default operations listener stays on `127.0.0.1` inside the container. Docke
 
 ## Pull and run one broker
 
+Version 1.2.0 is currently a local `linux/amd64` build, tagged as both `miladsade96/cascade:1.2.0` and `cascade:1.2.0`. I have not pushed it to Docker Hub. On this machine I skip the pull below; on another machine I first build it with `docker build --tag miladsade96/cascade:1.2.0 .` or wait for publication. The Kubernetes examples also reference 1.2.0, so those nodes need the image loaded locally or available in their registry before deployment. This build does not qualify the 1.1.0-to-1.2.0 rolling upgrade boundary.
+
 ```bash
-docker pull miladsade96/cascade:1.1.0
+# After the 1.2.0 tag has been published:
+docker pull miladsade96/cascade:1.2.0
 docker volume create cascade-data
 docker run --detach \
   --name cascade \
@@ -33,7 +36,7 @@ docker run --detach \
   --memory 4g \
   --publish 9092:9092 \
   --mount type=volume,source=cascade-data,target=/var/lib/cascade \
-  miladsade96/cascade:1.1.0 \
+  miladsade96/cascade:1.2.0 \
   --host 0.0.0.0 \
   --port 9092 \
   --advertised-host localhost \
@@ -154,16 +157,16 @@ docker login --username YOUR_DOCKERHUB_USERNAME
 docker buildx create --name cascade-release --driver docker-container --use
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=1.1.0 \
+  --build-arg VERSION=1.2.0 \
   --build-arg REVISION=GIT_COMMIT_SHA \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.1.0 \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.1 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.2.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.2 \
   --tag YOUR_DOCKERHUB_USERNAME/cascade:latest \
   --provenance=mode=max \
   --sbom=true \
   --push \
   .
-docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.1.0
+docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.2.0
 ```
 
 The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes build and smoke-test without publishing. A `v*` tag publishes semantic-version, Git-SHA, and `latest` tags; a manual workflow run publishes `manual` and Git-SHA tags. The release job does not run unless the complete test and container smoke jobs pass.
