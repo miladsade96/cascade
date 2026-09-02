@@ -1095,17 +1095,29 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val preparedNodeIds = preparedPeers.map(_.id).toSet ++ Option.when(quorum.contains(config.nodeId))(config.nodeId)
       if !quorum.hasQuorum(preparedNodeIds) || currentTerm != term || role != ControllerRole.Leader then false
       else
-        val commitPayload = ByteWriter()
+        lazy val commitPayload = ByteWriter()
           .writeLong(term)
           .writeInt(config.nodeId)
           .writeByteArray(MetadataCodec.encode(candidate, metadataFormat))
           .result()
+        val deltaPayload = MetadataDelta.between(current, candidate).map { delta =>
+          ByteWriter().writeLong(term).writeInt(config.nodeId).writeByteArray(MetadataDeltaCodec.encode(delta)).result()
+        }
         val committed = callPeers(preparedPeers, config.peerTimeoutMillis) { node =>
-          val response = peerClient.call(node, InternalApi.MetadataCommit, commitPayload, config.peerTimeoutMillis)
-          val responseTerm = response.readLong()
-          val accepted = response.readShort() == Errors.None
-          response.ensureFullyRead()
-          (responseTerm, accepted)
+          def send(api: Short, payload: Array[Byte]): (Long, Short) =
+            val response = peerClient.call(node, api, payload, config.peerTimeoutMillis)
+            val result = response.readLong() -> response.readShort()
+            response.ensureFullyRead()
+            result
+          val first = deltaPayload match
+            case Some(payload) => send(InternalApi.MetadataDeltaCommit, payload)
+            case None => send(InternalApi.MetadataCommit, commitPayload)
+          // A lagging/restarted follower needs a complete base. Never bypass a newer controller term.
+          val result =
+            if deltaPayload.nonEmpty && first == (term -> Errors.InvalidRequest) then
+              send(InternalApi.MetadataCommit, commitPayload)
+            else first
+          (result._1, result._2 == Errors.None)
         }
         committed.foreach { case (_, (responseTerm, _)) =>
           if responseTerm > term then synchronized(stepDownLocked(responseTerm, None))
