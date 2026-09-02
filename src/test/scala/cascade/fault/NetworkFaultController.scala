@@ -1,6 +1,7 @@
 package cascade.fault
 
 import java.net.SocketTimeoutException
+import cascade.protocol.ByteCursor
 
 final case class PeerCall(sourceId: Int, targetId: Int, apiKey: Short, payload: Vector[Byte])
 
@@ -33,6 +34,19 @@ final class NetworkFaultController(maxRecordedCalls: Int = 10000):
   private var blocked = Set.empty[FaultSelector]
   private var observed = Vector.empty[PeerCall]
   private var armedFaults = Vector.empty[ArmedFault]
+  @volatile private var replyObserver: Option[(PeerCall, Array[Byte]) => Unit] = None
+
+  /** Observe or pause a completed RPC after its connection lock has been released. */
+  def observeReplies(observer: (PeerCall, Array[Byte]) => Unit): Unit =
+    replyObserver = Some(observer)
+
+  private[fault] def afterCall(call: PeerCall, response: ByteCursor): ByteCursor =
+    replyObserver match
+      case None => response
+      case Some(observer) =>
+        val bytes = response.readBytes(response.remaining)
+        observer(call, bytes)
+        ByteCursor(bytes)
 
   def block(selector: FaultSelector): Unit = synchronized {
     blocked += selector
@@ -58,6 +72,7 @@ final class NetworkFaultController(maxRecordedCalls: Int = 10000):
   def heal(): Unit = synchronized {
     blocked = Set.empty
     armedFaults = Vector.empty
+    replyObserver = None
   }
 
   def calls: Vector[PeerCall] = synchronized(observed)

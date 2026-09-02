@@ -9,8 +9,9 @@ final class FaultInjectingPeerTransport(
     delegate: PeerTransport
 ) extends PeerTransport:
   override def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
-    faults.beforeCall(PeerCall(localNodeId, node.id, apiKey, payload.toVector))
-    delegate.call(node, apiKey, payload, timeoutMillis)
+    val call = PeerCall(localNodeId, node.id, apiKey, payload.toVector)
+    faults.beforeCall(call)
+    faults.afterCall(call, delegate.call(node, apiKey, payload, timeoutMillis))
 
   override def close(): Unit = delegate.close()
 

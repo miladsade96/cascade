@@ -31,8 +31,14 @@ object CoordinatorProbe:
     while found.isEmpty && System.nanoTime() < deadline do
       found = nodes.iterator.filterNot(n => excluded(n.id)).flatMap { node =>
         try
-          val (_, leader, metadata) = snapshot(node)
-          nodes.find(n => n.id == leader && !excluded(n.id) && metadata.featureLevels.contains(ClusterFeature.CoordinatorDeltas))
+          val (term, leader, metadata) = snapshot(node)
+          if node.id != leader || metadata.controllerTerm != term || !metadata.featureLevels.contains(ClusterFeature.CoordinatorDeltas) then None
+          else
+            // A reported leader may still be acquiring its quorum lease. This impossible expected
+            // version probes the active-controller guard without ever publishing a mutation.
+            val probe = CoordinatorDelta(term, Vector(CoordinatorShardUpdate(CoordinatorShard.Allocator,
+              Long.MaxValue, cascade.protocol.ByteWriter().writeLong(1L).result().toVector)))
+            Option.when(commit(node, probe) == cascade.protocol.Errors.CoordinatorLoadInProgress)(node)
         catch case _: Exception => None
       }.nextOption()
       if found.isEmpty then Thread.sleep(25L)

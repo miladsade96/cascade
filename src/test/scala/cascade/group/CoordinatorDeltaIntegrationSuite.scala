@@ -12,7 +12,7 @@ final class CoordinatorDeltaIntegrationSuite extends FunSuite:
     GroupShardCodec.split(GroupCodec.encode(GroupImage(0L, Vector.empty, Vector(value))).toVector)(CoordinatorShard.group(group))
 
   test("a live quorum merges independent stale-global-version proposals and recovers them after controller loss") {
-    val cluster = FaultCluster(3)
+    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000)
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
@@ -42,7 +42,7 @@ final class CoordinatorDeltaIntegrationSuite extends FunSuite:
   }
 
   test("transaction outcome and consumer offsets either both commit or neither commits") {
-    val cluster = FaultCluster(3)
+    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000)
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)

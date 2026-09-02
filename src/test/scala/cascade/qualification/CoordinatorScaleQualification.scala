@@ -22,15 +22,20 @@ final case class CoordinatorScaleReport(
     replicationDeltaBytes: Long, replicationFullBytes: Long, replicationFallbacks: Long,
     clientLifecycle: String = "churn", clientsCreated: Int = 0, warmupSeconds: Double = 0d,
     objectWrittenBytes: Long = 0L, objectsWritten: Long = 0L, objectsReused: Long = 0L,
-    objectReclaimedBytes: Long = 0L, objectStoredBytes: Long = 0L
+    objectReclaimedBytes: Long = 0L, objectStoredBytes: Long = 0L,
+    maxConnectionsPerIp: Int = 1000, rejectedConnections: Long = 0L
 ):
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
 
   def json: String = baseJson.dropRight(1) +
-    f""", "client_lifecycle":"$clientLifecycle","clients_created":$clientsCreated,"warmup_writes":${if clientLifecycle == "persistent" then groups else 0},"warmup_seconds":$warmupSeconds%.3f,"object_written_bytes":$objectWrittenBytes,"objects_written":$objectsWritten,"objects_reused":$objectsReused,"object_reclaimed_bytes":$objectReclaimedBytes,"object_stored_bytes":$objectStoredBytes}"""
+    f""", "client_lifecycle":"$clientLifecycle","clients_created":$clientsCreated,"warmup_writes":${if clientLifecycle == "persistent" then groups else 0},"warmup_seconds":$warmupSeconds%.3f,"object_written_bytes":$objectWrittenBytes,"objects_written":$objectsWritten,"objects_reused":$objectsReused,"object_reclaimed_bytes":$objectReclaimedBytes,"object_stored_bytes":$objectStoredBytes,"max_connections_per_ip":$maxConnectionsPerIp,"rejected_connections":$rejectedConnections}"""
 
 object CoordinatorScaleQualification:
+  // Every client can retain bootstrap, metadata, and coordinator connections to one address.
+  private[cascade] def connectionLimit(groups: Int, persistent: Boolean): Int =
+    if persistent then math.max(1000, Math.addExact(Math.multiplyExact(groups, 3), 32)) else 1000
+
   def main(arguments: Array[String]): Unit =
     require(arguments.length % 2 == 0, "options require values")
     val pairs = arguments.grouped(2).map(a => a(0) -> a(1)).toVector
@@ -58,12 +63,17 @@ object CoordinatorScaleQualification:
     require(!persistent || groupCount <= 2000, "persistent mode is bounded to 2000 simultaneously resident clients")
     val startedAt = Instant.now()
     val revision = currentRevision()
-    val cluster = FaultCluster(3, recordCalls = false)
+    val perIpLimit = connectionLimit(groupCount, persistent)
+    val cluster = FaultCluster(3, recordCalls = false, maxConnectionsPerIp = perIpLimit)
     val executor = Executors.newFixedThreadPool(concurrency)
     val partition = TopicPartition("coordinator-qualification", 0)
     val latencies = new java.util.concurrent.ConcurrentLinkedQueue[Long]()
     var writeNanos = 0L
     var warmupSeconds = 0d
+    var phase = "startup"
+    def enter(next: String): Unit =
+      phase = next
+      println(s"COORDINATOR_SCALE_PHASE $phase")
     val clientsCreated = AtomicInteger()
     val clients = new Array[KafkaConsumer[Array[Byte], Array[Byte]]](if persistent then groupCount else 0)
     def consumer(bootstrap: String, index: Int): KafkaConsumer[Array[Byte], Array[Byte]] =
@@ -116,33 +126,46 @@ object CoordinatorScaleQualification:
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       if persistent then
+        enter("warmup")
         write(cluster.bootstrapServers, 0, 1)
         warmupSeconds = writeNanos / 1e9
         writeNanos = 0L
         latencies.clear()
+      enter("initial-writes")
       write(cluster.bootstrapServers, 0, rounds)
+      enter("initial-verification")
       verify(cluster.bootstrapServers, 0, rounds)
       val initialMetrics = cluster.nodes.map(n => n.id -> cluster.broker(n.id).metricsSnapshot).toMap
       val owners = initialMetrics.collect { case (id, metrics) if metrics.coordinator.attempts > 0L => id }.toVector.sorted
       if groupCount >= 30 then require(owners.size == 3, s"not every broker served coordinator writes: $owners")
+      enter("controller-stop")
       cluster.stop(controller.id)
       val survivors = cluster.nodes.filterNot(_.id == controller.id)
       CoordinatorProbe.controller(survivors, Set(controller.id))
       val bootstrap = survivors.map(n => s"${n.host}:${n.port}").mkString(",")
+      enter("failover-verification")
       verify(bootstrap, 0, rounds)
+      enter("failover-writes")
       write(bootstrap, 1, 1)
+      enter("final-verification")
       verify(bootstrap, 1, 1)
       val metrics = cluster.nodes.map { node =>
         if node.id == controller.id then initialMetrics(node.id) else cluster.broker(node.id).metricsSnapshot
       }
       val coordinatorMetrics = metrics.map(_.coordinator)
+      val admissionRejections = metrics.map(_.rejectedConnections).sum
+      require(admissionRejections == 0L, s"coordinator capacity campaign hit connection admission: $admissionRejections")
       require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
       require(metrics.map(_.metadataTransfers.deltaBytes).sum > 0L, "incremental replication path was not exercised")
       // Restart every process from its existing disk, including the controller that missed the last phase.
+      enter("full-restart")
       survivors.foreach(n => cluster.stop(n.id))
       cluster.startAll()
       CoordinatorProbe.controller(cluster.nodes)
+      enter("restart-verification")
       verify(cluster.bootstrapServers, 1, 1)
+      require(cluster.nodes.forall(n => cluster.broker(n.id).metricsSnapshot.rejectedConnections == 0L),
+        "restart recovery hit connection admission")
       val sorted = latencies.asScala.toVector.sorted
       def percentile(p: Double): Double = sorted(math.min(sorted.size - 1, math.ceil(sorted.size * p).toInt - 1)) / 1000000d
       CoordinatorScaleReport(groupCount, concurrency, rounds, groupCount, groupCount * (rounds + 1), writeNanos / 1e9,
@@ -154,12 +177,24 @@ object CoordinatorScaleQualification:
         if persistent then "persistent" else "churn", clientsCreated.get(), warmupSeconds,
         metrics.map(_.shardObjects.writtenBytes).sum, metrics.map(_.shardObjects.writtenObjects).sum,
         metrics.map(_.shardObjects.reusedObjects).sum, metrics.map(_.shardObjects.reclaimedBytes).sum,
-        metrics.map(_.shardObjects.liveBytes).sum)
+        metrics.map(_.shardObjects.liveBytes).sum, perIpLimit, admissionRejections)
+    catch
+      case scala.util.control.NonFatal(error) =>
+        System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")
+        cluster.nodes.filter(n => cluster.runningNodeIds(n.id)).foreach { node =>
+          try
+            val (term, leader, metadata) = CoordinatorProbe.snapshot(node)
+            val health = cluster.broker(node.id).metricsSnapshot
+            System.err.println(s"COORDINATOR_SCALE_NODE id=${node.id} term=$term leader=$leader version=${metadata.version} unavailable=${metadata.unavailableBrokerIds.toVector.sorted.mkString(",")} fenced=${health.brokerFenced} active_connections=${health.activeConnections} rejected_connections=${health.rejectedConnections}")
+          catch case scala.util.control.NonFatal(probeError) =>
+            System.err.println(s"COORDINATOR_SCALE_NODE id=${node.id} snapshot_error=${probeError.getClass.getSimpleName}")
+        }
+        throw error
     finally
       executor.shutdownNow()
       executor.awaitTermination(10L, TimeUnit.SECONDS)
       try clients.iterator.filter(_ != null).foreach { client =>
-        try client.close()
+        try client.close(org.apache.kafka.clients.consumer.CloseOptions.timeout(java.time.Duration.ofSeconds(2L)))
         catch case scala.util.control.NonFatal(error) => System.err.println(s"benchmark client cleanup failed: ${error.getMessage}")
       }
       finally cluster.close()

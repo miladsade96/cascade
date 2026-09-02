@@ -14,7 +14,12 @@ final class FaultCluster(
     initialVoters: Int = -1,
     defaultReplicationFactor: Int = 3,
     minInSyncReplicas: Int = 2,
-    recordCalls: Boolean = true
+    recordCalls: Boolean = true,
+    peerTimeoutMillis: Int = 300,
+    heartbeatMillis: Int = 100,
+    electionTimeoutMillis: Int = 600,
+    journalCompactionBytes: Long = 128L * 1024 * 1024,
+    maxConnectionsPerIp: Int = 1000
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
   private val voterCount = if initialVoters < 0 then size else initialVoters
@@ -39,9 +44,12 @@ final class FaultCluster(
       controllerId = 1,
       defaultReplicationFactor = defaultReplicationFactor,
       minInSyncReplicas = minInSyncReplicas,
-      peerTimeoutMillis = 300,
-      controllerHeartbeatMillis = 100,
-      controllerElectionTimeoutMillis = 600
+      peerTimeoutMillis = peerTimeoutMillis,
+      controllerHeartbeatMillis = heartbeatMillis,
+      controllerElectionTimeoutMillis = electionTimeoutMillis,
+      security = cascade.security.BrokerSecurityConfig(resources = cascade.security.ResourceLimits(
+        maxConnectionsPerIp = maxConnectionsPerIp)),
+      storageLifecycle = cascade.storage.StorageLifecycleConfig(journalCompactionBytes = journalCompactionBytes)
     )
   }
   private val running = mutable.HashMap.empty[Int, KafkaBroker]

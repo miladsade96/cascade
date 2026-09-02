@@ -5,6 +5,7 @@ import munit.FunSuite
 
 final class DeploymentArtifactsSuite extends FunSuite:
   private val releaseVersion = read("VERSION").trim
+  private val deploymentVersion = read("deploy/VERSION").trim
   private val deployment = read("deploy/kubernetes/statefulsets.yaml")
 
   test("release metadata and Kubernetes broker identities stay aligned") {
@@ -18,15 +19,20 @@ final class DeploymentArtifactsSuite extends FunSuite:
 
     assert(releaseVersion.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?"))
     assertEquals(cascade.BuildInfo.Version, releaseVersion)
+    assert(deploymentVersion.matches("[0-9]+\\.[0-9]+\\.[0-9]+"))
+    if !releaseVersion.endsWith("-SNAPSHOT") then assertEquals(deploymentVersion, releaseVersion)
     assert(build.contains("IO.read(file(\"VERSION\")).trim"))
     assert(dockerfile.contains("COPY sbt build.sbt VERSION ./"))
     assert(dockerfile.contains(s"ARG VERSION=$releaseVersion"))
-    assertEquals(occurrences(deployment, s"image: miladsade96/cascade:$releaseVersion"), 3)
-    assert(containerGuide.contains(s"docker pull miladsade96/cascade:$releaseVersion"))
-    assert(containerGuide.contains(s"--build-arg VERSION=$releaseVersion"))
+    assertEquals(occurrences(deployment, s"image: miladsade96/cascade:$deploymentVersion"), 3)
+    assert(containerGuide.contains(s"docker pull miladsade96/cascade:$deploymentVersion"))
+    assert(containerGuide.contains(s"--build-arg VERSION=$deploymentVersion"))
     assert(nodeCompatibilityManifest.contains(s"\"version\": \"$releaseVersion\""))
     assertEquals(occurrences(nodeCompatibilityLock, s"\"version\": \"$releaseVersion\""), 2)
-    assert(readme.contains(s"The current release is `$releaseVersion`"))
+    if releaseVersion.endsWith("-SNAPSHOT") then
+      assert(readme.contains(s"The development version is `$releaseVersion`"))
+      assert(readme.contains(s"the last qualified local image is `$deploymentVersion`"))
+    else assert(readme.contains(s"The current release is `$releaseVersion`"))
     assert(releaseWorkflow.contains("version: ${{ steps.release.outputs.version }}"))
     assert(releaseWorkflow.contains("VERSION=${{ needs.verify.outputs.version }}"))
 

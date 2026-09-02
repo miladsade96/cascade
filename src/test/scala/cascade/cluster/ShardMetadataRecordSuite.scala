@@ -1,6 +1,6 @@
 package cascade.cluster
 
-import cascade.protocol.ProtocolException
+import cascade.protocol.{ByteWriter, ProtocolException}
 import munit.FunSuite
 
 final class ShardMetadataRecordSuite extends FunSuite:
@@ -43,5 +43,28 @@ final class ShardMetadataRecordSuite extends FunSuite:
       val unknown = record.clone()
       unknown(2) = 2
       intercept[ProtocolException](ShardMetadataRecord.replay(unknown, active, objects)): Unit
+    }
+  }
+
+  test("aggregate reference lengths are bounded before any object is materialized") {
+    withDirectory { root =>
+      val objects = ShardObjectStore(root)
+      val header = MetadataCodec.encode(active.copy(coordinator = active.coordinator.copy(
+        groupState = Vector.empty, deliveryState = Vector.empty)))
+      val full = ByteWriter().writeShort(ShardMetadataRecord.Format).writeByte(0).writeByteArray(header)
+      ShardObjectRef.write(full, ShardObjectRef(129, ShardObjectRef.MaximumBytes, Vector.fill(32)(0.toByte)))
+      ShardObjectRef.write(full, ShardObjectRef(130, 1, Vector.fill(32)(0.toByte)))
+      val fullError = intercept[ProtocolException](ShardMetadataRecord.replay(full.result(), active, objects))
+      assert(fullError.getMessage.contains("bounded recovery limit"))
+      val delta = ByteWriter().writeShort(ShardMetadataRecord.Format).writeByte(1)
+        .writeLong(active.version).writeLong(active.coordinator.version).writeBytes(active.fingerprint.toArray)
+        .writeLong(active.controllerTerm).writeInt(2)
+      Vector(0, 1).foreach { shard =>
+        delta.writeLong(0L)
+        ShardObjectRef.write(delta, ShardObjectRef(shard, ShardObjectRef.MaximumBytes, Vector.fill(32)(0.toByte)))
+      }
+      val deltaError = intercept[ProtocolException](ShardMetadataRecord.replay(delta.result(), active, objects))
+      assert(deltaError.getMessage.contains("bounded recovery limit"))
+      assertEquals(objects.snapshot.liveBytes, 0L)
     }
   }

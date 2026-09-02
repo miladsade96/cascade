@@ -781,18 +781,26 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       result
     }
     val healthy = mutable.HashSet.empty[Int]
-    responses.foreach { case (node, response) =>
+    // A higher term fences immediately, even while a local proposal is awaiting peers.
+    responses.foreach { case (_, response) =>
       if response.responseTerm > term then
         synchronized(stepDownLocked(response.responseTerm, None))
-      else if response.accepted && response.responseTerm == term && synchronized {
+    }
+    // Followers force a proposal before the leader publishes it locally. Their heartbeat
+    // position can legitimately be ahead during that interval; compare only after the
+    // proposal settles. A genuinely ahead peer after a failed proposal still fences us.
+    metadataMutationLock.synchronized {
+      responses.foreach { case (node, response) =>
+        if response.accepted && response.responseTerm == term && synchronized {
           role == ControllerRole.Leader && currentTerm == term
         }
-      then
-        val livePosition = metadataPosition
-        if !livePosition.atLeast(response.metadataPosition) then synchronized(stepDownLocked(term, None))
-        else if response.metadataPosition == livePosition then
-          healthy += node.id
-        else if synchronizeNode(node) then healthy += node.id
+        then
+          val livePosition = metadataPosition
+          if !livePosition.atLeast(response.metadataPosition) then synchronized(stepDownLocked(term, None))
+          else if response.metadataPosition == livePosition then
+            healthy += node.id
+          else if synchronizeNode(node) then healthy += node.id
+      }
     }
     healthy.toSet
 

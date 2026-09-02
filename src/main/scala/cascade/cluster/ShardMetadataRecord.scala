@@ -23,6 +23,8 @@ object ShardMetadataRecord:
       case None => checkpoint(next, objects)
       case Some(value) =>
         snapshotHeader(next) // Preserve the bounded full-image recovery/peer fallback contract.
+        if value.change.updates.iterator.map(_.payload.size.toLong).sum > ShardObjectRef.MaximumBytes then
+          throw ProtocolException("shard delta exceeds the bounded recovery limit")
         val references = value.change.updates.map(update => objects.put(update.id, update.payload.toArray))
         val writer = ByteWriter().writeShort(Format).writeByte(1)
           .writeLong(value.baseVersion).writeLong(value.baseCoordinatorVersion)
@@ -56,13 +58,16 @@ object ShardMetadataRecord:
     if cursor.readShort() != Format then throw ProtocolException("unsupported shard marker format")
     cursor.readByte() match
       case 0 =>
-        val skeleton = MetadataCodec.decode(cursor.readByteArray())
+        val header = cursor.readByteArray()
+        val skeleton = MetadataCodec.decode(header)
         val group = ShardObjectRef.read(cursor)
         val delivery = ShardObjectRef.read(cursor)
         cursor.ensureFullyRead()
         if !enabled(skeleton) || skeleton.coordinator.groupState.nonEmpty || skeleton.coordinator.deliveryState.nonEmpty ||
           group.shard != ShardObjectRef.GroupSnapshot || delivery.shard != ShardObjectRef.DeliverySnapshot then
           throw ProtocolException("invalid shard checkpoint descriptor")
+        if header.length.toLong + group.length + delivery.length > ShardObjectRef.MaximumBytes then
+          throw ProtocolException("shard checkpoint exceeds the bounded recovery limit")
         val metadata = skeleton.copy(coordinator = skeleton.coordinator.copy(
           groupState = objects.read(group).toVector, deliveryState = objects.read(delivery).toVector))
         ReplayedShardRecord(metadata, Set(group, delivery))
@@ -76,10 +81,13 @@ object ShardMetadataRecord:
         if !enabled(base) || updates.isEmpty || updates.size > CoordinatorShard.Count ||
           updates.exists((_, ref) => !CoordinatorShard.valid(ref.shard)) then
           throw ProtocolException("invalid shard delta descriptor")
+        if updates.iterator.map(_._2.length.toLong).sum > ShardObjectRef.MaximumBytes then
+          throw ProtocolException("shard delta exceeds the bounded recovery limit")
         val change = CoordinatorDelta(term, updates.map { (expected, ref) =>
           CoordinatorShardUpdate(ref.shard, expected, objects.read(ref).toVector)
         })
         val result = MetadataDelta(version, coordinatorVersion, fingerprint, change).applyTo(base)
           .fold(message => throw ProtocolException(s"invalid shard delta: $message"), identity)
+        snapshotHeader(result)
         ReplayedShardRecord(result, updates.map(_._2).toSet)
       case _ => throw ProtocolException("unknown shard marker kind")

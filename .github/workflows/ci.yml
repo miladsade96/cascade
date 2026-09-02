@@ -82,6 +82,7 @@ jobs:
           chmod +x sbt
           ./sbt "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency 8 --rounds 2 --client-lifecycle ${{ matrix.lifecycle }} --report artifacts/coordinator-scale.json"
           jq -e '.status == "passed" and .verified == 1000 and .writes == 3000 and .controller_failover and .restart_recovery and (.owner_ids | length) == 3 and .delta_bytes < .full_image_bytes and .journal_delta_bytes > 0 and .replication_delta_bytes > 0' artifacts/coordinator-scale.json
+          jq -e '.object_written_bytes > 0 and .objects_written > 0 and .rejected_connections == 0 and (if .client_lifecycle == "persistent" then .clients_created == .groups and .warmup_writes == .groups else .clients_created > .groups end)' artifacts/coordinator-scale.json
       - name: Archive coordinator qualification evidence
         if: always()
         uses: actions/upload-artifact@v4

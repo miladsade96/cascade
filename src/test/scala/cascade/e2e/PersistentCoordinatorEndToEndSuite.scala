@@ -18,9 +18,18 @@ final class PersistentCoordinatorEndToEndSuite extends FunSuite:
     assert(result.objectsWritten > 0L)
     assert(result.objectWrittenBytes > 0L)
     assert(result.journalDeltaBytes > 0L)
+    assertEquals(result.maxConnectionsPerIp, 1000)
+    assertEquals(result.rejectedConnections, 0L)
     assert(result.json.contains("\"warmup_writes\":60"))
   }
 
   test("persistent cardinality is bounded before starting brokers or allocating clients") {
     intercept[IllegalArgumentException](CoordinatorScaleQualification.run(2001, 1, 1, persistent = true))
+  }
+
+  test("resident client connection budgets include bootstrap metadata and coordinator sockets") {
+    assertEquals(CoordinatorScaleQualification.connectionLimit(60, persistent = true), 1000)
+    assertEquals(CoordinatorScaleQualification.connectionLimit(1000, persistent = true), 3032)
+    assertEquals(CoordinatorScaleQualification.connectionLimit(2000, persistent = true), 6032)
+    assertEquals(CoordinatorScaleQualification.connectionLimit(1000, persistent = false), 1000)
   }

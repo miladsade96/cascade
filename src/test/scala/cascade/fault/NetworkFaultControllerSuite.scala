@@ -6,6 +6,21 @@ import java.net.SocketTimeoutException
 import munit.FunSuite
 
 final class NetworkFaultControllerSuite extends FunSuite:
+  test("reply observation preserves response bytes and healing removes the observer") {
+    val faults = NetworkFaultController()
+    val call = PeerCall(1, 2, -101, Vector.empty)
+    var observed = 0
+    faults.observeReplies { (actual, bytes) =>
+      assertEquals(actual, call)
+      assertEquals(bytes.toVector, Vector[Byte](1, 2))
+      observed += 1
+    }
+    assertEquals(faults.afterCall(call, ByteCursor(Array[Byte](1, 2))).readBytes(2).toVector, Vector[Byte](1, 2))
+    faults.heal()
+    assertEquals(faults.afterCall(call, ByteCursor(Array[Byte](3))).readByte(), 3.toByte)
+    assertEquals(observed, 1)
+  }
+
   test("directional and API-specific faults only reject matching calls") {
     val faults = NetworkFaultController()
     val metadata = FaultSelector(1, 2, Some((-101).toShort))
