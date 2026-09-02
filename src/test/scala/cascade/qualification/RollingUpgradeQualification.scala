@@ -385,6 +385,15 @@ object RollingUpgradeQualification:
     val copy = probeDirectory.resolve("cluster-metadata.log")
     try
       Files.copy(source, copy, REPLACE_EXISTING): Unit
+      val objects = cascade.cluster.ShardObjectStore.pathFor(source)
+      if Files.exists(objects) then
+        val targetObjects = cascade.cluster.ShardObjectStore.pathFor(copy)
+        Files.createDirectories(targetObjects)
+        val entries = Files.list(objects)
+        try entries.iterator().asScala.filter(Files.isRegularFile(_)).foreach { entry =>
+          Files.copy(entry, targetObjects.resolve(entry.getFileName), REPLACE_EXISTING): Unit
+        }
+        finally entries.close()
       val store = MetadataStore(copy)
       try store.metadata
       finally store.close()
