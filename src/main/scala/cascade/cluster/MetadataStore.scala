@@ -18,6 +18,14 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   private var closed = false
   private var appendPosition = 0L
   private var checkpointBytes = 0L
+  private var checkpointObjectBytes = 0L
+  private var shardObjects = Option.empty[ShardObjectStore]
+  private def objects: ShardObjectStore = shardObjects match
+    case Some(value) => value
+    case None =>
+      val value = ShardObjectStore(ShardObjectStore.pathFor(path))
+      shardObjects = Some(value)
+      value
   private var statistics = MetadataJournalSnapshot.Empty
   private var current =
     try recover()
@@ -31,21 +39,26 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
   def commit(next: ClusterMetadata): Unit = synchronized {
     ensureOpen()
     if next.version > current.version then
-      val payload = MetadataDelta.between(current, next).map(MetadataDeltaCodec.encode).getOrElse(MetadataCodec.encode(next))
+      val prepared = Option.when(ShardMetadataRecord.enabled(next))(ShardMetadataRecord.prepare(current, next, objects))
+      val payload = prepared.map(_.bytes).getOrElse(
+        MetadataDelta.between(current, next).map(MetadataDeltaCodec.encode).getOrElse(MetadataCodec.encode(next)))
       val frame = encodeFrame(payload)
       writeFully(ByteBuffer.wrap(frame), appendPosition)
       channel.force(false)
       appendPosition += frame.length
       statistics =
-        if MetadataDeltaCodec.isDelta(payload) then statistics.copy(deltaRecords = statistics.deltaRecords + 1L, deltaBytes = statistics.deltaBytes + frame.length)
+        if prepared.exists(_.isDelta) || MetadataDeltaCodec.isDelta(payload) then statistics.copy(deltaRecords = statistics.deltaRecords + 1L, deltaBytes = statistics.deltaBytes + frame.length)
         else statistics.copy(fullRecords = statistics.fullRecords + 1L, fullBytes = statistics.fullBytes + frame.length)
       current = next
-      if appendPosition - checkpointBytes >= compactionBytes then compactCurrent()
+      val objectReplayBytes = shardObjects.map(_.snapshot.liveBytes - checkpointObjectBytes).getOrElse(0L)
+      if appendPosition - checkpointBytes + math.max(0L, objectReplayBytes) >= compactionBytes then compactCurrent()
   }
 
   def journalSize: Long = synchronized(channel.size())
 
   def snapshot: MetadataJournalSnapshot = synchronized(statistics.copy(journalBytes = appendPosition))
+
+  def objectSnapshot: ShardObjectSnapshot = synchronized(shardObjects.map(_.snapshot).getOrElse(ShardObjectSnapshot()))
 
   override def close(): Unit = synchronized {
     if !closed then
@@ -76,15 +89,19 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
           checksum.update(payload, 0, payload.length)
           if checksum.getValue.toInt != expected then scanning = false
           else
+            val shardRecord = Option.when(ShardMetadataRecord.isRecord(payload))(ShardMetadataRecord.replay(payload, latest, objects))
             val decoded =
-              if MetadataDeltaCodec.isDelta(payload) then
+              if shardRecord.nonEmpty then shardRecord.get.metadata
+              else if MetadataDeltaCodec.isDelta(payload) then
                 MetadataDeltaCodec.decode(payload).applyTo(latest)
                   .fold(message => throw ProtocolException(s"invalid metadata delta at $position: $message"), identity)
               else MetadataCodec.decode(payload)
             if decoded.version <= latest.version then
               throw ProtocolException(s"non-monotonic metadata version ${decoded.version} at $position")
             latest = decoded
-            if position == 0L then checkpointBytes = frameSize
+            if position == 0L then
+              checkpointBytes = frameSize
+              checkpointObjectBytes = shardRecord.map(_.references.iterator.map(_.length.toLong).sum).getOrElse(0L)
             position += frameSize
     if position < fileSize then
       channel.truncate(position)
@@ -118,7 +135,8 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
       position += read
 
   private def compactCurrent(): Unit =
-    val frame = encodeFrame(MetadataCodec.encode(current))
+    val prepared = Option.when(ShardMetadataRecord.enabled(current))(ShardMetadataRecord.checkpoint(current, objects))
+    val frame = encodeFrame(prepared.map(_.bytes).getOrElse(MetadataCodec.encode(current)))
     val temporary = path.resolveSibling(path.getFileName.toString + ".cleaned")
     Files.deleteIfExists(temporary): Unit
     val output = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
@@ -133,6 +151,7 @@ final class MetadataStore(path: Path, compactionBytes: Long = Long.MaxValue) ext
     appendPosition = frame.length
     checkpointBytes = frame.length
     statistics = statistics.copy(checkpointBytes = statistics.checkpointBytes + frame.length)
+    checkpointObjectBytes = shardObjects.map(_.snapshot.liveBytes).getOrElse(0L)
 
   private def encodeFrame(payload: Array[Byte]): Array[Byte] =
     if payload.length <= 0 || payload.length > MaximumImageBytes then
