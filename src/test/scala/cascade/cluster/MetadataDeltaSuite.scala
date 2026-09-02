@@ -11,7 +11,8 @@ object MetadataDeltaFixture:
   def update(base: ClusterMetadata, group: String = "workers", offset: Long = 1L): (MetadataDelta, ClusterMetadata) =
     val id = CoordinatorShard.group(group)
     val before = CoordinatorShardState.payloads(base.coordinator.groupState, base.coordinator.deliveryState)
-    val offsets = GroupCodec.decode(base.coordinator.groupState.toArray).offsets.filterNot(_.key.groupId == group) :+
+    val existing = if base.coordinator.groupState.isEmpty then Vector.empty else GroupCodec.decode(base.coordinator.groupState.toArray).offsets
+    val offsets = existing.filterNot(_.key.groupId == group) :+
       OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, 1L))
     val groups = GroupCodec.encode(GroupImage(0L, Vector.empty, offsets)).toVector
     val payload = GroupShardCodec.split(groups)(id)
