@@ -2,8 +2,18 @@ package cascade.coordinator
 
 import cascade.cluster.*
 import java.time.Duration
+import java.util.Properties
+import java.util.concurrent.TimeUnit
+import org.apache.kafka.clients.admin.{Admin, NewTopic}
 
 object CoordinatorProbe:
+  def activate(bootstrap: String): Unit =
+    val properties = Properties()
+    properties.setProperty("bootstrap.servers", bootstrap)
+    val admin = Admin.create(properties)
+    try admin.createTopics(java.util.List.of(NewTopic("coordinator-qualification", 1, 3.toShort))).all().get(20L, TimeUnit.SECONDS): Unit
+    finally admin.close(Duration.ofSeconds(2))
+
   def snapshot(node: ClusterNode): (Long, Int, ClusterMetadata) =
     val peer = PeerClient()
     try

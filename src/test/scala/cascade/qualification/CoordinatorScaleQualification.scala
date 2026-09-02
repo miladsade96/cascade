@@ -1,0 +1,137 @@
+package cascade.qualification
+
+import cascade.coordinator.CoordinatorProbe
+import cascade.fault.FaultCluster
+import java.nio.file.{Files, Path}
+import java.time.Instant
+import java.util.Properties
+import java.util.concurrent.{Callable, Executors, TimeUnit}
+import org.apache.kafka.clients.consumer.{KafkaConsumer, OffsetAndMetadata}
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.serialization.ByteArrayDeserializer
+import scala.jdk.CollectionConverters.*
+
+final case class CoordinatorScaleReport(
+    groups: Int, concurrency: Int, rounds: Int, verified: Int, writes: Int,
+    seconds: Double, p50Millis: Double, p95Millis: Double, p99Millis: Double,
+    checkpointAttempts: Long, checkpointFailures: Long, deltaBytes: Long, fullImageBytes: Long,
+    owners: Vector[Int], controllerFailover: Boolean, restartRecovery: Boolean,
+    revision: String, startedAt: Instant
+):
+  def json: String =
+    f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery}"""
+
+object CoordinatorScaleQualification:
+  def main(arguments: Array[String]): Unit =
+    require(arguments.length % 2 == 0, "options require values")
+    val pairs = arguments.grouped(2).map(a => a(0) -> a(1)).toVector
+    require(pairs.map(_._1).distinct.size == pairs.size, "duplicate option")
+    require(pairs.forall(p => Set("--groups", "--concurrency", "--rounds", "--report")(p._1)), "unknown option")
+    val options = pairs.toMap
+    val path = Path.of(options.getOrElse("--report", "artifacts/coordinator-scale.json")).toAbsolutePath
+    Files.createDirectories(path.getParent)
+    try
+      val result = run(options.getOrElse("--groups", "1000").toInt, options.getOrElse("--concurrency", "8").toInt, options.getOrElse("--rounds", "2").toInt)
+      Files.writeString(path, result.json + "\n")
+      println(s"COORDINATOR_SCALE_RESULT ${result.json}")
+    catch
+      case error: Exception =>
+        Files.writeString(path, s"""{"status":"failed","at":"${Instant.now()}"}""" + "\n")
+        throw error
+
+  def run(groupCount: Int, concurrency: Int, rounds: Int): CoordinatorScaleReport =
+    require(groupCount >= 3 && groupCount <= 100000, "groups must be between 3 and 100000")
+    require(concurrency > 0 && concurrency <= 64, "concurrency must be between 1 and 64")
+    require(rounds > 0 && rounds <= 100, "rounds must be between 1 and 100")
+    val startedAt = Instant.now()
+    val revision = currentRevision()
+    val cluster = FaultCluster(3, recordCalls = false)
+    val executor = Executors.newFixedThreadPool(concurrency)
+    val partition = TopicPartition("coordinator-qualification", 0)
+    val latencies = new java.util.concurrent.ConcurrentLinkedQueue[Long]()
+    var writeNanos = 0L
+    def consumer(bootstrap: String, index: Int): KafkaConsumer[Array[Byte], Array[Byte]] =
+      val properties = Properties()
+      properties.setProperty("bootstrap.servers", bootstrap)
+      properties.setProperty("group.id", s"scale-group-$index")
+      properties.setProperty("group.protocol", "classic")
+      properties.setProperty("enable.auto.commit", "false")
+      properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
+      properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
+      properties.setProperty("default.api.timeout.ms", "30000")
+      properties.setProperty("request.timeout.ms", "5000")
+      KafkaConsumer[Array[Byte], Array[Byte]](properties)
+    def parallel(action: Int => Unit): Unit =
+      val futures = (0 until groupCount).map { index =>
+        executor.submit(new Callable[Unit]:
+          override def call(): Unit = action(index)
+        )
+      }
+      futures.foreach(_.get(120L, TimeUnit.SECONDS))
+    def write(bootstrap: String, phase: Int, count: Int): Unit =
+      val started = System.nanoTime()
+      parallel { index =>
+        val client = consumer(bootstrap, index)
+        try
+          client.assign(java.util.List.of(partition))
+          (1 to count).foreach { round =>
+            val begin = System.nanoTime()
+            client.commitSync(Map(partition -> OffsetAndMetadata(index.toLong * 1000L + phase * 100L + round)).asJava)
+            latencies.add(System.nanoTime() - begin): Unit
+          }
+        finally client.close()
+      }
+      writeNanos += System.nanoTime() - started
+    def verify(bootstrap: String, phase: Int, round: Int): Unit = parallel { index =>
+      val client = consumer(bootstrap, index)
+      try
+        val actual = Option(client.committed(java.util.Set.of(partition)).get(partition)).map(_.offset())
+        require(actual.contains(index.toLong * 1000L + phase * 100L + round), s"wrong recovered offset for group $index: $actual")
+      finally client.close()
+    }
+    try
+      cluster.startAll()
+      CoordinatorProbe.activate(cluster.bootstrapServers)
+      val controller = CoordinatorProbe.controller(cluster.nodes)
+      write(cluster.bootstrapServers, 0, rounds)
+      verify(cluster.bootstrapServers, 0, rounds)
+      val initialMetrics = cluster.nodes.map(n => n.id -> cluster.broker(n.id).metricsSnapshot.coordinator).toMap
+      val owners = initialMetrics.collect { case (id, metrics) if metrics.attempts > 0L => id }.toVector.sorted
+      if groupCount >= 30 then require(owners.size == 3, s"not every broker served coordinator writes: $owners")
+      cluster.stop(controller.id)
+      val survivors = cluster.nodes.filterNot(_.id == controller.id)
+      CoordinatorProbe.controller(survivors, Set(controller.id))
+      val bootstrap = survivors.map(n => s"${n.host}:${n.port}").mkString(",")
+      verify(bootstrap, 0, rounds)
+      write(bootstrap, 1, 1)
+      verify(bootstrap, 1, 1)
+      val metrics = cluster.nodes.map { node =>
+        if node.id == controller.id then initialMetrics(node.id) else cluster.broker(node.id).metricsSnapshot.coordinator
+      }
+      // Restart every process from its existing disk, including the controller that missed the last phase.
+      survivors.foreach(n => cluster.stop(n.id))
+      cluster.startAll()
+      CoordinatorProbe.controller(cluster.nodes)
+      verify(cluster.bootstrapServers, 1, 1)
+      val sorted = latencies.asScala.toVector.sorted
+      def percentile(p: Double): Double = sorted(math.min(sorted.size - 1, math.ceil(sorted.size * p).toInt - 1)) / 1000000d
+      CoordinatorScaleReport(groupCount, concurrency, rounds, groupCount, groupCount * (rounds + 1), writeNanos / 1e9,
+        percentile(0.50), percentile(0.95), percentile(0.99), metrics.map(_.attempts).sum, metrics.map(_.failures).sum,
+        metrics.map(_.deltaBytes).sum, metrics.map(_.fullImageBytes).sum, owners, true, true, revision, startedAt)
+    finally
+      executor.shutdownNow()
+      executor.awaitTermination(10L, TimeUnit.SECONDS)
+      cluster.close()
+
+  private def currentRevision(): String =
+    def git(arguments: String*): String =
+      val process = ProcessBuilder((Vector("git") ++ arguments).asJava).redirectErrorStream(true).start()
+      if !process.waitFor(5L, TimeUnit.SECONDS) then
+        process.destroyForcibly()
+        throw IllegalStateException("git revision lookup timed out")
+      val result = String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
+      if process.exitValue() != 0 then throw IllegalStateException("git revision lookup failed")
+      result
+    val revision = git("rev-parse", "HEAD")
+    require(revision.matches("[0-9a-f]{40}"), "invalid revision")
+    revision + (if git("status", "--porcelain").nonEmpty then "+working-tree" else "")

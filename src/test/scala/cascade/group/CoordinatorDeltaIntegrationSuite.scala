@@ -15,6 +15,7 @@ final class CoordinatorDeltaIntegrationSuite extends FunSuite:
     val cluster = FaultCluster(3)
     try
       cluster.startAll()
+      CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       val (term, _, metadata) = CoordinatorProbe.snapshot(controller)
       val a = "group-a"
@@ -44,6 +45,7 @@ final class CoordinatorDeltaIntegrationSuite extends FunSuite:
     val cluster = FaultCluster(3)
     try
       cluster.startAll()
+      CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       val (term, _, initial) = CoordinatorProbe.snapshot(controller)
       val group = "transaction-workers"
