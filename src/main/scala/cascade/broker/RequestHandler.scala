@@ -38,6 +38,9 @@ final class RequestHandler(
   }
   private val peerAuthenticator = PeerAuthenticator(config.security.peer)
   private val audit = config.security.audit.path.map(path => AuditLog.open(path, config.security.audit.forceEachEvent))
+  private val offsetBatcher = Option.when(clusterManager.isEnabled) {
+    OffsetCommitBatcher(config.offsetBatch, groupCoordinator.commitOffsetBatch, isCoordinatorFor)
+  }
 
   def auditTransport(session: ConnectionSession): Unit =
     if session.secure then
@@ -51,6 +54,7 @@ final class RequestHandler(
       .orElse(oauthJwks.flatMap(_.lastReloadError))
 
   override def close(): Unit =
+    offsetBatcher.foreach(_.close())
     oauthJwks.foreach(_.close())
     audit.foreach(_.close())
 
@@ -473,8 +477,10 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val validValues = requests.flatMap(_._2).filter(_.exists).map(_.value)
     val groupError =
-      if isCoordinatorFor(groupId) then groupCoordinator.commitOffsets(groupId, generationId, memberId, groupInstanceId, validValues)
-      else Errors.NotCoordinator
+      if !isCoordinatorFor(groupId) then Errors.NotCoordinator
+      else offsetBatcher match
+        case Some(batcher) => batcher.commit(OffsetCommitCommand(groupId, generationId, memberId, groupInstanceId, validValues))
+        case None => groupCoordinator.commitOffsets(groupId, generationId, memberId, groupInstanceId, validValues)
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requests) { case (topic, partitions) =>
       writer.writeString(topic)

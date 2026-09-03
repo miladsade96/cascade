@@ -135,3 +135,59 @@ final class OffsetCommitBatcherSuite extends FunSuite:
       batcher.close()
       executor.close()
   }
+
+  test("shutdown rejects pending and new work but drains an active publication") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val executor = Executors.newFixedThreadPool(3)
+    val batcher = OffsetCommitBatcher(OffsetBatchConfig(maxRequests = 1, lingerMillis = 0L), (commands, admission) =>
+      val results = commands.indices.map(admission).toVector
+      entered.countDown()
+      if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
+      results, _ => true)
+    try
+      val active = executor.submit[Short](() => batcher.commit(command("active")))
+      assert(entered.await(5L, TimeUnit.SECONDS))
+      val pending = executor.submit[Short](() => batcher.commit(command("pending")))
+      val closing = executor.submit[Unit](() => batcher.close())
+      assertEquals(pending.get(5L, TimeUnit.SECONDS), Errors.CoordinatorNotAvailable)
+      assertEquals(batcher.commit(command("after-close")), Errors.CoordinatorNotAvailable)
+      intercept[TimeoutException](closing.get(20L, TimeUnit.MILLISECONDS))
+      release.countDown()
+      assertEquals(active.get(5L, TimeUnit.SECONDS), Errors.None)
+      closing.get(5L, TimeUnit.SECONDS)
+    finally
+      release.countDown()
+      batcher.close()
+      executor.close()
+  }
+
+  test("interrupted callers retain the active publication barrier and recover interrupt status") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val finished = CountDownLatch(1)
+    val result = AtomicInteger(-1)
+    val interruptStatus = AtomicInteger()
+    val batcher = OffsetCommitBatcher(OffsetBatchConfig(), (commands, admission) =>
+      val results = commands.indices.map(admission).toVector
+      entered.countDown()
+      if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
+      results, _ => true)
+    val caller = Thread.ofPlatform().start(() =>
+      result.set(batcher.commit(command("active")).toInt)
+      interruptStatus.set(if Thread.currentThread().isInterrupted then 1 else 0)
+      finished.countDown()
+    )
+    try
+      assert(entered.await(5L, TimeUnit.SECONDS))
+      caller.interrupt()
+      assert(!finished.await(20L, TimeUnit.MILLISECONDS))
+      release.countDown()
+      assert(finished.await(5L, TimeUnit.SECONDS))
+      assertEquals(result.get(), Errors.None.toInt)
+      assertEquals(interruptStatus.get(), 1)
+    finally
+      release.countDown()
+      batcher.close()
+      caller.join(5000L)
+  }
