@@ -1,16 +1,60 @@
 package cascade.group
 
-import cascade.cluster.{ClusterNode, CoordinatorRouting, InternalApi}
+import cascade.cluster.{ClusterNode, CoordinatorRouting, InternalApi, MetadataStore, ShardStorageFixture}
+import cascade.backup.BackupRestore
 import cascade.coordinator.CoordinatorProbe
 import cascade.fault.{FaultCluster, FaultSelector}
 import cascade.protocol.{ApiKey, ByteCursor, ByteWriter, Errors}
 import java.io.{DataInputStream, DataOutputStream}
 import java.net.Socket
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit, TimeoutException}
 import munit.FunSuite
 
 final class OffsetBatchQuorumSuite extends FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(60L, "seconds")
+
+  test("online snapshots wait for batched publication and restore its acknowledged offsets") {
+    ShardStorageFixture.withDirectory { root =>
+      val cluster = FaultCluster(3, peerTimeoutMillis = 3000, heartbeatMillis = 250, electionTimeoutMillis = 10000)
+      val executor = Executors.newFixedThreadPool(2)
+      val persisted = CountDownLatch(2)
+      val release = CountDownLatch(1)
+      val snapshotStarted = CountDownLatch(1)
+      try
+        cluster.startAll()
+        CoordinatorProbe.activate(cluster.bootstrapServers)
+        val controller = CoordinatorProbe.controller(cluster.nodes)
+        val group = Iterator.from(0).map(i => s"batch-snapshot-$i")
+          .find(key => CoordinatorRouting.owner(key, cluster.nodes).exists(_.id == controller.id)).get
+        cluster.faults.observeReplies { (call, _) =>
+          if call.sourceId == controller.id && call.apiKey == InternalApi.MetadataDeltaCommit then
+            persisted.countDown()
+            if !release.await(3L, TimeUnit.SECONDS) then throw IllegalStateException("snapshot publication barrier timed out")
+        }
+        val write = executor.submit[Short](() => commit(controller, group, 42L))
+        assert(persisted.await(3L, TimeUnit.SECONDS))
+        val snapshot = executor.submit[cascade.backup.BackupManifest](() =>
+          snapshotStarted.countDown()
+          cluster.broker(controller.id).createOnlineSnapshot(root.resolve("backup")))
+        assert(snapshotStarted.await(1L, TimeUnit.SECONDS))
+        intercept[TimeoutException](snapshot.get(50L, TimeUnit.MILLISECONDS))
+        release.countDown()
+        assertEquals(write.get(5L, TimeUnit.SECONDS), Errors.None)
+        val manifest = snapshot.get(5L, TimeUnit.SECONDS)
+        assert(manifest.entries.exists(_.relativePath.contains(".shards/")))
+        BackupRestore.restore(root.resolve("backup"), root.resolve("restored"))
+        val recovered = MetadataStore(root.resolve("restored/.cascade/cluster-metadata.log"))
+        try
+          val offsets = GroupCodec.decode(recovered.metadata.coordinator.groupState.toArray).offsets
+          assertEquals(offsets.map(v => v.key.groupId -> v.value.offset), Vector(group -> 42L))
+        finally recovered.close()
+      finally
+        release.countDown()
+        cluster.faults.heal()
+        executor.close()
+        cluster.close()
+    }
+  }
 
   test("batched wire commits fail together without a quorum and recover exactly after retry and restart") {
     val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 10000,
