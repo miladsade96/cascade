@@ -369,6 +369,12 @@ final class BrokerIntegrationSuite extends FunSuite:
         assert(resources.head._4.exists(value => value._1 == "broker.id" && value._2.contains("1") && value._4 == 4.toByte))
         assert(resources(1)._4.exists(value => value._1 == "cleanup.policy" && value._2.contains("delete") && value._4 == 5.toByte))
         assert(resources.flatMap(_._4).forall(value => value._3 && !value._5))
+        val batching = resources.head._4.filter(_._1.startsWith("cascade.offset.batch."))
+          .map(value => value._1 -> value._2.getOrElse("")).toMap
+        assertEquals(batching, Map(
+          "cascade.offset.batch.max.requests" -> "64", "cascade.offset.batch.max.bytes" -> "1048576",
+          "cascade.offset.batch.pending.requests" -> "1024", "cascade.offset.batch.pending.bytes" -> "16777216",
+          "cascade.offset.batch.linger.ms" -> "2", "cascade.offset.batch.queue.timeout.ms" -> "5000"))
       finally socket.close()
     }
   }

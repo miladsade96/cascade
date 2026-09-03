@@ -66,6 +66,22 @@ spec:
           annotations:
             summary: Cascade JVM heap usage is sustained above 85 percent
             description: Inspect traffic, segment indexes, client cardinality, and GC before scaling.
+        - alert: CascadeOffsetBatchAdmissionRejected
+          expr: increase(cascade_offset_batch_rejected_total[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Cascade is rejecting offset batch admission
+            description: Inspect pending bytes, request size, coordinator latency, and client retries before raising limits.
+        - alert: CascadeOffsetBatchFailureRate
+          expr: rate(cascade_offset_batch_failed_total[5m]) / clamp_min(rate(cascade_offset_batch_completed_total[5m]), 0.001) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: More than ten percent of admitted offset requests are failing
+            description: Correlate shard conflicts, ownership changes, quorum health, and queue deadlines; this includes retriable errors.
     - name: cascade.integrity
       rules:
         - alert: CascadeStorageAdmissionRejected
