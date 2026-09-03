@@ -50,6 +50,38 @@ final class OffsetCommitIsolationSuite extends FunSuite:
     }
   }
 
+  test("a queued static member is revalidated after replacement before any offset mutation") {
+    withCoordinator { coordinator =>
+      def join = JoinGroupCommand("workers", 10000, 10000, "", Some("instance"), "consumer",
+        Vector(GroupProtocol("range", Array[Byte](1))), "batch-fencing")
+      val original = coordinator.join(join)
+      assertEquals(original.errorCode, Errors.None)
+      assertEquals(coordinator.sync("workers", original.generationId, original.memberId, Some("instance"),
+        Vector(original.memberId -> Array[Byte](1))).errorCode, Errors.None)
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val executor = Executors.newSingleThreadExecutor()
+      val batcher = OffsetCommitBatcher(OffsetBatchConfig(), (commands, admission) =>
+        entered.countDown()
+        if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("fencing barrier timed out")
+        coordinator.commitOffsetBatch(commands, admission), _ => true)
+      try
+        val pending = executor.submit[Short](() => batcher.commit(OffsetCommitCommand("workers",
+          original.generationId, original.memberId, Some("instance"), Vector(offset("workers", 99L)))))
+        assert(entered.await(5L, TimeUnit.SECONDS))
+        val replacement = coordinator.join(join)
+        assertEquals(replacement.errorCode, Errors.None)
+        assertNotEquals(replacement.memberId, original.memberId)
+        release.countDown()
+        assertEquals(pending.get(5L, TimeUnit.SECONDS), Errors.FencedInstanceId)
+        assertEquals(coordinator.allOffsets("workers"), Vector.empty)
+      finally
+        release.countDown()
+        batcher.close()
+        executor.close()
+    }
+  }
+
   for accepted <- Vector(true, false) do
     test(s"offset readers wait for publication and observe only authoritative state: accepted=$accepted") {
       withCoordinator { coordinator =>

@@ -63,6 +63,28 @@ final class OffsetCommitBatcherSuite extends FunSuite:
     finally batcher.close()
   }
 
+  test("batch byte bounds split individually valid concurrent commands") {
+    val maximumBytes = java.util.concurrent.atomic.AtomicLong()
+    val calls = AtomicInteger()
+    val start = CountDownLatch(1)
+    val executor = Executors.newFixedThreadPool(4)
+    val batcher = OffsetCommitBatcher(OffsetBatchConfig(maxRequests = 4, maxBytes = 1024L, lingerMillis = 100L),
+      (commands, admission) =>
+        maximumBytes.accumulateAndGet(commands.map(_.retainedBytes).sum, (a, b) => math.max(a, b))
+        calls.incrementAndGet()
+        commands.indices.map(admission).toVector, _ => true)
+    try
+      val requests = (1 to 4).map(id => executor.submit[Short](() => { start.await(); batcher.commit(command(s"group-$id")) }))
+      start.countDown()
+      requests.foreach(result => assertEquals(result.get(5L, TimeUnit.SECONDS), Errors.None))
+      assert(maximumBytes.get() <= 1024L)
+      assertEquals(calls.get(), 4)
+    finally
+      start.countDown()
+      batcher.close()
+      executor.close()
+  }
+
   test("publication exceptions fail callers and do not strand the worker") {
     val calls = AtomicInteger()
     val batcher = OffsetCommitBatcher(OffsetBatchConfig(), (commands, admission) =>
