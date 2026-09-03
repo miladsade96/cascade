@@ -2,6 +2,7 @@ package cascade.qualification
 
 import cascade.coordinator.CoordinatorProbe
 import cascade.fault.FaultCluster
+import cascade.group.OffsetBatchConfig
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.Properties
@@ -23,13 +24,16 @@ final case class CoordinatorScaleReport(
     clientLifecycle: String = "churn", clientsCreated: Int = 0, warmupSeconds: Double = 0d,
     objectWrittenBytes: Long = 0L, objectsWritten: Long = 0L, objectsReused: Long = 0L,
     objectReclaimedBytes: Long = 0L, objectStoredBytes: Long = 0L,
-    maxConnectionsPerIp: Int = 1000, rejectedConnections: Long = 0L
+    maxConnectionsPerIp: Int = 1000, rejectedConnections: Long = 0L,
+    batchMaxRequests: Int = 64, batchLingerMillis: Long = 2L,
+    batches: Long = 0L, batchedRequests: Long = 0L, batchFailed: Long = 0L,
+    batchRejected: Long = 0L, batchPeakRequests: Int = 0, batchPeakBytes: Long = 0L
 ):
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
 
   def json: String = baseJson.dropRight(1) +
-    f""", "client_lifecycle":"$clientLifecycle","clients_created":$clientsCreated,"warmup_writes":${if clientLifecycle == "persistent" then groups else 0},"warmup_seconds":$warmupSeconds%.3f,"object_written_bytes":$objectWrittenBytes,"objects_written":$objectsWritten,"objects_reused":$objectsReused,"object_reclaimed_bytes":$objectReclaimedBytes,"object_stored_bytes":$objectStoredBytes,"max_connections_per_ip":$maxConnectionsPerIp,"rejected_connections":$rejectedConnections}"""
+    f""", "client_lifecycle":"$clientLifecycle","clients_created":$clientsCreated,"warmup_writes":${if clientLifecycle == "persistent" then groups else 0},"warmup_seconds":$warmupSeconds%.3f,"object_written_bytes":$objectWrittenBytes,"objects_written":$objectsWritten,"objects_reused":$objectsReused,"object_reclaimed_bytes":$objectReclaimedBytes,"object_stored_bytes":$objectStoredBytes,"max_connections_per_ip":$maxConnectionsPerIp,"rejected_connections":$rejectedConnections,"batch_max_requests":$batchMaxRequests,"batch_linger_ms":$batchLingerMillis,"batches":$batches,"batched_requests":$batchedRequests,"batch_failed":$batchFailed,"batch_rejected":$batchRejected,"batch_peak_requests":$batchPeakRequests,"batch_peak_bytes":$batchPeakBytes}"""
 
 object CoordinatorScaleQualification:
   // Every client can retain bootstrap, metadata, and coordinator connections to one address.
@@ -40,7 +44,8 @@ object CoordinatorScaleQualification:
     require(arguments.length % 2 == 0, "options require values")
     val pairs = arguments.grouped(2).map(a => a(0) -> a(1)).toVector
     require(pairs.map(_._1).distinct.size == pairs.size, "duplicate option")
-    require(pairs.forall(p => Set("--groups", "--concurrency", "--rounds", "--report", "--client-lifecycle")(p._1)), "unknown option")
+    require(pairs.forall(p => Set("--groups", "--concurrency", "--rounds", "--report", "--client-lifecycle",
+      "--batch-max-requests", "--batch-linger-ms")(p._1)), "unknown option")
     val options = pairs.toMap
     val path = Path.of(options.getOrElse("--report", "artifacts/coordinator-scale.json")).toAbsolutePath
     Files.createDirectories(path.getParent)
@@ -48,7 +53,9 @@ object CoordinatorScaleQualification:
       val lifecycle = options.getOrElse("--client-lifecycle", "churn")
       require(Set("churn", "persistent")(lifecycle), "client lifecycle must be churn or persistent")
       val result = run(options.getOrElse("--groups", "1000").toInt, options.getOrElse("--concurrency", "8").toInt,
-        options.getOrElse("--rounds", "2").toInt, persistent = lifecycle == "persistent")
+        options.getOrElse("--rounds", "2").toInt, persistent = lifecycle == "persistent",
+        batchConfig = OffsetBatchConfig(maxRequests = options.getOrElse("--batch-max-requests", "64").toInt,
+          lingerMillis = options.getOrElse("--batch-linger-ms", "2").toLong))
       Files.writeString(path, result.json + "\n")
       println(s"COORDINATOR_SCALE_RESULT ${result.json}")
     catch
@@ -56,7 +63,8 @@ object CoordinatorScaleQualification:
         Files.writeString(path, s"""{"status":"failed","at":"${Instant.now()}"}""" + "\n")
         throw error
 
-  def run(groupCount: Int, concurrency: Int, rounds: Int, persistent: Boolean = false): CoordinatorScaleReport =
+  def run(groupCount: Int, concurrency: Int, rounds: Int, persistent: Boolean = false,
+      batchConfig: OffsetBatchConfig = OffsetBatchConfig()): CoordinatorScaleReport =
     require(groupCount >= 3 && groupCount <= 100000, "groups must be between 3 and 100000")
     require(concurrency > 0 && concurrency <= 64, "concurrency must be between 1 and 64")
     require(rounds > 0 && rounds <= 100, "rounds must be between 1 and 100")
@@ -64,7 +72,7 @@ object CoordinatorScaleQualification:
     val startedAt = Instant.now()
     val revision = currentRevision()
     val perIpLimit = connectionLimit(groupCount, persistent)
-    val cluster = FaultCluster(3, recordCalls = false, maxConnectionsPerIp = perIpLimit)
+    val cluster = FaultCluster(3, recordCalls = false, maxConnectionsPerIp = perIpLimit, offsetBatch = batchConfig)
     val executor = Executors.newFixedThreadPool(concurrency)
     val partition = TopicPartition("coordinator-qualification", 0)
     val latencies = new java.util.concurrent.ConcurrentLinkedQueue[Long]()
@@ -153,6 +161,10 @@ object CoordinatorScaleQualification:
         if node.id == controller.id then initialMetrics(node.id) else cluster.broker(node.id).metricsSnapshot
       }
       val coordinatorMetrics = metrics.map(_.coordinator)
+      val batching = metrics.map(_.offsetBatch)
+      require(batching.map(_.rejected).sum == 0L, "coordinator campaign exceeded offset batch admission")
+      require(batching.forall(m => m.peakRequests <= batchConfig.maxPendingRequests && m.peakBytes <= batchConfig.maxPendingBytes),
+        "offset batching exceeded its configured retained-work bounds")
       val admissionRejections = metrics.map(_.rejectedConnections).sum
       require(admissionRejections == 0L, s"coordinator capacity campaign hit connection admission: $admissionRejections")
       require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
@@ -177,7 +189,9 @@ object CoordinatorScaleQualification:
         if persistent then "persistent" else "churn", clientsCreated.get(), warmupSeconds,
         metrics.map(_.shardObjects.writtenBytes).sum, metrics.map(_.shardObjects.writtenObjects).sum,
         metrics.map(_.shardObjects.reusedObjects).sum, metrics.map(_.shardObjects.reclaimedBytes).sum,
-        metrics.map(_.shardObjects.liveBytes).sum, perIpLimit, admissionRejections)
+        metrics.map(_.shardObjects.liveBytes).sum, perIpLimit, admissionRejections,
+        batchConfig.maxRequests, batchConfig.lingerMillis, batching.map(_.batches).sum, batching.map(_.batchRequests).sum,
+        batching.map(_.failed).sum, batching.map(_.rejected).sum, batching.map(_.peakRequests).max, batching.map(_.peakBytes).max)
     catch
       case scala.util.control.NonFatal(error) =>
         System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")
