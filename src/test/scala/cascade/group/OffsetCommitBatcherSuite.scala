@@ -1,7 +1,7 @@
 package cascade.group
 
 import cascade.protocol.Errors
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit, TimeoutException}
 import java.util.concurrent.atomic.AtomicInteger
 import munit.FunSuite
 
@@ -62,4 +62,76 @@ final class OffsetCommitBatcherSuite extends FunSuite:
       assertEquals(batcher.commit(command("first")), Errors.CoordinatorNotAvailable)
       assertEquals(batcher.commit(command("second")), Errors.None)
     finally batcher.close()
+  }
+
+  for byteBound <- Vector(false, true) do
+    test(s"pending admission includes in-flight requests: byte bound=$byteBound") {
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val executor = Executors.newFixedThreadPool(1)
+      val config = OffsetBatchConfig(maxRequests = 1, maxBytes = 1024L,
+        maxPendingRequests = if byteBound then 8 else 1, maxPendingBytes = 1024L, lingerMillis = 0L)
+      val batcher = OffsetCommitBatcher(config, (commands, admission) =>
+        val results = commands.indices.map(admission).toVector
+        entered.countDown()
+        if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
+        results, _ => true)
+      try
+        val active = executor.submit[Short](() => batcher.commit(command("first")))
+        assert(entered.await(5L, TimeUnit.SECONDS))
+        assertEquals(batcher.commit(command("second")), Errors.RequestTimedOut)
+        release.countDown()
+        assertEquals(active.get(5L, TimeUnit.SECONDS), Errors.None)
+      finally
+        release.countDown()
+        batcher.close()
+        executor.close()
+    }
+
+  test("claimed requests that expire while waiting for the service lock cannot later mutate") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val mutations = AtomicInteger()
+    val executor = Executors.newFixedThreadPool(1)
+    val batcher = OffsetCommitBatcher(OffsetBatchConfig(queueTimeoutMillis = 100L), (commands, admission) =>
+      entered.countDown()
+      if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
+      commands.indices.map { index =>
+        val gate = admission(index)
+        if gate == Errors.None then mutations.incrementAndGet()
+        gate
+      }.toVector, _ => true)
+    try
+      val result = executor.submit[Short](() => batcher.commit(command("expired")))
+      assert(entered.await(5L, TimeUnit.SECONDS))
+      assertEquals(result.get(5L, TimeUnit.SECONDS), Errors.RequestTimedOut)
+      release.countDown()
+      batcher.close()
+      assertEquals(mutations.get(), 0)
+    finally
+      release.countDown()
+      batcher.close()
+      executor.close()
+  }
+
+  test("queue deadlines never abandon a publication that already passed admission") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val executor = Executors.newFixedThreadPool(1)
+    val batcher = OffsetCommitBatcher(OffsetBatchConfig(queueTimeoutMillis = 100L), (commands, admission) =>
+      val result = commands.indices.map(admission).toVector
+      entered.countDown()
+      if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
+      result, _ => true)
+    try
+      val result = executor.submit[Short](() => batcher.commit(command("active")))
+      assert(entered.await(5L, TimeUnit.SECONDS))
+      assertEquals(batcher.commit(command("queued")), Errors.RequestTimedOut)
+      intercept[TimeoutException](result.get(20L, TimeUnit.MILLISECONDS))
+      release.countDown()
+      assertEquals(result.get(5L, TimeUnit.SECONDS), Errors.None)
+    finally
+      release.countDown()
+      batcher.close()
+      executor.close()
   }

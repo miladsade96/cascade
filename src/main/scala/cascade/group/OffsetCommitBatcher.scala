@@ -117,7 +117,13 @@ final class OffsetCommitBatcher(
             require(results.size == batch.size, "offset batch result count mismatch")
             batch.zip(results).foreach((entry, code) => entry.result.complete(code): Unit)
           catch case NonFatal(_) => batch.foreach(_.result.complete(Errors.CoordinatorNotAvailable): Unit)
-          finally monitor.synchronized { batch.foreach(release) }
+          finally monitor.synchronized {
+            // Even a fatal worker exit must release callers; no successful result is overwritten.
+            batch.foreach { entry =>
+              entry.result.complete(Errors.CoordinatorNotAvailable): Unit
+              release(entry)
+            }
+          }
     finally stopPending()
 
   private def release(entry: Entry): Unit =
