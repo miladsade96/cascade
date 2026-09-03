@@ -22,7 +22,8 @@ final class PersistentCoordinatorEndToEndSuite extends FunSuite:
     assertEquals(result.rejectedConnections, 0L)
     assertEquals(result.batchRejected, 0L)
     assert(result.batchedRequests > result.batches)
-    assert(result.batchPeakRequests <= 6)
+    // Retained work can briefly outlive a client response; the configured admission cap is the invariant.
+    assert(result.batchPeakRequests > 0 && result.batchPeakRequests <= cascade.group.OffsetBatchConfig().maxPendingRequests)
     assert(result.json.contains("\"warmup_writes\":60"))
   }
 

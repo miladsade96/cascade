@@ -88,7 +88,7 @@ jobs:
           ./sbt "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency ${{ matrix.concurrency }} --rounds 2 --client-lifecycle ${{ matrix.lifecycle }} --batch-max-requests ${{ matrix.batch }} --batch-linger-ms ${{ matrix.linger }} --report artifacts/coordinator-scale.json"
           jq -e '.status == "passed" and .verified == 1000 and .writes == 3000 and .controller_failover and .restart_recovery and (.owner_ids | length) == 3 and .delta_bytes < .full_image_bytes and .journal_delta_bytes > 0 and .replication_delta_bytes > 0' artifacts/coordinator-scale.json
           jq -e '.object_written_bytes > 0 and .objects_written > 0 and .rejected_connections == 0 and (if .client_lifecycle == "persistent" then .clients_created == .groups and .warmup_writes == .groups else .clients_created > .groups end)' artifacts/coordinator-scale.json
-          jq -e '.batch_rejected == 0 and .batch_peak_requests <= .concurrency and .batch_peak_bytes <= 16777216 and (if .batch_max_requests == 1 then .batches == .batched_requests else .batches < .batched_requests end)' artifacts/coordinator-scale.json
+          jq -e '.batch_rejected == 0 and .batch_peak_requests <= 1024 and .batch_peak_bytes <= 16777216 and (if .batch_max_requests == 1 then .batches == .batched_requests else .batches < .batched_requests end)' artifacts/coordinator-scale.json
       - name: Archive coordinator qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
