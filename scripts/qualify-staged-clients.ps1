@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Java,
-    [string]$JdkImage = 'eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77'
+    [string]$JdkImage = 'eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77',
+    [string]$GoProxy = 'https://proxy.golang.org,direct'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,7 +44,7 @@ try {
     Assert-ClientExit 'KafkaJS smoke'
     & docker run --rm --network "container:$containerName" --mount "type=bind,source=$repository/compatibility/python,target=/work,readonly" python:3.13-slim sh -c 'pip install --disable-pip-version-check --target /tmp/client -r /work/requirements.txt && PYTHONPATH=/tmp/client python /work/smoke.py staged-python'
     Assert-ClientExit 'Python smoke'
-    & docker run --rm --network "container:$containerName" --mount "type=bind,source=$repository/compatibility/go,target=/work,readonly" --workdir /work golang:1.25 go run .
+    & docker run --rm --network "container:$containerName" --env "GOPROXY=$GoProxy" --mount "type=bind,source=$repository/compatibility/go,target=/work,readonly" --workdir /work golang:1.25 go run .
     Assert-ClientExit 'Go smoke'
     & docker run --rm --network "container:$containerName" --tmpfs /work:rw,exec,nosuid,nodev --mount "type=bind,source=$repository/compatibility/dotnet/CascadeCompatibility.csproj,target=/work/CascadeCompatibility.csproj,readonly" --mount "type=bind,source=$repository/compatibility/dotnet/Program.cs,target=/work/Program.cs,readonly" --workdir /work mcr.microsoft.com/dotnet/sdk:8.0 dotnet run --configuration Release
     Assert-ClientExit '.NET smoke'
