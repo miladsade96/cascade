@@ -48,6 +48,8 @@ final class RequestHandler(
 
   def peerIdentityReloadError: Option[String] = peerAuthenticator.lastReloadError
 
+  def offsetBatchSnapshot: OffsetBatchSnapshot = offsetBatcher.map(_.snapshot).getOrElse(OffsetBatchSnapshot())
+
   def credentialReloadError: Option[String] =
     credentials.flatMap(_.lastReloadError)
       .orElse(scramCredentials.flatMap(_.lastReloadError))
@@ -898,7 +900,13 @@ final class RequestHandler(
       VisibleConfig("num.partitions", "1", 4),
       VisibleConfig("default.replication.factor", config.defaultReplicationFactor.toString, 4),
       VisibleConfig("min.insync.replicas", config.minInSyncReplicas.toString, 4),
-      VisibleConfig("auto.create.topics.enable", config.autoCreateTopics.toString, 4)
+      VisibleConfig("auto.create.topics.enable", config.autoCreateTopics.toString, 4),
+      VisibleConfig("cascade.offset.batch.max.requests", config.offsetBatch.maxRequests.toString, 4),
+      VisibleConfig("cascade.offset.batch.max.bytes", config.offsetBatch.maxBytes.toString, 4),
+      VisibleConfig("cascade.offset.batch.pending.requests", config.offsetBatch.maxPendingRequests.toString, 4),
+      VisibleConfig("cascade.offset.batch.pending.bytes", config.offsetBatch.maxPendingBytes.toString, 4),
+      VisibleConfig("cascade.offset.batch.linger.ms", config.offsetBatch.lingerMillis.toString, 4),
+      VisibleConfig("cascade.offset.batch.queue.timeout.ms", config.offsetBatch.queueTimeoutMillis.toString, 4)
     )
     def topicValues(topic: String): Vector[VisibleConfig] =
       val configured = registry.configuredLifecyclePolicy(topic)

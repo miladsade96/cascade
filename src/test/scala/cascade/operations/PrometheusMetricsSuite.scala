@@ -21,7 +21,7 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 88)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 99)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
@@ -38,6 +38,17 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_coordinator_object_bytes_written_total{node_id=\"7\"} 100.0\n"))
     assert(output.contains("cascade_coordinator_object_bytes{node_id=\"7\"} 90.0\n"))
     assert(output.contains("cascade_coordinator_directory_force_supported{node_id=\"7\"} 1.0\n"))
+  }
+
+  test("offset batching metrics expose bounds and outcomes without tenant labels") {
+    val output = PrometheusMetrics.encode(snapshot.copy(offsetBatch = cascade.group.OffsetBatchSnapshot(
+      pendingRequests = 2, pendingBytes = 2048L, accepted = 10L, rejected = 3L, completed = 8L,
+      failed = 1L, batches = 4L, batchRequests = 8L, queueNanos = 1500000000L)))
+    assert(output.contains("cascade_offset_batch_pending_requests{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_offset_batch_rejected_total{node_id=\"7\"} 3.0\n"))
+    assert(output.contains("cascade_offset_batch_queue_seconds_total{node_id=\"7\"} 1.5\n"))
+    assert(!output.contains("group_id="))
+    assert(!output.contains("principal="))
   }
 
   private val snapshot = BrokerMetricsSnapshot(

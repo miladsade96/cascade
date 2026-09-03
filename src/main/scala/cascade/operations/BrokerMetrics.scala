@@ -96,7 +96,8 @@ final case class BrokerMetricsSnapshot(
     coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty,
     metadataJournal: MetadataJournalSnapshot = MetadataJournalSnapshot.Empty,
     metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty,
-    shardObjects: ShardObjectSnapshot = ShardObjectSnapshot()
+    shardObjects: ShardObjectSnapshot = ShardObjectSnapshot(),
+    offsetBatch: cascade.group.OffsetBatchSnapshot = cascade.group.OffsetBatchSnapshot()
 )
 
 object PrometheusMetrics:
@@ -116,6 +117,17 @@ object PrometheusMetrics:
     counter(builder, "cascade_coordinator_full_image_bytes_total", "Equivalent full coordinator state bytes before delta selection.", snapshot.coordinator.fullImageBytes.toDouble, labels)
     counter(builder, "cascade_coordinator_changed_shards_total", "Shard replacements proposed by coordinator checkpoints.", snapshot.coordinator.changedShards.toDouble, labels)
     counter(builder, "cascade_coordinator_checkpoint_seconds_total", "Cumulative coordinator checkpoint time.", snapshot.coordinator.nanos / 1_000_000_000d, labels)
+    gauge(builder, "cascade_offset_batch_pending_requests", "Retained queued and in-flight offset requests.", snapshot.offsetBatch.pendingRequests.toDouble, labels)
+    gauge(builder, "cascade_offset_batch_pending_bytes", "Estimated retained queued and in-flight offset bytes.", snapshot.offsetBatch.pendingBytes.toDouble, labels)
+    gauge(builder, "cascade_offset_batch_peak_requests", "Peak retained offset request count since startup.", snapshot.offsetBatch.peakRequests.toDouble, labels)
+    gauge(builder, "cascade_offset_batch_peak_bytes", "Peak estimated retained offset bytes since startup.", snapshot.offsetBatch.peakBytes.toDouble, labels)
+    counter(builder, "cascade_offset_batch_accepted_total", "Offset requests admitted to batching.", snapshot.offsetBatch.accepted.toDouble, labels)
+    counter(builder, "cascade_offset_batch_rejected_total", "Offset requests refused before queue admission.", snapshot.offsetBatch.rejected.toDouble, labels)
+    counter(builder, "cascade_offset_batch_completed_total", "Admitted offset requests with a terminal result.", snapshot.offsetBatch.completed.toDouble, labels)
+    counter(builder, "cascade_offset_batch_failed_total", "Admitted offset requests completed with an error.", snapshot.offsetBatch.failed.toDouble, labels)
+    counter(builder, "cascade_offset_batches_total", "Offset batches dispatched to the coordinator, including rejected batches.", snapshot.offsetBatch.batches.toDouble, labels)
+    counter(builder, "cascade_offset_batch_requests_total", "Requests dispatched in offset batches.", snapshot.offsetBatch.batchRequests.toDouble, labels)
+    counter(builder, "cascade_offset_batch_queue_seconds_total", "Cumulative wait before staging admission; excludes cancelled requests.", snapshot.offsetBatch.queueNanos / 1_000_000_000d, labels)
     counter(builder, "cascade_metadata_journal_delta_records_total", "Forced incremental metadata records.", snapshot.metadataJournal.deltaRecords.toDouble, labels)
     counter(builder, "cascade_metadata_journal_full_records_total", "Forced complete metadata records.", snapshot.metadataJournal.fullRecords.toDouble, labels)
     counter(builder, "cascade_metadata_journal_delta_bytes_total", "Forced delta bytes including journal framing.", snapshot.metadataJournal.deltaBytes.toDouble, labels)

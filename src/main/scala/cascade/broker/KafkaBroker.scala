@@ -278,6 +278,7 @@ final class KafkaBroker(
       coordinator = Option(coordinatorStateMachine).map(_.metricsSnapshot).getOrElse(cascade.coordinator.CoordinatorMetricsSnapshot.Empty),
       metadataJournal = cluster.map(_.metadataJournalSnapshot).getOrElse(cascade.cluster.MetadataJournalSnapshot.Empty),
       shardObjects = cluster.map(_.shardObjectSnapshot).getOrElse(cascade.cluster.ShardObjectSnapshot()),
+      offsetBatch = Option(handler).map(_.offsetBatchSnapshot).getOrElse(cascade.group.OffsetBatchSnapshot()),
       metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty)
     )
 

@@ -110,7 +110,7 @@ final class OffsetCommitBatcherSuite extends FunSuite:
       if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("test barrier timed out")
       commands.indices.map { index =>
         val gate = admission(index)
-        if gate == Errors.None then mutations.incrementAndGet()
+        if gate == Errors.None then mutations.incrementAndGet(): Unit
         gate
       }.toVector, _ => true)
     try
