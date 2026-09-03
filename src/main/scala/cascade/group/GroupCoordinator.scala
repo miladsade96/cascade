@@ -366,18 +366,18 @@ final class GroupCoordinator(
       memberId: String,
       groupInstanceId: Option[String],
       values: Vector[OffsetCommitValue]
-  ): Short =
-    val validation = stateLock.synchronized {
+  ): Short = stateLock.synchronized {
+    val validation =
       if groupId.isEmpty then Errors.InvalidGroupId
+      else if values.exists(_.key.groupId != groupId) then Errors.InvalidRequest
       else if generationId < 0 then Errors.None
       else groups.get(groupId).map(validateMember(_, generationId, memberId, groupInstanceId)).getOrElse(Errors.UnknownMemberId)
-    }
-    if validation == Errors.None then stateLock.synchronized {
+    if validation == Errors.None then
       offsets.commit(values, durableLocal)
       if durableLocal && offsets.journalSize >= journalCompactionBytes then offsets.compact()
       if !checkpointState() then return Errors.CoordinatorNotAvailable
-    }
     validation
+  }
 
   def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] = offsets.get(key)
 
