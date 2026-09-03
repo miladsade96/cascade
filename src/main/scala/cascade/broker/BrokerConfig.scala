@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
+import cascade.group.OffsetBatchConfig
 import cascade.operations.OperationsConfig
 import cascade.security.*
 import cascade.storage.{CleanupPolicy, FlushPolicy, StorageLifecycleConfig}
@@ -32,7 +33,8 @@ final case class BrokerConfig(
     storageLifecycle: StorageLifecycleConfig = StorageLifecycleConfig(),
     security: BrokerSecurityConfig = BrokerSecurityConfig(),
     operations: OperationsConfig = OperationsConfig(),
-    autoCreateTopics: Boolean = true
+    autoCreateTopics: Boolean = true,
+    offsetBatch: OffsetBatchConfig = OffsetBatchConfig()
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
   require(advertisedPort.forall(value => value > 0 && value <= 65535), "advertised port must be valid")
@@ -94,6 +96,18 @@ object BrokerConfig:
         loop(tail, config.copy(controllerHeartbeatMillis = value.toInt))
       case "--controller-election-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(controllerElectionTimeoutMillis = value.toInt))
+      case "--offset-batch-max-requests" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(maxRequests = value.toInt)))
+      case "--offset-batch-max-bytes" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(maxBytes = value.toLong)))
+      case "--offset-batch-pending-requests" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(maxPendingRequests = value.toInt)))
+      case "--offset-batch-pending-bytes" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(maxPendingBytes = value.toLong)))
+      case "--offset-batch-linger-ms" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(lingerMillis = value.toLong)))
+      case "--offset-batch-queue-timeout-ms" :: value :: tail =>
+        loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(queueTimeoutMillis = value.toLong)))
       case "--cleanup-policy" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(cleanupPolicy = CleanupPolicy.parse(value))))
       case "--retention-ms" :: value :: tail =>
