@@ -50,6 +50,24 @@ final class OffsetCommitIsolationSuite extends FunSuite:
     }
   }
 
+  test("fetch captures one readiness decision so unavailable state cannot become a successful missing offset") {
+    withCoordinator { coordinator =>
+      val value = offset("workers", 42L)
+      assertEquals(coordinator.commitOffsets("workers", -1, "", Vector(value)), Errors.None)
+      var checks = 0
+      def changingReadiness(): Short =
+        checks += 1
+        if checks == 1 then Errors.NotCoordinator else Errors.None
+      val unavailable = coordinator.readOffsets("workers", Some(Vector(value.key)), changingReadiness)
+      assertEquals(checks, 1)
+      assertEquals(unavailable, (Errors.NotCoordinator, Vector.empty))
+      val available = coordinator.readOffsets("workers", Some(Vector(value.key, value.key.copy(partition = 1))), changingReadiness)
+      assertEquals(checks, 2)
+      assertEquals(available, (Errors.None, Vector(value.key -> value.value)))
+      assertEquals(coordinator.readOffsets("workers", None, () => Errors.None), available)
+    }
+  }
+
   test("a queued static member is revalidated after replacement before any offset mutation") {
     withCoordinator { coordinator =>
       def join = JoinGroupCommand("workers", 10000, 10000, "", Some("instance"), "consumer",

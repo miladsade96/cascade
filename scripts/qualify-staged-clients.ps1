@@ -22,7 +22,6 @@ $containerName = "cascade-client-$runId"
 $data = New-Item -ItemType Directory -Path (Join-Path $repository "artifacts/client-data-$runId")
 $oldBootstrap = $env:CASCADE_BOOTSTRAP_SERVERS
 $env:CASCADE_BOOTSTRAP_SERVERS = '127.0.0.1:19092'
-$created = $false
 function Assert-ClientExit([string]$Phase) {
     if ($LASTEXITCODE -ne 0) { throw "$Phase failed with exit code $LASTEXITCODE" }
 }
@@ -37,7 +36,6 @@ function Wait-StagedBroker {
 try {
     & docker run --detach --name $containerName --read-only --user '65532:65532' --cap-drop ALL --security-opt no-new-privileges:true --memory 2g --tmpfs /tmp --publish '127.0.0.1:19092:19092' --mount "type=bind,source=$libraries,target=/cascade/lib,readonly" --mount "type=bind,source=$($data.FullName),target=/data" $JdkImage java -Xmx1g -cp '/cascade/lib/*' cascade.Main --host 0.0.0.0 --port 19092 --advertised-host 127.0.0.1 --advertised-port 19092 --data-dir /data --flush-policy sync --operations-port 9404
     Assert-ClientExit 'broker start'
-    $created = $true
     Wait-StagedBroker
     & $Java '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp $classpath cascade.e2e.ExternalBrokerSmokeTest '127.0.0.1:19092' 'staged-java'
     Assert-ClientExit 'Java smoke'
@@ -60,5 +58,7 @@ try {
 }
 finally {
     $env:CASCADE_BOOTSTRAP_SERVERS = $oldBootstrap
-    if ($created) { & docker rm --force $containerName }
+    # docker run can create a container and then fail to start it (for example, a port collision).
+    $ownedContainer = & docker container ls --all --quiet --filter "name=^/$containerName`$"
+    if (-not [string]::IsNullOrWhiteSpace($ownedContainer)) { & docker rm --force $containerName }
 }

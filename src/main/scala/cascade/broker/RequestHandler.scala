@@ -500,16 +500,20 @@ final class RequestHandler(
       (topic, cursor.readArray(cursor.readInt()))
     }
     cursor.ensureFullyRead()
+    val (groupError, fetched) = groupCoordinator.readOffsets(groupId,
+      requested.map(_.flatMap { case (topic, partitions) => partitions.map(GroupOffsetKey(groupId, topic, _)) }),
+      () => if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
+    val byKey = fetched.toMap
     val offsets = requested match
       case Some(topics) => topics.map { case (topic, partitions) =>
           val values = partitions.map { partition =>
             val key = GroupOffsetKey(groupId, topic, partition)
-            (partition, Option.when(isCoordinatorFor(groupId))(groupCoordinator.fetchOffset(key)).flatten)
+            (partition, byKey.get(key))
           }
           (topic, values)
         }
-      case None if isCoordinatorFor(groupId) =>
-        groupCoordinator.allOffsets(groupId)
+      case None if groupError == Errors.None =>
+        fetched
           .groupBy(_._1.topic)
           .toVector
           .sortBy(_._1)
@@ -525,10 +529,10 @@ final class RequestHandler(
         writer.writeLong(committed.map(_.offset).getOrElse(-1L))
         if version >= 5 then writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
         writer.writeNullableString(committed.flatMap(_.metadata))
-        writer.writeShort(if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator): Unit
+        writer.writeShort(groupError): Unit
       }
     }
-    writer.writeShort(if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
+    writer.writeShort(groupError)
     Some(writer.result())
 
   private def metadata(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =

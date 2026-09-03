@@ -396,6 +396,21 @@ final class GroupCoordinator(
 
   def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = stateLock.synchronized(offsets.all(groupId))
 
+  /** Capture readiness and values once; response encoding must not recheck a changing readiness flag. */
+  private[cascade] def readOffsets(
+      groupId: String,
+      requested: Option[Vector[GroupOffsetKey]],
+      admission: () => Short
+  ): (Short, Vector[(GroupOffsetKey, CommittedOffset)]) = stateLock.synchronized {
+    val error = admission()
+    val values =
+      if error != Errors.None then Vector.empty
+      else requested match
+        case Some(keys) => keys.flatMap(key => offsets.get(key).map(key -> _))
+        case None => offsets.all(groupId)
+    (error, values)
+  }
+
   /** Stages offsets inside a caller-owned combined coordinator checkpoint. */
   private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
     offsets.commit(values, durableLocal)
