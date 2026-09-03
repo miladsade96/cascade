@@ -23,8 +23,22 @@ final class OffsetCommitBatcher(
   private val queue = mutable.ArrayDeque.empty[Entry]
   private var pendingRequests = 0
   private var pendingBytes = 0L
+  private var peakRequests = 0
+  private var peakBytes = 0L
+  private var accepted = 0L
+  private var rejected = 0L
+  private var completed = 0L
+  private var failed = 0L
+  private var batches = 0L
+  private var batchRequests = 0L
+  private var queueNanos = 0L
   @volatile private var closed = false
   private val worker = Thread.ofPlatform().daemon().name("cascade-offset-committer").start(() => run())
+
+  def snapshot: OffsetBatchSnapshot = monitor.synchronized {
+    OffsetBatchSnapshot(pendingRequests, pendingBytes, peakRequests, peakBytes, accepted, rejected,
+      completed, failed, batches, batchRequests, queueNanos)
+  }
 
   def commit(command: OffsetCommitCommand): Short =
     val entry = Entry(command)
@@ -36,10 +50,14 @@ final class OffsetCommitBatcher(
         queue.append(entry)
         pendingRequests += 1
         pendingBytes += entry.bytes
+        peakRequests = math.max(peakRequests, pendingRequests)
+        peakBytes = math.max(peakBytes, pendingBytes)
+        accepted += 1L
         monitor.notifyAll()
         true
     }
     if !admitted then
+      monitor.synchronized { rejected += 1L }
       if closed then Errors.CoordinatorNotAvailable
       else if entry.bytes > config.maxBytes then Errors.InvalidRequest
       else Errors.RequestTimedOut
@@ -70,7 +88,7 @@ final class OffsetCommitBatcher(
         if !entry.claimed then
           queue.filterInPlace(_ ne entry)
           release(entry)
-        entry.result.complete(error): Unit
+        complete(entry, error)
         monitor.notifyAll()
       true
   }
@@ -93,6 +111,8 @@ final class OffsetCommitBatcher(
       batch += entry
       bytes += entry.bytes
       count += 1
+    batches += 1L
+    batchRequests += count
     batch.result()
   }
 
@@ -102,6 +122,7 @@ final class OffsetCommitBatcher(
       else if System.nanoTime() - entry.enqueued >= config.queueTimeoutMillis * 1_000_000L then Errors.RequestTimedOut
       else
         entry.publishing = true
+        queueNanos += System.nanoTime() - entry.enqueued
         Errors.None
     }
     if gate != Errors.None then gate
@@ -115,12 +136,12 @@ final class OffsetCommitBatcher(
           try
             val results = publish(batch.map(_.command), index => admission(batch(index)))
             require(results.size == batch.size, "offset batch result count mismatch")
-            batch.zip(results).foreach((entry, code) => entry.result.complete(code): Unit)
-          catch case NonFatal(_) => batch.foreach(_.result.complete(Errors.CoordinatorNotAvailable): Unit)
+            batch.zip(results).foreach((entry, code) => complete(entry, code))
+          catch case NonFatal(_) => batch.foreach(entry => complete(entry, Errors.CoordinatorNotAvailable))
           finally monitor.synchronized {
             // Even a fatal worker exit must release callers; no successful result is overwritten.
             batch.foreach { entry =>
-              entry.result.complete(Errors.CoordinatorNotAvailable): Unit
+              complete(entry, Errors.CoordinatorNotAvailable)
               release(entry)
             }
           }
@@ -130,11 +151,18 @@ final class OffsetCommitBatcher(
     pendingRequests -= 1
     pendingBytes -= entry.bytes
 
+  private def complete(entry: Entry, code: Short): Unit = monitor.synchronized {
+    if !entry.result.isDone then
+      completed += 1L
+      if code != Errors.None then failed += 1L
+      entry.result.complete(code): Unit
+  }
+
   private def stopPending(): Unit = monitor.synchronized {
     closed = true
     queue.foreach { entry =>
       entry.cancelled = true
-      entry.result.complete(Errors.CoordinatorNotAvailable): Unit
+      complete(entry, Errors.CoordinatorNotAvailable)
       release(entry)
     }
     queue.clear()

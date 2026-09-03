@@ -27,6 +27,16 @@ final class OffsetCommitBatcherSuite extends FunSuite:
       results.foreach(result => assertEquals(result.get(5L, TimeUnit.SECONDS), Errors.None))
       assert(calls.get() < 16)
       assert(largest.get() > 1 && largest.get() <= 8)
+      batcher.close()
+      val measured = batcher.snapshot
+      assertEquals(measured.accepted, 16L)
+      assertEquals(measured.completed, 16L)
+      assertEquals(measured.failed, 0L)
+      assertEquals(measured.batchRequests, 16L)
+      assertEquals(measured.batches, calls.get().toLong)
+      assertEquals(measured.pendingRequests, 0)
+      assertEquals(measured.pendingBytes, 0L)
+      assert(measured.queueNanos > 0L)
     finally
       start.countDown()
       batcher.close()
@@ -80,6 +90,8 @@ final class OffsetCommitBatcherSuite extends FunSuite:
         val active = executor.submit[Short](() => batcher.commit(command("first")))
         assert(entered.await(5L, TimeUnit.SECONDS))
         assertEquals(batcher.commit(command("second")), Errors.RequestTimedOut)
+        assertEquals(batcher.snapshot.rejected, 1L)
+        assertEquals(batcher.snapshot.pendingRequests, 1)
         release.countDown()
         assertEquals(active.get(5L, TimeUnit.SECONDS), Errors.None)
       finally
@@ -108,6 +120,8 @@ final class OffsetCommitBatcherSuite extends FunSuite:
       release.countDown()
       batcher.close()
       assertEquals(mutations.get(), 0)
+      assertEquals(batcher.snapshot.failed, 1L)
+      assertEquals(batcher.snapshot.pendingBytes, 0L)
     finally
       release.countDown()
       batcher.close()
