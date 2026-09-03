@@ -379,9 +379,9 @@ final class GroupCoordinator(
     validation
   }
 
-  def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] = offsets.get(key)
+  def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] = stateLock.synchronized(offsets.get(key))
 
-  def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = offsets.all(groupId)
+  def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = stateLock.synchronized(offsets.all(groupId))
 
   /** Stages offsets inside a caller-owned combined coordinator checkpoint. */
   private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
