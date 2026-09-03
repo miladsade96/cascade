@@ -16,6 +16,40 @@ final class OffsetCommitIsolationSuite extends FunSuite:
     }
   }
 
+  test("a batch publishes once, preserves FIFO rewinds, and isolates invalid commands") {
+    withCoordinator { coordinator =>
+      var checkpoints = 0
+      coordinator.attachCheckpoint(() => { checkpoints += 1; true })
+      def command(group: String, value: Long) = OffsetCommitCommand(group, -1, "", None, Vector(offset(group, value)))
+      val commands = Vector(command("a", 20), command("b", 30).copy(generationId = 9), command("a", 10), command("c", 40))
+      val results = coordinator.commitOffsetBatch(commands, index => if index == 3 then Errors.NotCoordinator else Errors.None)
+      assertEquals(results, Vector(Errors.None, Errors.UnknownMemberId, Errors.None, Errors.NotCoordinator))
+      assertEquals(checkpoints, 1)
+      assertEquals(coordinator.fetchOffset(offset("a", 0).key).map(_.offset), Some(10L))
+      assertEquals(coordinator.fetchOffset(offset("b", 0).key), None)
+      assertEquals(coordinator.fetchOffset(offset("c", 0).key), None)
+    }
+  }
+
+  test("failed batch publication rolls every valid group back together") {
+    withCoordinator { coordinator =>
+      val baseline = coordinator.snapshotBytes.toVector
+      coordinator.attachCheckpoint(() => { coordinator.installSnapshot(baseline); false })
+      val commands = Vector("a", "b", "c").map(group => OffsetCommitCommand(group, -1, "", None, Vector(offset(group, 1))))
+      assertEquals(coordinator.commitOffsetBatch(commands), Vector.fill(3)(Errors.CoordinatorNotAvailable))
+      commands.foreach(command => assertEquals(coordinator.allOffsets(command.groupId), Vector.empty))
+    }
+  }
+
+  test("empty or wholly rejected batches do not publish a checkpoint") {
+    withCoordinator { coordinator =>
+      coordinator.attachCheckpoint(() => fail("unexpected checkpoint"))
+      assertEquals(coordinator.commitOffsetBatch(Vector.empty), Vector.empty)
+      assertEquals(coordinator.commitOffsetBatch(Vector(OffsetCommitCommand("a", -1, "", None, Vector.empty))), Vector(Errors.None))
+      assertEquals(coordinator.commitOffsetBatch(Vector(OffsetCommitCommand("", -1, "", None, Vector.empty))), Vector(Errors.InvalidGroupId))
+    }
+  }
+
   for accepted <- Vector(true, false) do
     test(s"offset readers wait for publication and observe only authoritative state: accepted=$accepted") {
       withCoordinator { coordinator =>

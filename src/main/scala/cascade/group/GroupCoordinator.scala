@@ -366,17 +366,30 @@ final class GroupCoordinator(
       memberId: String,
       groupInstanceId: Option[String],
       values: Vector[OffsetCommitValue]
-  ): Short = stateLock.synchronized {
-    val validation =
-      if groupId.isEmpty then Errors.InvalidGroupId
-      else if values.exists(_.key.groupId != groupId) then Errors.InvalidRequest
-      else if generationId < 0 then Errors.None
-      else groups.get(groupId).map(validateMember(_, generationId, memberId, groupInstanceId)).getOrElse(Errors.UnknownMemberId)
-    if validation == Errors.None then
+  ): Short = commitOffsetBatch(Vector(OffsetCommitCommand(groupId, generationId, memberId, groupInstanceId, values))).head
+
+  /** One validation/staging/publication boundary; a failed quorum rolls back every accepted command. */
+  private[cascade] def commitOffsetBatch(
+      commands: Vector[OffsetCommitCommand],
+      admission: Int => Short = _ => Errors.None
+  ): Vector[Short] = stateLock.synchronized {
+    val results = commands.zipWithIndex.map { (command, index) =>
+      val gate = admission(index)
+      if gate != Errors.None then gate
+      else if command.groupId.isEmpty then Errors.InvalidGroupId
+      else if command.values.exists(_.key.groupId != command.groupId) then Errors.InvalidRequest
+      else if command.generationId < 0 then Errors.None
+      else groups.get(command.groupId)
+        .map(validateMember(_, command.generationId, command.memberId, command.groupInstanceId))
+        .getOrElse(Errors.UnknownMemberId)
+    }
+    // FIFO concatenation deliberately preserves last-write-wins, including decreasing offsets.
+    val values = commands.zip(results).collect { case (command, Errors.None) => command.values }.flatten
+    if values.nonEmpty then
       offsets.commit(values, durableLocal)
       if durableLocal && offsets.journalSize >= journalCompactionBytes then offsets.compact()
-      if !checkpointState() then return Errors.CoordinatorNotAvailable
-    validation
+      if !checkpointState() then return results.map(code => if code == Errors.None then Errors.CoordinatorNotAvailable else code)
+    results
   }
 
   def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] = stateLock.synchronized(offsets.get(key))
