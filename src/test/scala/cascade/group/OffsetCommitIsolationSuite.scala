@@ -59,18 +59,18 @@ final class OffsetCommitIsolationSuite extends FunSuite:
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val readerStarted = CountDownLatch(1)
-        val executor = Executors.newVirtualThreadPerTaskExecutor()
+        val executor = Executors.newFixedThreadPool(2)
         coordinator.attachCheckpoint(new CoordinatorCheckpoint:
           override def commit(): Boolean =
             entered.countDown()
-            assert(release.await(5L, TimeUnit.SECONDS))
+            if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("publication barrier timed out")
             if !accepted then coordinator.installSnapshot(baseline)
             accepted
         )
         try
-          val write = executor.submit(() => coordinator.commitOffsets("workers", -1, "", Vector(offset("workers", 2L))))
+          val write = executor.submit[Short](() => coordinator.commitOffsets("workers", -1, "", Vector(offset("workers", 2L))))
           assert(entered.await(5L, TimeUnit.SECONDS))
-          val read = executor.submit(() =>
+          val read = executor.submit[(Option[CommittedOffset], Vector[(GroupOffsetKey, CommittedOffset)])](() =>
             readerStarted.countDown()
             (coordinator.fetchOffset(original.key), coordinator.allOffsets("workers"))
           )
