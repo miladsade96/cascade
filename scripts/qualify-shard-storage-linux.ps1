@@ -35,6 +35,9 @@ $suites = @('cascade.cluster.ShardObjectRefSuite', 'cascade.cluster.ShardObjectS
     'cascade.cluster.ShardMetadataRecordSuite', 'cascade.cluster.ShardMetadataStoreSuite',
     'cascade.cluster.ShardStorageFeatureSuite', 'cascade.cluster.MetadataPublicationFailureSuite',
     'cascade.cluster.CoordinatorPayloadCacheSuite', 'cascade.backup.ShardStorageBackupSuite',
-    'cascade.cluster.MetadataHeartbeatPublicationSuite', 'cascade.cluster.MetadataFailureFencingSuite')
+    'cascade.cluster.MetadataHeartbeatPublicationSuite', 'cascade.cluster.MetadataFailureFencingSuite',
+    'cascade.group.OffsetBatchConfigSuite', 'cascade.group.OffsetCommitBatcherSuite',
+    'cascade.group.OffsetCommitIsolationSuite', 'cascade.group.OffsetBatchQuorumSuite',
+    'cascade.operations.PrometheusMetricsSuite')
 & docker @common $Image java '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp $linuxClasspath org.junit.runner.JUnitCore @suites
 if ($LASTEXITCODE -ne 0) { throw 'Linux shard-storage regression tests failed.' }
