@@ -22,6 +22,7 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   Option(path.getParent).foreach(AtomicFileLifecycle.recoverReplacements)
   private var channel = openChannel()
   private val offsets = mutable.HashMap.empty[GroupOffsetKey, CommittedOffset]
+  private var cachedEntries: Option[Vector[OffsetCommitValue]] = None
   private var appendPosition = recover()
   private var closed = false
 
@@ -36,20 +37,27 @@ final class OffsetStore(path: Path) extends AutoCloseable:
         }
         channel.force(false)
       values.foreach(value => offsets.update(value.key, value.value))
+      cachedEntries = None
   }
 
   def entries: Vector[OffsetCommitValue] = synchronized {
-    offsets.iterator
-      .map { case (key, value) => OffsetCommitValue(key, value) }
-      .toVector
-      .sortBy(value => (value.key.groupId, value.key.topic, value.key.partition))
+    cachedEntries.getOrElse {
+      val result = offsets.iterator
+        .map { case (key, value) => OffsetCommitValue(key, value) }
+        .toVector
+        .sortBy(value => (value.key.groupId, value.key.topic, value.key.partition))
+      cachedEntries = Some(result)
+      result
+    }
   }
 
   /** Replaces the in-memory view after installing an authoritative quorum snapshot. */
   def install(values: Vector[OffsetCommitValue]): Unit = synchronized {
     ensureOpen()
-    offsets.clear()
-    values.foreach(value => offsets.update(value.key, value.value))
+    if entries != values then
+      offsets.clear()
+      values.foreach(value => offsets.update(value.key, value.value))
+      cachedEntries = None
   }
 
   def get(key: GroupOffsetKey): Option[CommittedOffset] = synchronized(offsets.get(key))
@@ -91,6 +99,7 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     ensureOpen()
     val expired = offsets.iterator.collect { case (key, value) if value.committedAtMillis < cutoffMillis && eligible(key) => key }.toVector
     expired.foreach(offsets.remove)
+    if expired.nonEmpty then cachedEntries = None
     if durable && expired.nonEmpty then compact()
     expired.sortBy(key => (key.groupId, key.topic, key.partition))
   }
