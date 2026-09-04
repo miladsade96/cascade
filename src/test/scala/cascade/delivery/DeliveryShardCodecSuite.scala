@@ -9,6 +9,12 @@ final class DeliveryShardCodecSuite extends FunSuite:
   private val active = ActiveTransaction("orders", 1L, 0, 10000, 1L, Vector.empty, Vector.empty, Vector("workers"), Vector.empty)
   private val image = DeliveryImage(4L, 2L, Vector(producer), Vector(active), Vector.empty)
 
+  test("typed delivery partitions retain byte identity and normalize the separate allocator") {
+    assertEquals(DeliveryShardCodec.split(image), DeliveryShardCodec.split(DeliveryCodec.encode(image).toVector))
+    assertEquals(DeliveryShardCodec.partition(image).map(p => (p.version, p.nextProducerId)).distinct, Vector((0L, 1L)))
+    assertEquals(DeliveryShardCodec.split(DeliveryImage.Empty), DeliveryShardCodec.split(Vector.empty[Byte]))
+  }
+
   test("transaction and producer registration share a shard with a separate allocator") {
     val shards = DeliveryShardCodec.split(DeliveryCodec.encode(image).toVector)
     assertEquals(DeliveryCodec.decode(DeliveryShardCodec.merge(shards, 5L).toArray), image.copy(version = 5L))

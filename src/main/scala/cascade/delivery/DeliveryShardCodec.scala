@@ -6,17 +6,24 @@ import cascade.protocol.{ByteCursor, ByteWriter}
 object DeliveryShardCodec:
   def split(bytes: Vector[Byte]): Vector[Vector[Byte]] =
     val image = if bytes.isEmpty then DeliveryImage.Empty else DeliveryCodec.decode(bytes.toArray)
+    split(image)
+
+  private[cascade] def split(image: DeliveryImage): Vector[Vector[Byte]] =
+    partition(image).map(value => DeliveryCodec.encode(value).toVector) :+
+      ByteWriter().writeLong(image.nextProducerId).result().toVector
+
+  private[cascade] def partition(image: DeliveryImage): Vector[DeliveryImage] =
     val producers = image.producers.groupBy(p => CoordinatorShard.producer(p.producerId, p.transactionalId) - CoordinatorShard.Buckets)
     val active = image.activeTransactions.groupBy(t => CoordinatorShard.transaction(t.transactionalId) - CoordinatorShard.Buckets)
     val completed = image.completedTransactions.groupBy(t => CoordinatorShard.transaction(t.transactionalId) - CoordinatorShard.Buckets)
     Vector.tabulate(CoordinatorShard.Buckets) { id =>
-      DeliveryCodec.encode(DeliveryImage(
+      DeliveryImage(
         0L, 1L,
         producers.getOrElse(id, Vector.empty).sortBy(_.producerId),
         active.getOrElse(id, Vector.empty).sortBy(_.transactionalId),
         completed.getOrElse(id, Vector.empty)
-      )).toVector
-    } :+ ByteWriter().writeLong(image.nextProducerId).result().toVector
+      )
+    }
 
   def merge(shards: Vector[Vector[Byte]], version: Long): Vector[Byte] =
     require(shards.size == CoordinatorShard.Buckets + 1, "invalid delivery shard count")
