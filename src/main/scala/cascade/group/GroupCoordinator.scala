@@ -81,6 +81,9 @@ final class GroupCoordinator(
 
   def snapshotBytes: Array[Byte] = stateLock.synchronized(GroupCodec.encode(snapshotImage()))
 
+  /** Immutable, detached view captured under the same lock as checkpoint publication. */
+  private[cascade] def image: GroupImage = stateLock.synchronized(snapshotImage())
+
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray))
   }

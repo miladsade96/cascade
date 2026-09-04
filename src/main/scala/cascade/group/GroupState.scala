@@ -2,18 +2,18 @@ package cascade.group
 
 import cascade.protocol.{ByteCursor, ByteWriter, ProtocolException}
 
-private[group] enum GroupStatus(val id: Byte):
+private[cascade] enum GroupStatus(val id: Byte):
   case Empty extends GroupStatus(0)
   case PreparingRebalance extends GroupStatus(1)
   case CompletingRebalance extends GroupStatus(2)
   case Stable extends GroupStatus(3)
 
-private[group] object GroupStatus:
+private[cascade] object GroupStatus:
   def fromId(id: Byte): GroupStatus =
     GroupStatus.values.find(_.id == id).getOrElse(throw ProtocolException(s"unsupported group status: $id"))
 
-private[group] final case class StoredProtocol(name: String, metadata: Vector[Byte])
-private[group] final case class StoredMember(
+private[cascade] final case class StoredProtocol(name: String, metadata: Vector[Byte])
+private[cascade] final case class StoredMember(
     memberId: String,
     groupInstanceId: Option[String],
     sessionTimeoutMillis: Int,
@@ -23,7 +23,7 @@ private[group] final case class StoredMember(
     lastHeartbeatMillis: Long,
     assignment: Vector[Byte]
 )
-private[group] final case class StoredGroup(
+private[cascade] final case class StoredGroup(
     groupId: String,
     status: GroupStatus,
     generationId: Int,
@@ -35,17 +35,17 @@ private[group] final case class StoredGroup(
     joined: Vector[String],
     pendingMemberIds: Vector[(String, Long)]
 )
-private[group] final case class GroupImage(
+private[cascade] final case class GroupImage(
     version: Long,
     groups: Vector[StoredGroup],
     offsets: Vector[OffsetCommitValue],
     consumerGroups: Vector[StoredConsumerGroup] = Vector.empty
 )
 
-private[group] object GroupImage:
+private[cascade] object GroupImage:
   val Empty: GroupImage = GroupImage(0L, Vector.empty, Vector.empty, Vector.empty)
 
-private[group] object GroupCodec:
+private[cascade] object GroupCodec:
   private val FormatVersion: Short = 2
 
   def encode(image: GroupImage): Array[Byte] =

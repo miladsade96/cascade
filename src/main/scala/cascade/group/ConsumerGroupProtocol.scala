@@ -49,7 +49,7 @@ private[group] final class ManagedConsumerGroup:
   val partitionCounts: mutable.HashMap[String, Int] = mutable.HashMap.empty
   var groupEpoch = 0
 
-private[group] final case class StoredConsumerMember(
+private[cascade] final case class StoredConsumerMember(
     memberId: String,
     instanceId: Option[String],
     rackId: Option[String],
@@ -61,7 +61,7 @@ private[group] final case class StoredConsumerMember(
     assignment: Vector[ConsumerTopicPartitions]
 )
 
-private[group] final case class StoredConsumerGroup(
+private[cascade] final case class StoredConsumerGroup(
     groupId: String,
     groupEpoch: Int,
     members: Vector[StoredConsumerMember]
