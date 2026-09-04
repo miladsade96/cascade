@@ -165,11 +165,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     !enabled || current.featureLevels.getOrElse(name, 0.toShort) >= minimumLevel
 
   def ownsCoordinator(key: String): Boolean =
-    coordinatorNode(key).exists(_.id == config.nodeId) && !isBrokerFenced &&
+    isAssignedCoordinator(key) && !isBrokerFenced &&
       installedCoordinatorVersion >= 0L &&
       (if supportsFeature(ClusterFeature.CoordinatorDeltas) then
         CoordinatorShardState.readyForKey(installedCoordinatorState, current.coordinator, key)
       else installedCoordinatorVersion >= current.coordinator.version)
+
+  private[cascade] def isAssignedCoordinator(key: String): Boolean = coordinatorNode(key).exists(_.id == config.nodeId)
 
   def controllerId: Int = electedControllerId
 

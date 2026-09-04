@@ -17,8 +17,8 @@ final class GroupImageInstallationSuite extends FunSuite:
     try body(coordinator)
     finally
       coordinator.close()
-      Files.deleteIfExists(directory.resolve("offsets.log"))
-      Files.deleteIfExists(directory)
+      Files.deleteIfExists(directory.resolve("offsets.log")): Unit
+      Files.deleteIfExists(directory): Unit
 
   test("ordinary committed images do not turn unrelated offset writes into member heartbeats") {
     withCoordinator { coordinator =>
@@ -58,5 +58,34 @@ final class GroupImageInstallationSuite extends FunSuite:
       coordinator.installCommittedImage(advanced, renewSessions = false)
       coordinator.installCommittedImage(before, renewSessions = false)
       assertEquals(coordinator.image.groups.head.members.head.lastHeartbeatMillis, advanced.groups.head.members.head.lastHeartbeatMillis)
+    }
+  }
+
+  test("only the assigned ready owner expires members and readiness lag does not renew its lease") {
+    withCoordinator { coordinator =>
+      coordinator.installCommittedImage(initial, renewSessions = true)
+      coordinator.expireOwned(100000L, _ == "classic", _ => true)
+      coordinator.expireOwned(109000L, _ == "classic", _ => false)
+      coordinator.expireOwned(110000L, _ == "classic", _ => true)
+      assert(coordinator.image.groups.head.members.isEmpty)
+      assertEquals(coordinator.image.consumerGroups.head.members.size, 1)
+      coordinator.expireOwned(200000L, _ == "modern", _ => true)
+      coordinator.expireOwned(244999L, _ == "modern", _ => true)
+      assertEquals(coordinator.image.consumerGroups.head.members.size, 1)
+      coordinator.expireOwned(245000L, _ == "modern", _ => true)
+      assert(coordinator.image.consumerGroups.head.members.isEmpty)
+    }
+  }
+
+  test("routing handoff grants grace once when a broker reacquires a group") {
+    withCoordinator { coordinator =>
+      coordinator.installCommittedImage(initial, renewSessions = true)
+      coordinator.expireOwned(100000L, _ => true, _ => true)
+      coordinator.expireOwned(105000L, _ => false, _ => true)
+      coordinator.expireOwned(120000L, _ => true, _ => true)
+      coordinator.expireOwned(129999L, _ => true, _ => true)
+      assertEquals(coordinator.image.groups.head.members.size, 1)
+      coordinator.expireOwned(130000L, _ => true, _ => true)
+      assert(coordinator.image.groups.head.members.isEmpty)
     }
   }

@@ -87,9 +87,9 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     appendPosition = position
   }
 
-  def expireBefore(cutoffMillis: Long, durable: Boolean = true): Vector[GroupOffsetKey] = synchronized {
+  def expireBefore(cutoffMillis: Long, durable: Boolean = true, eligible: GroupOffsetKey => Boolean = _ => true): Vector[GroupOffsetKey] = synchronized {
     ensureOpen()
-    val expired = offsets.iterator.collect { case (key, value) if value.committedAtMillis < cutoffMillis => key }.toVector
+    val expired = offsets.iterator.collect { case (key, value) if value.committedAtMillis < cutoffMillis && eligible(key) => key }.toVector
     expired.foreach(offsets.remove)
     if durable && expired.nonEmpty then compact()
     expired.sortBy(key => (key.groupId, key.topic, key.partition))

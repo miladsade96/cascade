@@ -67,6 +67,7 @@ final class GroupCoordinator(
   private val closed = AtomicBoolean(false)
   private val groups = mutable.HashMap.empty[String, ManagedGroup]
   private val consumerGroups = mutable.HashMap.empty[String, ManagedConsumerGroup]
+  private var expirationOwners = Set.empty[String]
   private val offsets = OffsetStore(offsetPath)
   private var stateVersion = 0L
   private var checkpoint: CoordinatorCheckpoint = CoordinatorCheckpoint.Local
@@ -496,10 +497,21 @@ final class GroupCoordinator(
       leader.protocols.iterator.map(_.name).find(name => members.forall(_.protocols.exists(_.name == name)))
     }
 
-  def expireNow(nowMillis: Long = System.currentTimeMillis()): Unit = stateLock.synchronized {
+  /** Routing ownership, not image readiness, defines acquisition of a fresh session lease. */
+  private[cascade] def expireOwned(nowMillis: Long, assigned: String => Boolean, ready: String => Boolean): Unit = stateLock.synchronized {
+    val owned = (groups.keySet ++ consumerGroups.keySet).iterator.filter(assigned).toSet
+    (owned -- expirationOwners).foreach { id =>
+      groups.get(id).foreach(_.members.valuesIterator.foreach(member => member.lastHeartbeatMillis = nowMillis))
+      consumerGroups.get(id).foreach(_.members.valuesIterator.foreach(member => member.lastHeartbeatMillis = nowMillis))
+    }
+    expirationOwners = owned
+    expireNow(nowMillis, id => assigned(id) && ready(id))
+  }
+
+  def expireNow(nowMillis: Long = System.currentTimeMillis(), eligible: String => Boolean = _ => true): Unit = stateLock.synchronized {
     val now = nowMillis
     var changed = false
-    groups.valuesIterator.foreach { group =>
+    groups.iterator.filter(entry => eligible(entry._1)).foreach { case (_, group) =>
       val pendingBefore = group.pendingMemberIds.size
       removeExpiredPendingIds(group, now)
       changed ||= group.pendingMemberIds.size != pendingBefore
@@ -514,7 +526,7 @@ final class GroupCoordinator(
           if group.members.isEmpty then resetEmpty(group) else beginRebalance(group, now)
           stateLock.notifyAll()
     }
-    consumerGroups.valuesIterator.foreach { group =>
+    consumerGroups.iterator.filter(entry => eligible(entry._1)).foreach { case (_, group) =>
       val expired = group.members.valuesIterator
         .filter(member => now - member.lastHeartbeatMillis >= 45_000L)
         .map(_.memberId)
@@ -525,7 +537,7 @@ final class GroupCoordinator(
         rebalanceConsumerGroup(group, _ => 0)
     }
     if offsetRetentionMillis > 0L then
-      val expiredOffsets = offsets.expireBefore(now - offsetRetentionMillis, durableLocal)
+      val expiredOffsets = offsets.expireBefore(now - offsetRetentionMillis, durableLocal, key => eligible(key.groupId))
       changed ||= expiredOffsets.nonEmpty
     if changed then checkpointState(): Unit
   }
