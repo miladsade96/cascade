@@ -1,0 +1,87 @@
+{
+  "status": "passed",
+  "scope": "candidate preparation only; excludes live group capture, quorum, disk and installation",
+  "started_at": "2026-09-04T07:47:36.306784Z",
+  "revision": "28781635fcff314f461ee0c1f31218cbf7859be3",
+  "groups": 1000,
+  "producers": 1000,
+  "iterations": 500,
+  "trials": 4,
+  "warmup_per_trial": 100,
+  "byte_exact_verified": 500,
+  "java_version": "21.0.11",
+  "samples": [
+    {
+      "mode": "full",
+      "trial": 0,
+      "milliseconds": 473.748,
+      "cpu_milliseconds": 453.125,
+      "allocated_bytes": 1419158912,
+      "encoded_shards": 64500,
+      "reused_shards": 0
+    },
+    {
+      "mode": "cached",
+      "trial": 0,
+      "milliseconds": 126.857,
+      "cpu_milliseconds": 125,
+      "allocated_bytes": 348405320,
+      "encoded_shards": 696,
+      "reused_shards": 63804
+    },
+    {
+      "mode": "cached",
+      "trial": 1,
+      "milliseconds": 121.571,
+      "cpu_milliseconds": 125,
+      "allocated_bytes": 348405568,
+      "encoded_shards": 696,
+      "reused_shards": 63804
+    },
+    {
+      "mode": "full",
+      "trial": 1,
+      "milliseconds": 425.841,
+      "cpu_milliseconds": 421.875,
+      "allocated_bytes": 1419107424,
+      "encoded_shards": 64500,
+      "reused_shards": 0
+    },
+    {
+      "mode": "full",
+      "trial": 2,
+      "milliseconds": 439.472,
+      "cpu_milliseconds": 421.875,
+      "allocated_bytes": 1419104080,
+      "encoded_shards": 64500,
+      "reused_shards": 0
+    },
+    {
+      "mode": "cached",
+      "trial": 2,
+      "milliseconds": 128,
+      "cpu_milliseconds": 125,
+      "allocated_bytes": 348381376,
+      "encoded_shards": 696,
+      "reused_shards": 63804
+    },
+    {
+      "mode": "cached",
+      "trial": 3,
+      "milliseconds": 121.332,
+      "cpu_milliseconds": 125,
+      "allocated_bytes": 348381320,
+      "encoded_shards": 696,
+      "reused_shards": 63804
+    },
+    {
+      "mode": "full",
+      "trial": 3,
+      "milliseconds": 443.321,
+      "cpu_milliseconds": 453.125,
+      "allocated_bytes": 1419104080,
+      "encoded_shards": 64500,
+      "reused_shards": 0
+    }
+  ]
+}
