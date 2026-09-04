@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG JDK_IMAGE=eclipse-temurin:21-jdk-jammy
-ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12:nonroot
+ARG JDK_IMAGE=eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77
+ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5
 
 FROM --platform=$BUILDPLATFORM ${JDK_IMAGE} AS application-build
 
@@ -26,7 +26,7 @@ RUN "$JAVA_HOME/bin/jlink" \
 
 FROM ${RUNTIME_IMAGE} AS runtime
 
-ARG VERSION=1.3.0-SNAPSHOT
+ARG VERSION=1.3.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 

@@ -13,25 +13,24 @@ I build the application and its Scala runtime dependencies in a JDK 21 stage, cr
 - includes an internal Java readiness probe against `/ready`;
 - declares `/var/lib/cascade` as the durable volume;
 - carries OCI source, version, revision, creation-time, and license labels; and
-- is built for `linux/amd64` and `linux/arm64` with SBOM and provenance attestations in the release workflow.
+- can be built for `linux/amd64` and `linux/arm64` with SBOM and provenance attestations in the release workflow; the manually qualified 1.3.0 target is Linux/amd64 only.
 
 The default operations listener stays on `127.0.0.1` inside the container. Docker can therefore evaluate readiness without exposing an unauthenticated HTTP endpoint. When I need remote metrics, I bind operations explicitly to `0.0.0.0`, mount a token file, set `CASCADE_HEALTHCHECK_TOKEN_FILE` to the same file, and put TLS or mTLS in front of port 9404.
 
 ## Pull and run one broker
 
-Version 1.2.0 is currently a local `linux/amd64` build, tagged as both `miladsade96/cascade:1.2.0` and `cascade:1.2.0`. I have not pushed it to Docker Hub. On this machine I skip the pull below; on another machine I first check out its recorded revision and build that source, or wait for publication. The Kubernetes examples also reference 1.2.0, so those nodes need the image loaded locally or available in their registry before deployment. This build does not qualify the 1.1.0-to-1.2.0 rolling upgrade boundary.
+The current image target is `miladsade96/cascade:1.3.0` for `linux/amd64`. I record build identity, qualification, publication status, and the immutable registry digest in the [1.3.0 release notes](releases/1.3.0.md). Deployment examples are aligned to this version. I do not retag older releases or move `latest` as part of this publication.
 
-Development has moved to `1.3.0-SNAPSHOT` for [shard-object storage](shard-storage.md). A build from the current checkout must use a development tag such as `cascade:1.3.0-SNAPSHOT`; it must not overwrite the qualified 1.2.0 tag. To reproduce the image described below I first check out its recorded revision. The deployment manifests remain pinned to the older tested image until a new release is qualified.
+Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset batching](offset-batching.md), and [cached coordinator snapshots](coordinator-snapshots.md). To reproduce an image I check out its recorded build revision and retain the Dockerfile's pinned base digests. This image does not by itself qualify every older published-image upgrade boundary.
 
 `deploy/VERSION` records that deployment pin separately from the source `VERSION`. Tests permit a different pin only for `-SNAPSHOT` development; a release must align both files, the manifests, and the documented image commands.
 
-For the shard-storage milestone I also ran the staged 1.3.0-SNAPSHOT jars inside a pinned Temurin JDK 21 container. Java, JavaScript, Python, Go, and .NET each verified 25 records, and Java recovered its exact records after restart. This tests the new runtime across a container boundary; it does not build, publish, or qualify a new distroless release image. The [current evidence](performance/2026-09-02-shard-storage.md) records this distinction.
+The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.0 -ExpectedVersion 1.3.0` to test the actual distroless image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime.
 
-The tested image was rebuilt from `fbe4e98a7b9c55680a365453041ee084c0a6efbf`: local image/index ID `sha256:0d316f03b5b8730213e5bfd72fb314b06859fbef8c8d2f6fb330e6a5ab970921`, Docker-reported size **39,164,217 bytes**. Java 4.3.1, KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0 each verified 25 records. Java verified the same data after restart. I ran as UID/GID 65532 with a read-only root, all capabilities dropped, `no-new-privileges`, a writable data volume, and a 2 GiB memory limit. I removed the disposable test container and volume after qualification; both image tags remain local. See the [qualification report](performance/2026-09-02-incremental-coordinator.md) for build pins and limitations.
+I retain the older 1.2.0 image's size, ID, and client checks only in its [historical qualification report](performance/2026-09-02-incremental-coordinator.md); those numbers are not measurements of 1.3.0.
 
 ```bash
-# After the 1.2.0 tag has been published:
-docker pull miladsade96/cascade:1.2.0
+docker pull miladsade96/cascade:1.3.0
 docker volume create cascade-data
 docker run --detach \
   --name cascade \
@@ -44,7 +43,7 @@ docker run --detach \
   --memory 4g \
   --publish 9092:9092 \
   --mount type=volume,source=cascade-data,target=/var/lib/cascade \
-  miladsade96/cascade:1.2.0 \
+  miladsade96/cascade:1.3.0 \
   --host 0.0.0.0 \
   --port 9092 \
   --advertised-host localhost \
@@ -165,16 +164,14 @@ docker login --username YOUR_DOCKERHUB_USERNAME
 docker buildx create --name cascade-release --driver docker-container --use
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=1.2.0 \
+  --build-arg VERSION=1.3.0 \
   --build-arg REVISION=GIT_COMMIT_SHA \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.2.0 \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.2 \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:latest \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.3.0 \
   --provenance=mode=max \
   --sbom=true \
   --push \
   .
-docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.2.0
+docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.3.0
 ```
 
 The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes build and smoke-test without publishing. A `v*` tag publishes semantic-version, Git-SHA, and `latest` tags; a manual workflow run publishes `manual` and Git-SHA tags. The release job does not run unless the complete test and container smoke jobs pass.

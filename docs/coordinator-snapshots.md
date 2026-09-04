@@ -1,6 +1,6 @@
 # Coordinator snapshot preparation
 
-I use content-addressed, fixed-layout encoding caches to reduce the CPU and allocation cost of preparing coordinator checkpoints. This is an internal optimization in 1.3.0-SNAPSHOT, not a new wire protocol, metadata format, release image, or independent shard consensus implementation.
+I use content-addressed, fixed-layout encoding caches to reduce the CPU and allocation cost of preparing coordinator checkpoints. This internal optimization was qualified during 1.3.0-SNAPSHOT development and is included in [1.3.0](releases/1.3.0.md). It does not introduce a wire protocol, metadata format, or independent shard consensus implementation.
 
 ## Publication contract
 

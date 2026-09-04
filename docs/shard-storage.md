@@ -2,7 +2,7 @@
 
 I store changed coordinator shard payloads separately from the ordered metadata commit journal. This is a staged capacity change: immutable, independently checksummed shard objects and small atomic commit references first; independent shard consensus and service locks remain separate work.
 
-The feature is development work in `1.3.0-SNAPSHOT`, not part of the previously tested local 1.2.0 Docker image.
+The feature is included in `1.3.0`, following qualification during 1.3.0-SNAPSHOT development. It is not part of the older 1.2.0 image. I keep image status and upgrade limitations in the [release notes](releases/1.3.0.md).
 
 ## Safety contract
 

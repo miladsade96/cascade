@@ -48,7 +48,7 @@ spec:
                 topologyKey: topology.kubernetes.io/zone
       containers:
         - name: cascade
-          image: miladsade96/cascade:1.2.0
+          image: miladsade96/cascade:1.3.0
           imagePullPolicy: IfNotPresent
           args:
             - --host
@@ -245,7 +245,7 @@ spec:
                 topologyKey: topology.kubernetes.io/zone
       containers:
         - name: cascade
-          image: miladsade96/cascade:1.2.0
+          image: miladsade96/cascade:1.3.0
           imagePullPolicy: IfNotPresent
           args:
             - --host
@@ -442,7 +442,7 @@ spec:
                 topologyKey: topology.kubernetes.io/zone
       containers:
         - name: cascade
-          image: miladsade96/cascade:1.2.0
+          image: miladsade96/cascade:1.3.0
           imagePullPolicy: IfNotPresent
           args:
             - --host
