@@ -23,6 +23,17 @@ jobs:
         run: |
           chmod +x sbt
           ./sbt test
+      - name: Qualify byte-exact snapshot preparation
+        run: |
+          ./sbt "Test / runMain cascade.qualification.CoordinatorSnapshotQualification --groups 1000 --iterations 500 --report artifacts/coordinator-snapshot.json"
+          jq -e '.status == "passed" and .byte_exact_verified == 500 and (.samples | length) == 8 and ([.samples[] | select(.mode == "cached") | .reused_shards > .encoded_shards] | all)' artifacts/coordinator-snapshot.json
+      - name: Archive snapshot preparation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coordinator-snapshot-evidence
+          path: artifacts/coordinator-snapshot.json
+          if-no-files-found: warn
       - name: Render deployment and validate dashboard JSON
         run: |
           kubectl kustomize deploy/kubernetes > /tmp/cascade-kubernetes.yaml
@@ -89,6 +100,7 @@ jobs:
           jq -e '.status == "passed" and .verified == 1000 and .writes == 3000 and .controller_failover and .restart_recovery and (.owner_ids | length) == 3 and .delta_bytes < .full_image_bytes and .journal_delta_bytes > 0 and .replication_delta_bytes > 0' artifacts/coordinator-scale.json
           jq -e '.object_written_bytes > 0 and .objects_written > 0 and .rejected_connections == 0 and (if .client_lifecycle == "persistent" then .clients_created == .groups and .warmup_writes == .groups else .clients_created > .groups end)' artifacts/coordinator-scale.json
           jq -e '.batch_rejected == 0 and .batch_peak_requests <= 1024 and .batch_peak_bytes <= 16777216 and (if .batch_max_requests == 1 then .batches == .batched_requests else .batches < .batched_requests end)' artifacts/coordinator-scale.json
+          jq -e '.snapshot_encoded_shards > 0 and .snapshot_reused_shards > .snapshot_encoded_shards and .snapshot_encoded_bytes > 0 and .snapshot_preparation_nanos > 0' artifacts/coordinator-scale.json
       - name: Archive coordinator qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
