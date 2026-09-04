@@ -23,14 +23,17 @@ object ExternalBrokerSmokeTest:
     val bootstrapServers = arguments.head
     val topic = arguments.lift(1).getOrElse(s"container-smoke-${UUID.randomUUID()}")
     val verifyOnly = arguments.contains("--verify-only")
-    val clusterId = describeCluster(bootstrapServers)
-    if !verifyOnly then produce(bootstrapServers, topic)
-    consumeAndVerify(bootstrapServers, topic)
+    verify(bootstrapServers, topic, verifyOnly)
+
+  def verify(bootstrapServers: String, topic: String, verifyOnly: Boolean, security: Properties = Properties()): Unit =
+    val clusterId = describeCluster(bootstrapServers, security)
+    if !verifyOnly then produce(bootstrapServers, topic, security)
+    consumeAndVerify(bootstrapServers, topic, security)
     val mode = if verifyOnly then "recovered" else "produced"
     println(s"Cascade container smoke test passed: cluster=$clusterId topic=$topic records=$RecordCount mode=$mode")
 
-  private def describeCluster(bootstrapServers: String): String =
-    val properties = Properties()
+  private def describeCluster(bootstrapServers: String, security: Properties): String =
+    val properties = security.clone().asInstanceOf[Properties]
     properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
     properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
     properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "20000")
@@ -42,8 +45,8 @@ object ExternalBrokerSmokeTest:
       description.clusterId().get(20L, TimeUnit.SECONDS)
     finally admin.close(Duration.ofSeconds(5L))
 
-  private def produce(bootstrapServers: String, topic: String): Unit =
-    val properties = Properties()
+  private def produce(bootstrapServers: String, topic: String, security: Properties): Unit =
+    val properties = security.clone().asInstanceOf[Properties]
     properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
     properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
     properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
@@ -63,8 +66,8 @@ object ExternalBrokerSmokeTest:
       producer.flush()
     finally producer.close(Duration.ofSeconds(5L))
 
-  private def consumeAndVerify(bootstrapServers: String, topic: String): Unit =
-    val properties = Properties()
+  private def consumeAndVerify(bootstrapServers: String, topic: String, security: Properties): Unit =
+    val properties = security.clone().asInstanceOf[Properties]
     properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
     properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
     properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)

@@ -8,7 +8,7 @@ const clean = () => ({ version: '2.1.0', runs: [{ tool: { driver: { name: 'docke
 const statement = (subject = runtimeDigest) => ({
   _type: 'https://in-toto.io/Statement/v1', predicateType: 'https://spdx.dev/Document',
   subject: [{ digest: { sha256: subject.slice(7) } }],
-  predicate: { spdxVersion: 'SPDX-2.3', packages: ['base-files', 'ca-certificates', 'libc6', 'openjdk', 'scala-library', 'scala3-library_3', 'cascade_3']
+  predicate: { spdxVersion: 'SPDX-2.3', packages: ['alpine-baselayout-data', 'ca-certificates-bundle', 'musl', 'libstdc++', 'openjdk', 'scala-library', 'scala3-library_3', 'cascade_3']
     .map(name => ({ name, versionInfo: name === 'cascade_3' ? version : '1.0' })) }
 })
 
@@ -39,7 +39,7 @@ test('rejects malformed SARIF roots', () => {
   for (const report of [{}, { version: '2.1.0', runs: [] }, { version: '1', runs: clean().runs }]) assert.throws(() => validateReport(report, 0))
 })
 test('requires the complete runtime inventory', () => {
-  assert.equal(validateSbom(statement(), runtimeDigest, version), 7)
+  assert.equal(validateSbom(statement(), runtimeDigest, version), 8)
   for (const name of statement().predicate.packages.map(pkg => pkg.name)) {
     const sbom = statement()
     sbom.predicate.packages = sbom.predicate.packages.filter(pkg => pkg.name !== name)
@@ -50,8 +50,8 @@ test('rejects mismatched SBOM subject and version', () => {
   assert.throws(() => validateSbom(statement(), `sha256:${'b'.repeat(64)}`, version))
   assert.throws(() => validateSbom(statement(), runtimeDigest, '1.3.0'))
 })
-test('rejects OpenSSL reintroduction', () => {
-  for (const name of ['libssl3', 'libssl3t64', 'libcrypto3', 'openssl']) {
+test('rejects OpenSSL, glibc, shell and package-manager reintroduction', () => {
+  for (const name of ['libssl3', 'libssl3t64', 'libcrypto3', 'openssl', 'libc6', 'glibc', 'busybox', 'apk-tools']) {
     const sbom = statement()
     sbom.predicate.packages.push({ name, versionInfo: '3.0' })
     assert.throws(() => validateSbom(sbom, runtimeDigest, version))
@@ -94,7 +94,7 @@ function archiveFixture(mutate = () => {}) {
 }
 test('binds the archive SBOM to the inspected index, platform, config and runtime', () => {
   const fixture = archiveFixture()
-  assert.equal(inspectArchive(member => fixture.files.get(member), fixture.id, version).packageCount, 7)
+  assert.equal(inspectArchive(member => fixture.files.get(member), fixture.id, version).packageCount, 8)
   assert.throws(() => inspectArchive(member => fixture.files.get(member), runtimeDigest, version))
 })
 for (const [name, target, change] of [

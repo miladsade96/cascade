@@ -22,11 +22,11 @@ export function validateSbom(statement, runtimeDigest, version) {
   requireThat(statement.subject?.length === 1 && `sha256:${statement.subject[0].digest?.sha256}` === runtimeDigest, 'SBOM subject mismatch')
   const packages = statement.predicate?.packages
   requireThat(statement.predicate?.spdxVersion === 'SPDX-2.3' && Array.isArray(packages), 'Invalid SPDX inventory')
-  for (const name of ['base-files', 'ca-certificates', 'libc6', 'openjdk', 'scala-library', 'scala3-library_3']) {
+  for (const name of ['alpine-baselayout-data', 'ca-certificates-bundle', 'musl', 'libstdc++', 'openjdk', 'scala-library', 'scala3-library_3']) {
     requireThat(packages.some(pkg => pkg.name === name && typeof pkg.versionInfo === 'string' && pkg.versionInfo.length > 0), `Incomplete SBOM: ${name}`)
   }
   requireThat(packages.some(pkg => pkg.name === 'cascade_3' && pkg.versionInfo === version), 'SBOM application version mismatch')
-  requireThat(!packages.some(pkg => /^(libssl|libcrypto|openssl)(\b|\d)/i.test(pkg.name)), 'Unexpected OpenSSL package in no-OpenSSL runtime')
+  requireThat(!packages.some(pkg => /^(libssl|libcrypto|openssl|glibc|libc6|busybox|apk-tools)(\b|\d)/i.test(pkg.name)), 'Forbidden package in minimal musl runtime')
   return packages.length
 }
 

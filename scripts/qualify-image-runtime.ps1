@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BrokerImage,
-    [string]$ExpectedVersion = '1.3.1'
+    [string]$ExpectedVersion,
+    [string]$Java
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) { $ExpectedVersion = (Get-Content -LiteralPath (Join-Path $repository 'VERSION') -Raw).Trim() }
+if ([string]::IsNullOrWhiteSpace($Java)) { $Java = (Get-Command java -ErrorAction Stop).Source }
 $classpathFile = Join-Path $repository 'target/streams/test/fullClasspath/_global/streams/export'
 if (-not (Test-Path -LiteralPath $classpathFile)) { throw 'Run sbt Test/compile first.' }
 $imageJson = & docker image inspect $BrokerImage
@@ -39,10 +42,9 @@ $common = @('run', '--rm', '--read-only', '--cap-drop', 'ALL', '--security-opt',
     '--entrypoint', '/opt/java/bin/java') + $mountArguments
 $suites = @('cascade.security.TlsContextFactorySuite', 'cascade.security.ReloadableTlsContextSuite',
     'cascade.security.MutualTlsMaterialSuite', 'cascade.security.PeerTlsClientSuite',
-    'cascade.broker.SecurityIntegrationSuite', 'cascade.broker.PeerSecurityIntegrationSuite',
-    'cascade.e2e.SecureKafkaClientEndToEndSuite', 'cascade.e2e.ScramKafkaClientEndToEndSuite',
-    'cascade.e2e.OAuthKafkaClientEndToEndSuite', 'cascade.e2e.TlsReloadEndToEndSuite',
-    'cascade.e2e.SecurePeerClusterEndToEndSuite')
+    'cascade.broker.PeerSecurityIntegrationSuite')
 & docker @common $metadata.Id '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp ($mapped -join ':') org.junit.runner.JUnitCore @suites
 if ($LASTEXITCODE -ne 0) { throw 'Packaged-image TLS/SASL/security regression failed.' }
+& $Java '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp (Get-Content -LiteralPath $classpathFile -Raw).Trim() cascade.e2e.ExternalSecureImageQualification $metadata.Id
+if ($LASTEXITCODE -ne 0) { throw 'External secure Kafka clients failed against the actual image.' }
 Write-Output "IMAGE_RUNTIME_SECURITY_RESULT passed image_id=$($metadata.Id) version=$ExpectedVersion suites=$($suites.Count) broker_classes=image"
