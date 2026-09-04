@@ -23,7 +23,7 @@ This example advertises `localhost` for local development. For remote clients I 
 
 ## Scope
 
-Cascade is **not yet a production-grade Kafka replacement**. Shared coordinator consensus/locks, broader API coverage, multi-day soak, dedicated-host capacity, physical power/device loss, and some published-image rolling-upgrade boundaries remain open. Snapshot development passed 445 full-suite tests, 79 Linux tests, five external client languages, and exact one-million-record checks; release-image results and immutable digests are kept separately in the repository's 1.3.0 release notes.
+Cascade is **not yet a production-grade Kafka replacement**. Shared coordinator consensus/locks, broader API coverage, multi-day soak, dedicated-host capacity, physical power/device loss, and some published-image rolling-upgrade boundaries remain open. Release 1.3.0 passed 445 source tests, all five actual-image client checks, single-node restart recovery, and a three-broker replication/restart smoke test. Docker reports a 39.3 MB Linux/amd64 image. Its vulnerability scan is unverified because the Java database download failed; generating an SBOM does not establish zero CVEs. Exact image identities, test scope, and publication status are in the release notes. The earlier Linux 79-test and million-record campaigns remain separate development evidence.
 
 - [Source and API compatibility](https://github.com/miladsade96/cascade)
 - [Container guide](https://github.com/miladsade96/cascade/blob/main/docs/containers.md)

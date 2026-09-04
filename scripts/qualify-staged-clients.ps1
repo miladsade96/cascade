@@ -4,7 +4,8 @@ param(
     [string]$JdkImage = 'eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77',
     [string]$GoProxy = 'https://proxy.golang.org,direct',
     [string]$BrokerImage,
-    [string]$ExpectedVersion
+    [string]$ExpectedVersion,
+    [string]$GoExecutable
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +22,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $repository 'compatibility/node/node
     throw 'Run npm ci in compatibility/node before this qualification.'
 }
 $classpath = (Get-Content -LiteralPath $classpathFile -Raw).Trim()
+if (-not [string]::IsNullOrWhiteSpace($GoExecutable)) {
+    $GoExecutable = [IO.Path]::GetFullPath($GoExecutable)
+    if (-not (Test-Path -LiteralPath $GoExecutable -PathType Leaf)) { throw 'Prebuilt Linux Go smoke executable does not exist.' }
+}
 $brokerClasspath = '/cascade/lib/*'
 $qualifiedImageId = $null
 if (-not [string]::IsNullOrWhiteSpace($BrokerImage)) {
@@ -65,7 +70,11 @@ try {
     Assert-ClientExit 'KafkaJS smoke'
     & docker run --rm --network "container:$containerName" --mount "type=bind,source=$repository/compatibility/python,target=/work,readonly" python:3.13-slim sh -c 'pip install --disable-pip-version-check --target /tmp/client -r /work/requirements.txt && PYTHONPATH=/tmp/client python /work/smoke.py staged-python'
     Assert-ClientExit 'Python smoke'
-    & docker run --rm --network "container:$containerName" --env "GOPROXY=$GoProxy" --mount "type=bind,source=$repository/compatibility/go,target=/work,readonly" --workdir /work golang:1.25 go run .
+    if ([string]::IsNullOrWhiteSpace($GoExecutable)) {
+        & docker run --rm --network "container:$containerName" --env "GOPROXY=$GoProxy" --mount "type=bind,source=$repository/compatibility/go,target=/work,readonly" --workdir /work golang:1.25 go run .
+    } else {
+        & docker run --rm --network "container:$containerName" --mount "type=bind,source=$GoExecutable,target=/client/smoke,readonly" golang:1.25 /client/smoke
+    }
     Assert-ClientExit 'Go smoke'
     & docker run --rm --network "container:$containerName" --tmpfs /work:rw,exec,nosuid,nodev --mount "type=bind,source=$repository/compatibility/dotnet/CascadeCompatibility.csproj,target=/work/CascadeCompatibility.csproj,readonly" --mount "type=bind,source=$repository/compatibility/dotnet/Program.cs,target=/work/Program.cs,readonly" --workdir /work mcr.microsoft.com/dotnet/sdk:8.0 dotnet run --configuration Release
     Assert-ClientExit '.NET smoke'

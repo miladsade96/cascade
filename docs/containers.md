@@ -27,6 +27,8 @@ Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset
 
 The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.0 -ExpectedVersion 1.3.0` to test the actual distroless image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime.
 
+The 1.3.0 release passed 445 source tests, all five actual-image client checks, single-node restart recovery, and a three-broker replication/restart smoke test. Docker reports 39.3 MB for the Linux/amd64 image. The vulnerability scan did not complete because its Java database download failed; I do not treat the generated SBOM as a zero-CVE result. Exact identities, test scope, and the Go dependency-download workaround are in the release notes.
+
 I retain the older 1.2.0 image's size, ID, and client checks only in its [historical qualification report](performance/2026-09-02-incremental-coordinator.md); those numbers are not measurements of 1.3.0.
 
 ```bash

@@ -2,6 +2,10 @@ const { Kafka, logLevel } = require('kafkajs')
 
 const bootstrap = process.env.CASCADE_BOOTSTRAP_SERVERS || '127.0.0.1:19092'
 const topic = process.argv[2] || `node-compat-${Date.now()}`
+const replicationFactor = Number(process.env.CASCADE_REPLICATION_FACTOR || '1')
+if (!Number.isInteger(replicationFactor) || replicationFactor < 1 || replicationFactor > 32767) {
+  throw new Error('CASCADE_REPLICATION_FACTOR must be an integer from 1 to 32767')
+}
 const expected = Array.from({ length: 25 }, (_, index) => `node-${index}`)
 
 async function main() {
@@ -20,7 +24,7 @@ async function main() {
   try {
     await admin.createTopics({
       waitForLeaders: true,
-      topics: [{ topic, numPartitions: 1, replicationFactor: 1 }]
+      topics: [{ topic, numPartitions: 1, replicationFactor }]
     })
   } finally {
     await admin.disconnect()
