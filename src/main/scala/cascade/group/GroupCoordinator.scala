@@ -85,7 +85,11 @@ final class GroupCoordinator(
   private[cascade] def image: GroupImage = stateLock.synchronized(snapshotImage())
 
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
-    installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray))
+    installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray), renewSessions = true)
+  }
+
+  private[cascade] def installCommittedImage(image: GroupImage, renewSessions: Boolean): Unit = stateLock.synchronized {
+    installImage(image, renewSessions)
   }
 
   /** KIP-848-style server-side membership and assignment, without the classic join/sync barrier. */
@@ -590,12 +594,17 @@ final class GroupCoordinator(
     }
     GroupImage(stateVersion, storedGroups, offsets.entries, storedConsumers)
 
-  private def installImage(image: GroupImage): Unit =
-    groups.clear()
-    consumerGroups.clear()
+  private def installImage(image: GroupImage, renewSessions: Boolean): Unit =
+    groups.keysIterator.filterNot(image.groups.map(_.groupId).toSet).toVector.foreach(groups.remove)
+    consumerGroups.keysIterator.filterNot(image.consumerGroups.map(_.groupId).toSet).toVector.foreach(consumerGroups.remove)
     val installedAtMillis = System.currentTimeMillis()
     image.groups.foreach { stored =>
-      val group = ManagedGroup()
+      // Keep the group identity: join/sync waiters may hold it while releasing the monitor.
+      val group = groups.getOrElseUpdate(stored.groupId, ManagedGroup())
+      val previousMembers = group.members.toMap
+      group.members.clear()
+      group.joined.clear()
+      group.pendingMemberIds.clear()
       group.phase = stored.status
       group.generationId = stored.generationId
       group.leaderId = stored.leaderId
@@ -610,7 +619,10 @@ final class GroupCoordinator(
           value.rebalanceTimeoutMillis,
           value.protocols.map(protocol => GroupProtocol(protocol.name, protocol.metadata.toArray)),
           value.clientId,
-          installedAtMillis
+          if renewSessions then installedAtMillis
+          else previousMembers.get(value.memberId)
+            .map(member => math.max(member.lastHeartbeatMillis, value.lastHeartbeatMillis))
+            .getOrElse(installedAtMillis)
         )
         member.assignment = value.assignment.toArray
         group.members.update(member.memberId, member)
@@ -621,7 +633,10 @@ final class GroupCoordinator(
     }
     offsets.install(image.offsets)
     image.consumerGroups.foreach { stored =>
-      val group = ManagedConsumerGroup()
+      val group = consumerGroups.getOrElseUpdate(stored.groupId, ManagedConsumerGroup())
+      val previousMembers = group.members.toMap
+      group.members.clear()
+      group.partitionCounts.clear()
       group.groupEpoch = stored.groupEpoch
       stored.members.foreach { value =>
         group.members.update(
@@ -634,7 +649,10 @@ final class GroupCoordinator(
             value.subscriptions,
             value.serverAssignor,
             value.memberEpoch,
-            installedAtMillis,
+            if renewSessions then installedAtMillis
+            else previousMembers.get(value.memberId)
+              .map(member => math.max(member.lastHeartbeatMillis, value.lastHeartbeatMillis))
+              .getOrElse(installedAtMillis),
             value.assignment
           )
         )
