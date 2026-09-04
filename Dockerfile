@@ -29,7 +29,9 @@ FROM ${RUNTIME_IMAGE} AS runtime-base-build
 
 # Install only runtime packages into an empty root, retaining the real APK inventory.
 # No shell, package manager, glibc, or OpenSSL is copied into the final image.
-RUN apk --root /runtime --initdb --no-cache --no-scripts \
+RUN mkdir -p /runtime/etc/apk && \
+    cp -a /etc/apk/keys /runtime/etc/apk/ && \
+    apk --root /runtime --initdb --no-cache --no-scripts \
       --repositories-file /etc/apk/repositories add \
       alpine-baselayout-data=3.7.2-r1 musl=1.2.6-r2 libstdc++=15.2.0-r5 \
       ca-certificates-bundle=20260611-r0 tzdata=2026c-r0 && \
