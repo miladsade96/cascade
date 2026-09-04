@@ -49,6 +49,7 @@ final class CoordinatorStateMachine(
       try
         if cluster.supportsFeature(ClusterFeature.CoordinatorDeltas) then
           val candidate = snapshots.capture(groups.image, delivery.image)
+          metrics.recordPreparation(candidate, System.nanoTime() - started)
           fullSize = candidate.fullImageBytes
           CoordinatorShardState.changes(installed, baseline, candidate.payloads, cluster.controllerTerm) match
             case Some(delta) =>
