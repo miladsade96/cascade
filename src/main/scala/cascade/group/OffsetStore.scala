@@ -22,6 +22,7 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   Option(path.getParent).foreach(AtomicFileLifecycle.recoverReplacements)
   private var channel = openChannel()
   private val offsets = mutable.HashMap.empty[GroupOffsetKey, CommittedOffset]
+  private val keysByGroup = mutable.HashMap.empty[String, mutable.HashSet[GroupOffsetKey]]
   private var cachedEntries: Option[Vector[OffsetCommitValue]] = None
   private var appendPosition = recover()
   private var closed = false
@@ -36,7 +37,7 @@ final class OffsetStore(path: Path) extends AutoCloseable:
           appendPosition += frame.length
         }
         channel.force(false)
-      values.foreach(value => offsets.update(value.key, value.value))
+      values.foreach(put)
       cachedEntries = None
   }
 
@@ -56,14 +57,16 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     ensureOpen()
     if entries != values then
       offsets.clear()
-      values.foreach(value => offsets.update(value.key, value.value))
+      keysByGroup.clear()
+      values.foreach(put)
       cachedEntries = None
   }
 
   def get(key: GroupOffsetKey): Option[CommittedOffset] = synchronized(offsets.get(key))
 
   def all(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = synchronized {
-    offsets.iterator.filter(_._1.groupId == groupId).toVector.sortBy { case (key, _) => (key.topic, key.partition) }
+    keysByGroup.get(groupId).iterator.flatMap(_.iterator).map(key => key -> offsets(key))
+      .toVector.sortBy { case (key, _) => (key.topic, key.partition) }
   }
 
   def journalSize: Long = synchronized(channel.size())
@@ -98,7 +101,13 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   def expireBefore(cutoffMillis: Long, durable: Boolean = true, eligible: GroupOffsetKey => Boolean = _ => true): Vector[GroupOffsetKey] = synchronized {
     ensureOpen()
     val expired = offsets.iterator.collect { case (key, value) if value.committedAtMillis < cutoffMillis && eligible(key) => key }.toVector
-    expired.foreach(offsets.remove)
+    expired.foreach { key =>
+      offsets.remove(key): Unit
+      keysByGroup.get(key.groupId).foreach { keys =>
+        keys.remove(key): Unit
+        if keys.isEmpty then keysByGroup.remove(key.groupId): Unit
+      }
+    }
     if expired.nonEmpty then cachedEntries = None
     if durable && expired.nonEmpty then compact()
     expired.sortBy(key => (key.groupId, key.topic, key.partition))
@@ -154,7 +163,7 @@ final class OffsetStore(path: Path) extends AutoCloseable:
           if checksum.getValue.toInt != expectedChecksum then scanning = false
           else
             val entry = decode(payload)
-            offsets.update(entry.key, entry.value)
+            put(entry)
             position += frameSize
     if position < fileSize then
       channel.truncate(position)
@@ -172,6 +181,10 @@ final class OffsetStore(path: Path) extends AutoCloseable:
 
   private def ensureOpen(): Unit =
     if closed then throw IllegalStateException("offset store is closed")
+
+  private def put(entry: OffsetCommitValue): Unit =
+    offsets.update(entry.key, entry.value)
+    keysByGroup.getOrElseUpdate(entry.key.groupId, mutable.HashSet.empty).add(entry.key): Unit
 
   private def writeFully(buffer: ByteBuffer, start: Long): Unit =
     var position = start

@@ -43,3 +43,18 @@ final class OffsetViewCacheSuite extends FunSuite:
       assertEquals(store.entries, Vector.empty)
     }
   }
+
+  test("group-indexed fetch remains exact through high-cardinality rewinds replacements and deletion") {
+    withStore { store =>
+      val values = (0 until 1000).map(i => value(s"workers-$i", i.toLong)).toVector
+      store.commit(values, durable = false)
+      store.commit(Vector(value("workers-123", 0L)), durable = false)
+      assertEquals(store.all("workers-123"), Vector(value("workers-123", 0L).key -> value("workers-123", 0L).value))
+      assertEquals(store.all("missing"), Vector.empty)
+      store.install(Vector(value("replacement", 42L)))
+      assertEquals(store.all("workers-123"), Vector.empty)
+      assertEquals(store.all("replacement").map(_._2.offset), Vector(42L))
+      store.expireBefore(43L, durable = false)
+      assertEquals(store.all("replacement"), Vector.empty)
+    }
+  }
