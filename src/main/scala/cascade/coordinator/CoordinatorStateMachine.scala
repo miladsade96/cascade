@@ -76,10 +76,12 @@ final class CoordinatorStateMachine(
 
   private def installLatest(metadata: CoordinatorMetadata, force: Boolean): Unit = stateLock.synchronized {
     if metadata.version > installedVersion || (force && metadata.version == installedVersion) then
-      groups.installSnapshot(metadata.groupState)
-      delivery.installSnapshot(metadata.deliveryState)
+      // Recovery/controller-term changes grant a fresh session window. Ordinary
+      // checkpoints are not heartbeats and must not keep abandoned members alive.
+      groups.installCommittedImage(metadata.groupImage, renewSessions = installedVersion < 0L || metadata.ownerTerm != installed.ownerTerm)
+      delivery.installCommittedImage(metadata.deliveryImage)
       installedVersion = metadata.version
       installed = metadata
-      baseline = CoordinatorShardState.payloads(groups.snapshotBytes.toVector, delivery.snapshotBytes.toVector)
+      baseline = metadata.shardPayloads
       cluster.coordinatorStateInstalled(metadata)
   }

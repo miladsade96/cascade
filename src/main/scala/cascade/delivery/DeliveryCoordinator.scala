@@ -50,6 +50,10 @@ final class DeliveryCoordinator(
 
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     val image = if bytes.isEmpty then DeliveryImage.Empty else DeliveryCodec.decode(bytes.toArray)
+    installCommittedImage(image)
+  }
+
+  private[cascade] def installCommittedImage(image: DeliveryImage): Unit = stateLock.synchronized {
     store.install(image)
     current = image
     stateLock.notifyAll()
