@@ -80,6 +80,8 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 
 ## When I will call it production ready
 
+I keep the latest complete evidence in the [2026-09-04 coordinator snapshot qualification](performance/2026-09-04-coordinator-snapshots.md).
+
 I won't describe a release as a Kafka replacement until every blocking row above has an automated acceptance test and passes on the deployment topology I document.
 
 When I publish a performance result, I'll include the hardware, durability policy, workload, client configuration, and exact delivery count. When I claim compatibility, I'll list the API keys and versions instead of just saying "Kafka compatible."

@@ -37,6 +37,8 @@ I compare rates of reused versus encoded shards, preparation time versus checkpo
 
 ## Reproduction
 
+I keep the measured results, exact recovery checks, and external compatibility evidence in the [2026-09-04 qualification report](performance/2026-09-04-coordinator-snapshots.md).
+
 I run the full Scala suite, then the preparation comparison and real-client campaigns:
 
 ```text
