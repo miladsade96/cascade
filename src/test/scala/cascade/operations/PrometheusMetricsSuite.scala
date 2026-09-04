@@ -51,6 +51,17 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(!output.contains("principal="))
   }
 
+  test("snapshot efficiency exports measured values with node-only labels and correct time units") {
+    val output = PrometheusMetrics.encode(snapshot.copy(coordinator = cascade.coordinator.CoordinatorMetricsSnapshot.Empty.copy(
+      encodedShards = 2L, reusedShards = 127L, encodedBytes = 1024L, preparationNanos = 1500000000L)))
+    assert(output.contains("cascade_coordinator_snapshot_encoded_shards_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_snapshot_reused_shards_total{node_id=\"7\"} 127.0\n"))
+    assert(output.contains("cascade_coordinator_snapshot_encoded_bytes_total{node_id=\"7\"} 1024.0\n"))
+    assert(output.contains("cascade_coordinator_snapshot_preparation_seconds_total{node_id=\"7\"} 1.5\n"))
+    assert(!output.contains("group_id="))
+    assert(!output.contains("transactional_id="))
+  }
+
   private val snapshot = BrokerMetricsSnapshot(
     nodeId = 7,
     uptimeMillis = 2500L,

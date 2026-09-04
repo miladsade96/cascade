@@ -58,3 +58,22 @@ final class OffsetViewCacheSuite extends FunSuite:
       assertEquals(store.all("replacement"), Vector.empty)
     }
   }
+
+  test("the group index is rebuilt after durable compaction and journal recovery") {
+    val directory = Files.createTempDirectory("cascade-offset-index-recovery-")
+    val path = directory.resolve("offsets.log")
+    val original = OffsetStore(path)
+    try
+      original.commit(Vector(value("a", 1L), value("b", 2L), value("a", 3L)))
+      original.compact()
+    finally original.close()
+    val recovered = OffsetStore(path)
+    try
+      assertEquals(recovered.all("a"), Vector(value("a", 3L).key -> value("a", 3L).value))
+      assertEquals(recovered.all("b"), Vector(value("b", 2L).key -> value("b", 2L).value))
+      assertEquals(recovered.entries, Vector(value("a", 3L), value("b", 2L)))
+    finally
+      recovered.close()
+      Files.deleteIfExists(path): Unit
+      Files.deleteIfExists(directory): Unit
+  }

@@ -92,6 +92,21 @@ final class GroupImageInstallationSuite extends FunSuite:
     }
   }
 
+  test("typed snapshots are detached from later live heartbeats and stale installation preserves local liveness") {
+    withCoordinator { coordinator =>
+      coordinator.installCommittedImage(initial, renewSessions = true)
+      val before = coordinator.image
+      val beforeTime = before.groups.head.members.head.lastHeartbeatMillis
+      Thread.sleep(20L)
+      assertEquals(coordinator.heartbeat("classic", 1, "a"), Errors.None)
+      val liveTime = coordinator.image.groups.head.members.head.lastHeartbeatMillis
+      assert(liveTime > beforeTime)
+      assertEquals(before.groups.head.members.head.lastHeartbeatMillis, beforeTime)
+      coordinator.installCommittedImage(before, renewSessions = false)
+      assertEquals(coordinator.image.groups.head.members.head.lastHeartbeatMillis, liveTime)
+    }
+  }
+
   test("sync waiters observe installed assignments and authoritative group deletion") {
     Vector(false, true).foreach { deleted =>
       withCoordinator { coordinator =>
