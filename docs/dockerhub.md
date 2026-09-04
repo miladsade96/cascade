@@ -4,7 +4,7 @@ I build Cascade in pure Scala 3 as a Kafka-wire-compatible streaming broker. Exi
 
 ## Image
 
-`miladsade96/cascade:1.3.1` targets **Linux/amd64**. This security patch replaces the Debian 12/OpenSSL base with a pinned minimal Alpine/musl runtime without glibc or OpenSSL and requires a completed zero-finding vulnerability scan before publication. Broker features remain unchanged: immutable coordinator shard storage, bounded offset batching, cached snapshots, replication, transactions, TLS/SASL/ACLs, quotas, and operations endpoints.
+`miladsade96/cascade:1.3.1` is published for **Linux/amd64**. This security patch replaces the Debian 12/OpenSSL base with a pinned minimal Alpine/musl runtime without glibc or OpenSSL. Prepublication and published-registry scans on 2026-09-04 reported **zero vulnerabilities at every severity, with no exceptions**. Future releases require the same completed zero-finding gate. Broker features remain unchanged: immutable coordinator shard storage, bounded offset batching, cached snapshots, replication, transactions, TLS/SASL/ACLs, quotas, and operations endpoints.
 
 I use a minimal Alpine/musl filesystem without glibc or OpenSSL, a module-limited Java 21 runtime, UID/GID 65532, and a built-in readiness probe. TLS is supplied by Java. The image has no shell. Data belongs in `/var/lib/cascade`; Kafka listens on port 9092 and operations defaults to loopback port 9404.
 

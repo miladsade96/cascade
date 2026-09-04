@@ -20,7 +20,7 @@ The default operations listener stays on `127.0.0.1` inside the container. Docke
 
 ## Pull and run one broker
 
-The current image target is `miladsade96/cascade:1.3.1` for `linux/amd64`. I record build identity, qualification, publication status, and the immutable registry digest in the [1.3.1 release notes](releases/1.3.1.md). Deployment examples are aligned to this version. I do not retag older releases or move `latest` as part of this publication.
+The current published image is `miladsade96/cascade:1.3.1` for `linux/amd64`. I record build identity, qualification, publication verification, and the immutable registry digest in the [1.3.1 release notes](releases/1.3.1.md). Deployment examples are aligned to this version. I do not retag older releases or move `latest` as part of this publication.
 
 Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset batching](offset-batching.md), and [cached coordinator snapshots](coordinator-snapshots.md). To reproduce an image I check out its recorded build revision and retain the Dockerfile's pinned base digests. This image does not by itself qualify every older published-image upgrade boundary.
 
@@ -28,7 +28,7 @@ Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset
 
 The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.1 -ExpectedVersion 1.3.1` to test the actual minimal image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL and secure-peer regression tests.
 
-The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Its locally qualified image reports 33.5 MB and zero findings, with the complete 446-test suite, five client languages, TLS/SASL and restart checks passing. Exact evidence and limitations are in the [1.3.1 notes](releases/1.3.1.md). Historical sizes and test counts are retained in each release's own notes.
+The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Its qualified image reports 33.5 MB; local and published-registry scans returned zero findings on 2026-09-04, with the complete 446-test suite, five client languages, TLS/SASL and restart checks passing. Exact evidence and limitations are in the [1.3.1 notes](releases/1.3.1.md). Historical sizes and test counts are retained in each release's own notes.
 
 I retain the older 1.2.0 image's size, ID, and client checks only in its [historical qualification report](performance/2026-09-02-incremental-coordinator.md); those numbers are not measurements of 1.3.0.
 

@@ -2,7 +2,7 @@
 
 ## 1.3.1 security patch post
 
-I'm preparing Cascade 1.3.1 to address the Debian libc/OpenSSL findings in the 1.3.0 image. It uses a pinned minimal Alpine/musl runtime without glibc or OpenSSL, retains Java TLS, and adds a release gate that blocks on any vulnerability or scanner failure. The workflow publishes the same image it tests, without rebuilding. I keep the final scan, TLS/SASL, client and recovery results, and publication status in the [1.3.1 notes](releases/1.3.1.md). This remains a Linux/amd64 release, not a production-readiness claim.
+I've published `miladsade96/cascade:1.3.1` to address the Debian libc/OpenSSL findings in the 1.3.0 image. It uses a pinned minimal Alpine/musl runtime without glibc or OpenSSL and retains Java TLS. The published image's Docker Scout scan on 2026-09-04 reports zero vulnerabilities at every severity, with no exceptions. The full 446-test suite, five-language clients, TLS/SASL checks and three-broker restart campaign passed. I also added a release gate that blocks on any vulnerability or scanner failure and publishes the exact tested image without rebuilding. Results, earlier failed attempts and the immutable digest are in the [1.3.1 notes](releases/1.3.1.md). This remains a Linux/amd64 security patch, not a production-readiness claim or a permanent security guarantee. Upgrade explicitly: `1.3.0` and `latest` are unchanged.
 
 The release and launch posts below are historical.
 

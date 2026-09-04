@@ -27,4 +27,6 @@ Locally I additionally run the five-language matrix and three-broker replication
 
 I retain published digests and date each report. New advisories can affect an unchanged image later, so a clean release scan is not a permanent guarantee. The 1.3.0 post-publication findings are the reason for this policy.
 
+The [1.3.1 release](releases/1.3.1.md) passed this gate and an additional scan of its immutable Docker Hub reference on 2026-09-04: zero findings, with no exceptions. Its 32 gate regression tests include scanner failures, every severity, incomplete reports/inventories and image-identity mismatches.
+
 Sources: [Temurin Alpine/musl and jlink](https://hub.docker.com/_/eclipse-temurin), [Alpine releases](https://alpinelinux.org/releases/), [Docker Scout CLI](https://docs.docker.com/reference/cli/docker/scout/cves/), [containerd image store in GitHub Actions](https://docs.docker.com/build/ci/github-actions/multi-platform/).
