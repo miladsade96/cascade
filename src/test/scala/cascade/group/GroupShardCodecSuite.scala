@@ -9,6 +9,13 @@ final class GroupShardCodecSuite extends FunSuite:
   }.toVector.sortBy(_.key.groupId)
   private val image = GroupImage(9L, Vector.empty, offsets)
 
+  test("typed group partitioning preserves the existing wire bytes and removes only image versions") {
+    assertEquals(GroupShardCodec.split(image), GroupShardCodec.split(GroupCodec.encode(image).toVector))
+    assertEquals(GroupShardCodec.partition(image).map(_.version).distinct, Vector(0L))
+    assertEquals(GroupShardCodec.partition(image).flatMap(_.offsets).sortBy(_.key.groupId), offsets)
+    assertEquals(GroupShardCodec.split(GroupImage.Empty), GroupShardCodec.split(Vector.empty[Byte]))
+  }
+
   test("group shard split and merge preserve exact high-cardinality offsets") {
     val shards = GroupShardCodec.split(GroupCodec.encode(image).toVector)
     assertEquals(shards.size, 64)

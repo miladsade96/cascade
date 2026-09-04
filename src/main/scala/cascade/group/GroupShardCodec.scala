@@ -6,16 +6,22 @@ import cascade.coordinator.CoordinatorShard
 object GroupShardCodec:
   def split(bytes: Vector[Byte]): Vector[Vector[Byte]] =
     val image = if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray)
+    split(image)
+
+  private[cascade] def split(image: GroupImage): Vector[Vector[Byte]] =
+    partition(image).map(value => GroupCodec.encode(value).toVector)
+
+  private[cascade] def partition(image: GroupImage): Vector[GroupImage] =
     val groups = image.groups.groupBy(value => CoordinatorShard.group(value.groupId))
     val offsets = image.offsets.groupBy(value => CoordinatorShard.group(value.key.groupId))
     val consumers = image.consumerGroups.groupBy(value => CoordinatorShard.group(value.groupId))
     Vector.tabulate(CoordinatorShard.Buckets) { id =>
-      GroupCodec.encode(GroupImage(
+      GroupImage(
         0L,
         groups.getOrElse(id, Vector.empty).sortBy(_.groupId),
         offsets.getOrElse(id, Vector.empty).sortBy(value => (value.key.groupId, value.key.topic, value.key.partition)),
         consumers.getOrElse(id, Vector.empty).sortBy(_.groupId)
-      )).toVector
+      )
     }
 
   def merge(shards: Vector[Vector[Byte]], version: Long): Vector[Byte] =
