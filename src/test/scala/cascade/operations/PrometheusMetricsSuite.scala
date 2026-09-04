@@ -21,7 +21,7 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 99)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 103)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
