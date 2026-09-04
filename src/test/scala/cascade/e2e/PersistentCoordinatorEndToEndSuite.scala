@@ -25,6 +25,10 @@ final class PersistentCoordinatorEndToEndSuite extends FunSuite:
     // Retained work can briefly outlive a client response; the configured admission cap is the invariant.
     assert(result.batchPeakRequests > 0 && result.batchPeakRequests <= cascade.group.OffsetBatchConfig().maxPendingRequests)
     assert(result.json.contains("\"warmup_writes\":60"))
+    assert(result.snapshotEncodedShards > 0L)
+    assert(result.snapshotReusedShards > result.snapshotEncodedShards)
+    assert(result.snapshotEncodedBytes > 0L)
+    assert(result.snapshotPreparationNanos > 0L)
   }
 
   test("persistent cardinality is bounded before starting brokers or allocating clients") {

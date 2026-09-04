@@ -27,12 +27,17 @@ final case class CoordinatorScaleReport(
     maxConnectionsPerIp: Int = 1000, rejectedConnections: Long = 0L,
     batchMaxRequests: Int = 64, batchLingerMillis: Long = 2L,
     batches: Long = 0L, batchedRequests: Long = 0L, batchFailed: Long = 0L,
-    batchRejected: Long = 0L, batchPeakRequests: Int = 0, batchPeakBytes: Long = 0L
+    batchRejected: Long = 0L, batchPeakRequests: Int = 0, batchPeakBytes: Long = 0L,
+    snapshotEncodedShards: Long = 0L, snapshotReusedShards: Long = 0L,
+    snapshotEncodedBytes: Long = 0L, snapshotPreparationNanos: Long = 0L
 ):
+  def json: String = batchingJson.dropRight(1) +
+    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos}"""
+
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
 
-  def json: String = baseJson.dropRight(1) +
+  private def batchingJson: String = baseJson.dropRight(1) +
     f""", "client_lifecycle":"$clientLifecycle","clients_created":$clientsCreated,"warmup_writes":${if clientLifecycle == "persistent" then groups else 0},"warmup_seconds":$warmupSeconds%.3f,"object_written_bytes":$objectWrittenBytes,"objects_written":$objectsWritten,"objects_reused":$objectsReused,"object_reclaimed_bytes":$objectReclaimedBytes,"object_stored_bytes":$objectStoredBytes,"max_connections_per_ip":$maxConnectionsPerIp,"rejected_connections":$rejectedConnections,"batch_max_requests":$batchMaxRequests,"batch_linger_ms":$batchLingerMillis,"batches":$batches,"batched_requests":$batchedRequests,"batch_failed":$batchFailed,"batch_rejected":$batchRejected,"batch_peak_requests":$batchPeakRequests,"batch_peak_bytes":$batchPeakBytes}"""
 
 object CoordinatorScaleQualification:
@@ -191,7 +196,9 @@ object CoordinatorScaleQualification:
         metrics.map(_.shardObjects.reusedObjects).sum, metrics.map(_.shardObjects.reclaimedBytes).sum,
         metrics.map(_.shardObjects.liveBytes).sum, perIpLimit, admissionRejections,
         batchConfig.maxRequests, batchConfig.lingerMillis, batching.map(_.batches).sum, batching.map(_.batchRequests).sum,
-        batching.map(_.failed).sum, batching.map(_.rejected).sum, batching.map(_.peakRequests).max, batching.map(_.peakBytes).max)
+        batching.map(_.failed).sum, batching.map(_.rejected).sum, batching.map(_.peakRequests).max, batching.map(_.peakBytes).max,
+        coordinatorMetrics.map(_.encodedShards).sum, coordinatorMetrics.map(_.reusedShards).sum,
+        coordinatorMetrics.map(_.encodedBytes).sum, coordinatorMetrics.map(_.preparationNanos).sum)
     catch
       case scala.util.control.NonFatal(error) =>
         System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")

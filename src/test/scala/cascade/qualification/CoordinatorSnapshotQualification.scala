@@ -21,10 +21,11 @@ object CoordinatorSnapshotQualification:
     val options = pairs.toMap
     val groups = options.getOrElse("--groups", "1000").toInt
     val iterations = options.getOrElse("--iterations", "500").toInt
+    val startedAt = Instant.now()
     val samples = run(groups, iterations)
     val revision = Seq("git", "rev-parse", "HEAD").!!.trim +
       (if Seq("git", "status", "--porcelain").!!.trim.nonEmpty then "+working-tree" else "")
-    val json = s"""{"status":"passed","scope":"candidate preparation only; excludes live group capture, quorum, disk and installation","started_at":"${Instant.now()}","revision":"$revision","groups":$groups,"producers":$groups,"iterations":$iterations,"trials":4,"warmup_per_trial":${math.min(100, iterations)},"byte_exact_verified":$iterations,"java_version":"${System.getProperty("java.version")}","samples":${samples.map(_.json).mkString("[", ",", "]")}}"""
+    val json = s"""{"status":"passed","scope":"candidate preparation only; excludes live group capture, quorum, disk and installation","started_at":"$startedAt","revision":"$revision","groups":$groups,"producers":$groups,"iterations":$iterations,"trials":4,"warmup_per_trial":${math.min(100, iterations)},"byte_exact_verified":$iterations,"java_version":"${System.getProperty("java.version")}","samples":${samples.map(_.json).mkString("[", ",", "]")}}"""
     val report = Path.of(options.getOrElse("--report", "artifacts/coordinator-snapshot.json")).toAbsolutePath
     Files.createDirectories(report.getParent)
     Files.writeString(report, json + "\n")
