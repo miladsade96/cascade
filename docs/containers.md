@@ -19,7 +19,7 @@ The default operations listener stays on `127.0.0.1` inside the container. Docke
 
 ## Pull and run one broker
 
-The current image target is `miladsade96/cascade:1.3.0` for `linux/amd64`. I record build identity, qualification, publication status, and the immutable registry digest in the [1.3.0 release notes](releases/1.3.0.md). Deployment examples are aligned to this version. I do not retag older releases or move `latest` as part of this publication.
+The published image is `miladsade96/cascade:1.3.0` for `linux/amd64`. I record build identity, qualification, verified publication, and the immutable registry digest in the [1.3.0 release notes](releases/1.3.0.md). Deployment examples are aligned to this version. I did not retag older releases or move `latest` as part of this publication.
 
 Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset batching](offset-batching.md), and [cached coordinator snapshots](coordinator-snapshots.md). To reproduce an image I check out its recorded build revision and retain the Dockerfile's pinned base digests. This image does not by itself qualify every older published-image upgrade boundary.
 
