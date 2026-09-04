@@ -4,7 +4,7 @@ I publish Cascade as `miladsade96/cascade` and keep the image contract deliberat
 
 ## Image design
 
-I build the application and its Scala runtime dependencies in a JDK 21 stage, create a module-limited Java runtime with `jlink`, and copy only that runtime plus three application/runtime jars into a distroless Debian image. The final image:
+I build the application and its Scala runtime dependencies in a JDK 21 stage, create a musl-native module-limited Java runtime with `jlink`, and copy that runtime plus three application/runtime jars into a scratch-based image with a minimal Alpine package installation. The final image:
 
 - runs as numeric UID and GID 65532 rather than root;
 - has no shell or package manager;
@@ -12,8 +12,8 @@ I build the application and its Scala runtime dependencies in a JDK 21 stage, cr
 - uses cgroup-aware JVM percentage limits and exits on an out-of-memory error;
 - includes an internal Java readiness probe against `/ready`;
 - declares `/var/lib/cascade` as the durable volume;
-- carries OCI source, version, revision, creation-time, and license labels; and
-- uses a pinned Debian 13 no-OpenSSL base, with Java TLS supplied by the JDK; and
+- carries OCI source, version, revision, creation-time, and license labels;
+- uses pinned Alpine/musl runtime packages without glibc or OpenSSL, with Java TLS supplied by the JDK; and
 - is qualified and published for `linux/amd64` with SBOM and provenance attestations. ARM64 publication remains disabled until equivalent runtime qualification is added.
 
 The default operations listener stays on `127.0.0.1` inside the container. Docker can therefore evaluate readiness without exposing an unauthenticated HTTP endpoint. When I need remote metrics, I bind operations explicitly to `0.0.0.0`, mount a token file, set `CASCADE_HEALTHCHECK_TOKEN_FILE` to the same file, and put TLS or mTLS in front of port 9404.
@@ -26,9 +26,9 @@ Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset
 
 `deploy/VERSION` records that deployment pin separately from the source `VERSION`. Tests permit a different pin only for `-SNAPSHOT` development; a release must align both files, the manifests, and the documented image commands.
 
-The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.1 -ExpectedVersion 1.3.1` to test the actual distroless image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL and secure-peer regression tests.
+The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.1 -ExpectedVersion 1.3.1` to test the actual minimal image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL and secure-peer regression tests.
 
-The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Historical sizes and test counts are retained in each release's own notes.
+The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Its locally qualified image reports 33.5 MB and zero findings, with the complete 446-test suite, five client languages, TLS/SASL and restart checks passing. Exact evidence and limitations are in the [1.3.1 notes](releases/1.3.1.md). Historical sizes and test counts are retained in each release's own notes.
 
 I retain the older 1.2.0 image's size, ID, and client checks only in its [historical qualification report](performance/2026-09-02-incremental-coordinator.md); those numbers are not measurements of 1.3.0.
 
@@ -160,9 +160,10 @@ On 2026-08-30 I built both `linux/amd64` and `linux/arm64` targets and scanned t
 
 ## Publish to Docker Hub
 
-For a manual release I authenticate with a scoped Docker Hub access token and never put that token in the repository or command history:
+For a manual release I run this in Bash with failure propagation enabled. I authenticate with a scoped Docker Hub access token and never put that token in the repository or command history:
 
 ```bash
+set -euo pipefail
 docker login --username YOUR_DOCKERHUB_USERNAME
 docker buildx build \
   --platform linux/amd64 \
@@ -174,10 +175,13 @@ docker buildx build \
   --load \
   .
 # Complete runtime/client/cluster qualification before this release gate.
-node scripts/qualify-image-security.mjs YOUR_DOCKERHUB_USERNAME/cascade:1.3.1 1.3.1 artifacts/security-new-run
-# Only after the gate exits successfully and result.json matches the image ID:
+expected="$(docker image inspect --format '{{.Id}}' YOUR_DOCKERHUB_USERNAME/cascade:1.3.1)"
+node scripts/qualify-image-security.mjs "$expected" 1.3.1 artifacts/security-new-run
+# Fail if the version tag moved away from the successfully scanned image.
+test "$(docker image inspect --format '{{.Id}}' YOUR_DOCKERHUB_USERNAME/cascade:1.3.1)" = "$expected"
 docker push YOUR_DOCKERHUB_USERNAME/cascade:1.3.1
-docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.3.1
+actual="$(docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.3.1 --format '{{json .Manifest}}' | jq -r .digest)"
+test "$actual" = "$expected"
 ```
 
 The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes qualify without publishing. A matching `v*` tag or manual run publishes only the explicit release version after all gates pass. The publish job loads the already-tested image archive, scans again, and checks the remote digest; it never rebuilds, adds ARM64, or moves `latest`. Docker's containerd image store is required to preserve attestations through local loading/export.

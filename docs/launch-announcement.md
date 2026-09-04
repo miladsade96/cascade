@@ -1,5 +1,11 @@
 # Cascade launch announcement
 
+## 1.3.1 security patch post
+
+I'm preparing Cascade 1.3.1 to address the Debian libc/OpenSSL findings in the 1.3.0 image. It uses a pinned minimal Alpine/musl runtime without glibc or OpenSSL, retains Java TLS, and adds a release gate that blocks on any vulnerability or scanner failure. The workflow publishes the same image it tests, without rebuilding. I keep the final scan, TLS/SASL, client and recovery results, and publication status in the [1.3.1 notes](releases/1.3.1.md). This remains a Linux/amd64 release, not a production-readiness claim.
+
+The release and launch posts below are historical.
+
 ## 1.3.0 release post
 
 I've packaged Cascade's latest coordinator improvements as `miladsade96/cascade:1.3.0` for Linux/amd64: immutable shard-object storage, bounded offset batching, cached coordinator snapshots, and fixes for consumer session expiry and snapshot installation. Existing Kafka clients can connect without a custom SDK.

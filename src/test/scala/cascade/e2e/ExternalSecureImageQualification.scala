@@ -86,6 +86,7 @@ object ExternalSecureImageQualification:
         val loginModule = if mechanism == "PLAIN" then "org.apache.kafka.common.security.plain.PlainLoginModule" else "org.apache.kafka.common.security.scram.ScramLoginModule"
         result.setProperty("sasl.jaas.config", s"$loginModule required username=\"alice\" password=\"$password\";")
         result.setProperty("default.api.timeout.ms", "5000")
+        result.setProperty("request.timeout.ms", "3000")
         result
       val mechanisms = Vector("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
       mechanisms.foreach { mechanism =>
