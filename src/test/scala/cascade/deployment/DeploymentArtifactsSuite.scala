@@ -25,7 +25,7 @@ final class DeploymentArtifactsSuite extends FunSuite:
     assert(dockerfile.contains("COPY sbt build.sbt VERSION ./"))
     assert(dockerfile.contains(s"ARG VERSION=$releaseVersion"))
     assert(dockerfile.contains("ARG JDK_IMAGE=eclipse-temurin:21-jdk-jammy@sha256:"))
-    assert(dockerfile.contains("ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12:nonroot@sha256:"))
+    assert(dockerfile.contains("ARG RUNTIME_IMAGE=gcr.io/distroless/base-nossl-debian13:nonroot@sha256:"))
     assert(read("compose.yaml").contains(s"VERSION: $${CASCADE_VERSION:-$releaseVersion}"))
     assert(read("compose.cluster.yaml").contains(s"VERSION: $${CASCADE_VERSION:-$releaseVersion}"))
     assertEquals(occurrences(deployment, s"image: miladsade96/cascade:$deploymentVersion"), 3)
@@ -38,7 +38,7 @@ final class DeploymentArtifactsSuite extends FunSuite:
       assert(readme.contains(s"the last qualified local image is `$deploymentVersion`"))
     else assert(readme.contains(s"The current release is `$releaseVersion`"))
     assert(releaseWorkflow.contains("version: ${{ steps.release.outputs.version }}"))
-    assert(releaseWorkflow.contains("VERSION=${{ needs.verify.outputs.version }}"))
+    assert(releaseWorkflow.contains("RELEASE_VERSION: ${{ needs.verify.outputs.version }}"))
 
     assertEquals(occurrences(deployment, "kind: StatefulSet"), 3)
     (1 to 3).foreach { nodeId =>
@@ -59,6 +59,26 @@ final class DeploymentArtifactsSuite extends FunSuite:
     assertEquals(occurrences(deployment, "automountServiceAccountToken: false"), 3)
     assertEquals(occurrences(deployment, "seccompProfile:"), 3)
     assertEquals(occurrences(deployment, "drop: [ALL]"), 3)
+  }
+
+  test("container publication reuses an attested image and requires a blocking security gate") {
+    val workflow = read(".github/workflows/container.yml")
+    val gate = read("scripts/qualify-image-security.mjs")
+    val publish = workflow.substring(workflow.indexOf("  publish:"))
+    assert(publish.contains("needs: verify"))
+    assert(publish.contains("docker load --input artifacts/qualified-container/image.tar"))
+    assert(publish.indexOf("node scripts/qualify-image-security.mjs") < publish.indexOf("docker push"))
+    assert(!publish.contains("docker build "))
+    assert(!publish.contains("docker buildx build"))
+    assert(!publish.contains("build-push-action"))
+    assert(!publish.contains("continue-on-error"))
+    assert(!publish.contains("latest"))
+    assert(workflow.contains("--platform linux/amd64 --load --sbom=true --provenance=mode=max"))
+    assert(workflow.contains("qualify-image-runtime.ps1"))
+    assert(gate.contains("'--exit-code'"))
+    assert(!gate.contains("'--only-fixed'"))
+    assert(!gate.contains("'--ignore-base'"))
+    assert(gate.contains("run.results.length === 0 && run.tool.driver.rules.length === 0"))
   }
 
   test("Kubernetes brokers require encrypted authenticated traffic and bounded capacity") {

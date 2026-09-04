@@ -13,26 +13,27 @@ I build the application and its Scala runtime dependencies in a JDK 21 stage, cr
 - includes an internal Java readiness probe against `/ready`;
 - declares `/var/lib/cascade` as the durable volume;
 - carries OCI source, version, revision, creation-time, and license labels; and
-- can be built for `linux/amd64` and `linux/arm64` with SBOM and provenance attestations in the release workflow; the manually qualified 1.3.0 target is Linux/amd64 only.
+- uses a pinned Debian 13 no-OpenSSL base, with Java TLS supplied by the JDK; and
+- is qualified and published for `linux/amd64` with SBOM and provenance attestations. ARM64 publication remains disabled until equivalent runtime qualification is added.
 
 The default operations listener stays on `127.0.0.1` inside the container. Docker can therefore evaluate readiness without exposing an unauthenticated HTTP endpoint. When I need remote metrics, I bind operations explicitly to `0.0.0.0`, mount a token file, set `CASCADE_HEALTHCHECK_TOKEN_FILE` to the same file, and put TLS or mTLS in front of port 9404.
 
 ## Pull and run one broker
 
-The published image is `miladsade96/cascade:1.3.0` for `linux/amd64`. I record build identity, qualification, verified publication, and the immutable registry digest in the [1.3.0 release notes](releases/1.3.0.md). Deployment examples are aligned to this version. I did not retag older releases or move `latest` as part of this publication.
+The current image target is `miladsade96/cascade:1.3.1` for `linux/amd64`. I record build identity, qualification, publication status, and the immutable registry digest in the [1.3.1 release notes](releases/1.3.1.md). Deployment examples are aligned to this version. I do not retag older releases or move `latest` as part of this publication.
 
 Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset batching](offset-batching.md), and [cached coordinator snapshots](coordinator-snapshots.md). To reproduce an image I check out its recorded build revision and retain the Dockerfile's pinned base digests. This image does not by itself qualify every older published-image upgrade boundary.
 
 `deploy/VERSION` records that deployment pin separately from the source `VERSION`. Tests permit a different pin only for `-SNAPSHOT` development; a release must align both files, the manifests, and the documented image commands.
 
-The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.0 -ExpectedVersion 1.3.0` to test the actual distroless image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime.
+The historical snapshot milestones ran staged jars inside a full JDK container. For the release I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.3.1 -ExpectedVersion 1.3.1` to test the actual distroless image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL and secure-peer regression tests.
 
-The 1.3.0 release passed 445 source tests, all five actual-image client checks, single-node restart recovery, and a three-broker replication/restart smoke test. Docker reports 39.3 MB for the Linux/amd64 image. The vulnerability scan did not complete because its Java database download failed; I do not treat the generated SBOM as a zero-CVE result. Exact identities, test scope, and the Go dependency-download workaround are in the release notes.
+The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Historical sizes and test counts are retained in each release's own notes.
 
 I retain the older 1.2.0 image's size, ID, and client checks only in its [historical qualification report](performance/2026-09-02-incremental-coordinator.md); those numbers are not measurements of 1.3.0.
 
 ```bash
-docker pull miladsade96/cascade:1.3.0
+docker pull miladsade96/cascade:1.3.1
 docker volume create cascade-data
 docker run --detach \
   --name cascade \
@@ -45,7 +46,7 @@ docker run --detach \
   --memory 4g \
   --publish 9092:9092 \
   --mount type=volume,source=cascade-data,target=/var/lib/cascade \
-  miladsade96/cascade:1.3.0 \
+  miladsade96/cascade:1.3.1 \
   --host 0.0.0.0 \
   --port 9092 \
   --advertised-host localhost \
@@ -153,7 +154,7 @@ docker compose up --detach
 docker compose down
 ```
 
-The smoke test uses the official Kafka Java client to discover the broker, initialize a non-transactional idempotent producer, produce 25 exact records with `acks=all`, consume them from the beginning, and compare every key and value. My GitHub workflow restarts the container and verifies the same records from the persistent volume, and it runs the complete Scala suite before it is allowed to publish an image.
+The smoke test uses the official Kafka Java client to discover the broker, initialize a non-transactional idempotent producer, produce 25 exact records with `acks=all`, consume them from the beginning, and compare every key and value. My GitHub workflow restarts the container and verifies the same records from the persistent volume. Publication also requires the complete Scala suite, packaged TLS/SASL tests, security-gate regression tests, and a successful zero-finding image scan.
 
 On 2026-08-30 I built both `linux/amd64` and `linux/arm64` targets and scanned the final local amd64 image with Docker Scout. It indexed 15 packages and reported zero critical, high, medium, or low vulnerabilities. That is a point-in-time result, so I scan every release again instead of treating it as a permanent property of the base image.
 
@@ -163,19 +164,22 @@ For a manual release I authenticate with a scoped Docker Hub access token and ne
 
 ```bash
 docker login --username YOUR_DOCKERHUB_USERNAME
-docker buildx create --name cascade-release --driver docker-container --use
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=1.3.0 \
+  --platform linux/amd64 \
+  --build-arg VERSION=1.3.1 \
   --build-arg REVISION=GIT_COMMIT_SHA \
-  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.3.0 \
+  --tag YOUR_DOCKERHUB_USERNAME/cascade:1.3.1 \
   --provenance=mode=max \
   --sbom=true \
-  --push \
+  --load \
   .
-docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.3.0
+# Complete runtime/client/cluster qualification before this release gate.
+node scripts/qualify-image-security.mjs YOUR_DOCKERHUB_USERNAME/cascade:1.3.1 1.3.1 artifacts/security-new-run
+# Only after the gate exits successfully and result.json matches the image ID:
+docker push YOUR_DOCKERHUB_USERNAME/cascade:1.3.1
+docker buildx imagetools inspect YOUR_DOCKERHUB_USERNAME/cascade:1.3.1
 ```
 
-The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes build and smoke-test without publishing. A `v*` tag publishes semantic-version, Git-SHA, and `latest` tags; a manual workflow run publishes `manual` and Git-SHA tags. The release job does not run unless the complete test and container smoke jobs pass.
+The automated path is `.github/workflows/container.yml`. I configure the GitHub repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`. Pull requests and `main` pushes qualify without publishing. A matching `v*` tag or manual run publishes only the explicit release version after all gates pass. The publish job loads the already-tested image archive, scans again, and checks the remote digest; it never rebuilds, adds ARM64, or moves `latest`. Docker's containerd image store is required to preserve attestations through local loading/export.
 
 I treat image tags as release pointers, not backups. I deploy immutable image digests, retain the matching source tag and provenance, scan the resulting SBOM, and practice restoring the broker data volume independently of the image.

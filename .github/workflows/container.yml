@@ -15,6 +15,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     outputs:
       version: ${{ steps.release.outputs.version }}
     steps:
@@ -43,6 +44,23 @@ jobs:
           java-version: "21"
           cache: sbt
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable the attestation-preserving image store
+        uses: docker/setup-docker-action@v5
+        with:
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Install checksum-pinned Docker Scout
+        run: bash scripts/install-scout.sh
+
+      - name: Test fail-closed image security policy
+        run: node --test scripts/qualify-image-security.test.mjs
+
       - name: Run the complete Scala test suite
         run: |
           chmod 0755 sbt
@@ -53,7 +71,7 @@ jobs:
 
       - name: Build the smoke-test image
         run: |
-          docker build \
+          docker buildx build --platform linux/amd64 --load --sbom=true --provenance=mode=max \
             --build-arg VERSION="${{ steps.release.outputs.version }}" \
             --build-arg REVISION="${GITHUB_SHA}" \
             --tag cascade:smoke \
@@ -112,6 +130,31 @@ jobs:
           docker logs cascade-smoke
           exit 1
 
+      - name: Qualify TLS and SASL using the packaged JVM and broker
+        shell: pwsh
+        run: ./scripts/qualify-image-runtime.ps1 -BrokerImage cascade:smoke -ExpectedVersion '${{ steps.release.outputs.version }}'
+
+      - name: Block publication on vulnerabilities or scanner errors
+        run: node scripts/qualify-image-security.mjs cascade:smoke '${{ steps.release.outputs.version }}' artifacts/container-security
+
+      - name: Preserve the exact qualified image for publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualified-container
+          path: artifacts/container-security
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve scan diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-container-security
+          path: |
+            artifacts/container-security/*.json
+            artifacts/container-security/*.log
+          if-no-files-found: warn
+
       - name: Show container logs on failure
         if: failure()
         run: docker logs cascade-smoke || true
@@ -126,15 +169,29 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out the repository
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Enable the attestation-preserving image store
+        uses: docker/setup-docker-action@v5
+        with:
+          daemon-config: '{"features":{"containerd-snapshotter":true}}'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Install checksum-pinned Docker Scout
+        run: bash scripts/install-scout.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: qualified-container
+          path: artifacts/qualified-container
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
@@ -142,30 +199,31 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate image tags and labels
-        id: metadata
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ vars.DOCKERHUB_USERNAME }}/cascade
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=manual,enable=${{ github.event_name == 'workflow_dispatch' }}
+      - name: Re-scan and publish only the tested immutable image
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status artifacts/qualified-container/result.json)" = passed
+          test "$(jq -r .version artifacts/qualified-container/result.json)" = "$RELEASE_VERSION"
+          expected="$(jq -r .imageId artifacts/qualified-container/result.json)"
+          [[ "$expected" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker load --input artifacts/qualified-container/image.tar
+          node scripts/qualify-image-security.mjs "$expected" "$RELEASE_VERSION" artifacts/publication-security
+          target="$DOCKERHUB_USERNAME/cascade:$RELEASE_VERSION"
+          docker tag "$expected" "$target"
+          test "$(docker inspect --format '{{.Id}}' "$target")" = "$expected"
+          docker push "$target"
+          actual="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -r .digest)"
+          test "$actual" = "$expected"
 
-      - name: Build and push multi-platform image with provenance
-        uses: docker/build-push-action@v7
+      - name: Archive publication security evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          build-args: |
-            VERSION=${{ needs.verify.outputs.version }}
-            REVISION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: mode=max
-          sbom: true
+          name: publication-security
+          path: |
+            artifacts/publication-security/*.json
+            artifacts/publication-security/*.log
+          if-no-files-found: warn

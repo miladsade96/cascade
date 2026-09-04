@@ -26,7 +26,7 @@ The KafkaJS smoke test defaults to a single replica. For the three-broker exampl
 On Windows I can qualify the actual release image, including its declared non-root user, entry point, JVM settings, readiness check, and persistent-data restart:
 
 ```powershell
-./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.3.0 -ExpectedVersion 1.3.0 -GoProxy direct
+./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.3.1 -ExpectedVersion 1.3.1 -GoProxy direct
 ```
 
 I run `Test/compile` and install the pinned KafkaJS dependencies first. Without `-BrokerImage`, the same script retains its staged-JDK mode and also requires `stage`. Image mode inspects the tag once and runs that immutable image ID, so a tag change cannot silently replace the tested artifact. Synthetic data stays in ignored artifacts; the script removes only its uniquely named broker container. These are single-node checks, not multi-language cluster or physical-loss qualification.
