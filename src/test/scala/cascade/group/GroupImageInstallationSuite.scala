@@ -1,6 +1,8 @@
 package cascade.group
 
 import java.nio.file.Files
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit, TimeoutException}
+import cascade.protocol.Errors
 import munit.FunSuite
 
 final class GroupImageInstallationSuite extends FunSuite:
@@ -87,5 +89,34 @@ final class GroupImageInstallationSuite extends FunSuite:
       assertEquals(coordinator.image.groups.head.members.size, 1)
       coordinator.expireOwned(130000L, _ => true, _ => true)
       assert(coordinator.image.groups.head.members.isEmpty)
+    }
+  }
+
+  test("sync waiters observe installed assignments and authoritative group deletion") {
+    Vector(false, true).foreach { deleted =>
+      withCoordinator { coordinator =>
+        val preparing = initial.copy(groups = Vector(classic.copy(status = GroupStatus.CompletingRebalance,
+          rebalanceDeadlineMillis = System.currentTimeMillis() + 10000L)))
+        coordinator.installCommittedImage(preparing, renewSessions = true)
+        val executor = Executors.newSingleThreadExecutor()
+        val started = CountDownLatch(1)
+        try
+          val result = executor.submit[SyncGroupResult](() =>
+            started.countDown()
+            coordinator.sync("classic", 1, "a", Vector.empty)
+          )
+          assert(started.await(1L, TimeUnit.SECONDS))
+          intercept[TimeoutException](result.get(100L, TimeUnit.MILLISECONDS))
+          val assignment = Vector[Byte](9, 8, 7)
+          val installed = if deleted then GroupImage.Empty else initial.copy(groups = Vector(classic.copy(
+            members = classic.members.map(_.copy(assignment = assignment)))))
+          coordinator.installCommittedImage(installed, renewSessions = false)
+          val synced = result.get(1L, TimeUnit.SECONDS)
+          assertEquals(synced.errorCode, if deleted then Errors.UnknownMemberId else Errors.None)
+          if !deleted then assertEquals(synced.assignment.toVector, assignment)
+        finally
+          executor.shutdownNow(): Unit
+          executor.awaitTermination(2L, TimeUnit.SECONDS): Unit
+      }
     }
   }

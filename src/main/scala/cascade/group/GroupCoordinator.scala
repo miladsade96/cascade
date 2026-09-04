@@ -607,7 +607,14 @@ final class GroupCoordinator(
     GroupImage(stateVersion, storedGroups, offsets.entries, storedConsumers)
 
   private def installImage(image: GroupImage, renewSessions: Boolean): Unit =
-    groups.keysIterator.filterNot(image.groups.map(_.groupId).toSet).toVector.foreach(groups.remove)
+    groups.keysIterator.filterNot(image.groups.map(_.groupId).toSet).toVector.foreach { id =>
+      groups.remove(id).foreach { group =>
+        // Wake existing join/sync waiters with a deleted member, not a detached live group.
+        group.members.clear()
+        group.pendingMemberIds.clear()
+        resetEmpty(group)
+      }
+    }
     consumerGroups.keysIterator.filterNot(image.consumerGroups.map(_.groupId).toSet).toVector.foreach(consumerGroups.remove)
     val installedAtMillis = System.currentTimeMillis()
     image.groups.foreach { stored =>
