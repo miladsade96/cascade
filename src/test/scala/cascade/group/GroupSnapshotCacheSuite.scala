@@ -27,3 +27,17 @@ final class GroupSnapshotCacheSuite extends FunSuite:
       assertEquals(GroupSnapshotCache.fullImageBytes(cache.capture(image).payloads), GroupCodec.encode(image).length.toLong)
     }
   }
+
+  test("heartbeats assignments and member deletion invalidate their group shard even at the same version") {
+    val cache = GroupSnapshotCache()
+    val member = StoredConsumerMember("a", None, None, 10000, Vector("events"), "range", 1, 1L, Vector.empty)
+    val group = StoredConsumerGroup("modern", 1, Vector(member))
+    val initial = GroupImage(1L, Vector.empty, Vector.empty, Vector(group))
+    cache.capture(initial)
+    val heartbeat = initial.copy(consumerGroups = Vector(group.copy(members = Vector(member.copy(lastHeartbeatMillis = 2L)))))
+    assertEquals(cache.capture(heartbeat).encoded, 1)
+    val assigned = heartbeat.copy(consumerGroups = Vector(group.copy(members = Vector(member.copy(
+      assignment = Vector(ConsumerTopicPartitions(ConsumerTopicId.forName("events"), Vector(0, 1))))))))
+    assertEquals(cache.capture(assigned).encoded, 1)
+    assertEquals(cache.capture(GroupImage.Empty).encoded, 1)
+  }

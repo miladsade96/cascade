@@ -35,3 +35,12 @@ final class ShardEncodingCacheSuite extends FunSuite:
     intercept[IllegalArgumentException](cache.capture(Vector(2, 3)))
     assertEquals(cache.capture(Vector(1)).reused, 1)
   }
+
+  test("equal hash codes never substitute for immutable content equality") {
+    final case class Collision(value: Int):
+      override def hashCode(): Int = 0
+    val cache = ShardEncodingCache[Collision](1, value => Vector(value.value.toByte))
+    assertEquals(cache.capture(Vector(Collision(1))).payloads, Vector(Vector[Byte](1)))
+    assertEquals(cache.capture(Vector(Collision(2))).payloads, Vector(Vector[Byte](2)))
+    assertEquals(cache.capture(Vector(Collision(1))).encoded, 1)
+  }
