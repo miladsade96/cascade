@@ -18,6 +18,7 @@ final class CoordinatorStateMachine(
   private var installedVersion = -1L
   private var installed = CoordinatorMetadata.Empty
   private var baseline = Vector.empty[Vector[Byte]]
+  private val snapshots = CoordinatorSnapshotCache()
   private val metrics = CoordinatorMetrics()
   def metricsSnapshot: CoordinatorMetricsSnapshot = metrics.snapshot
   private val expirationExecutor: ScheduledExecutorService =
@@ -42,23 +43,27 @@ final class CoordinatorStateMachine(
     val started = System.nanoTime()
     var deltaSize = 0L
     var changedShards = 0
-    val groupState = groups.snapshotBytes.toVector
-    val deliveryState = delivery.snapshotBytes.toVector
+    var fullSize = 0L
     val committed =
       try
         if cluster.supportsFeature(ClusterFeature.CoordinatorDeltas) then
-          val after = CoordinatorShardState.payloads(groupState, deliveryState)
-          CoordinatorShardState.changes(installed, baseline, after, cluster.controllerTerm) match
+          val candidate = snapshots.capture(groups.image, delivery.image)
+          fullSize = candidate.fullImageBytes
+          CoordinatorShardState.changes(installed, baseline, candidate.payloads, cluster.controllerTerm) match
             case Some(delta) =>
               deltaSize = CoordinatorDeltaCodec.encode(delta).length.toLong
               changedShards = delta.updates.size
               cluster.commitCoordinatorDelta(delta)
             case None => !cluster.isBrokerFenced
-        else cluster.commitCoordinatorState(installed.version, groupState, deliveryState)
+        else
+          val groupState = groups.snapshotBytes.toVector
+          val deliveryState = delivery.snapshotBytes.toVector
+          fullSize = groupState.size.toLong + deliveryState.size
+          cluster.commitCoordinatorState(installed.version, groupState, deliveryState)
       catch case _: Throwable => false
     // A rejected remote proposal may have synchronized a newer image. Never roll that state back.
     installLatest(cluster.coordinatorMetadata, force = true)
-    metrics.record(committed, deltaSize, groupState.size.toLong + deliveryState.size, changedShards, System.nanoTime() - started)
+    metrics.record(committed, deltaSize, fullSize, changedShards, System.nanoTime() - started)
     committed
   }
 
