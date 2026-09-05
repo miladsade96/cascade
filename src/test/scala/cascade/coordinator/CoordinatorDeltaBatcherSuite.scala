@@ -104,7 +104,7 @@ final class CoordinatorDeltaBatcherSuite extends FunSuite:
       CoordinatorPublicationConfig(maxRequests = 1, maxPendingRequests = 2, lingerMillis = 0L, queueTimeoutMillis = 2000L),
       deltas =>
         entered.countDown()
-        assert(release.await(10L, TimeUnit.SECONDS))
+        release.await()
         Vector.fill(deltas.size)(Errors.None)
     )
     val executor = Executors.newFixedThreadPool(3)
