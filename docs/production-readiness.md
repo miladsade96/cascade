@@ -81,13 +81,15 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 
 ## When I will call it production ready
 
-I keep the latest complete evidence in the [2026-09-04 coordinator snapshot qualification](performance/2026-09-04-coordinator-snapshots.md).
+I keep the latest complete evidence in the [2026-09-05 coordinator publication qualification](performance/2026-09-05-coordinator-publication.md).
 
 I won't describe a release as a Kafka replacement until every blocking row above has an automated acceptance test and passes on the deployment topology I document.
 
 When I publish a performance result, I'll include the hardware, durability policy, workload, client configuration, and exact delivery count. When I claim compatibility, I'll list the API keys and versions instead of just saying "Kafka compatible."
 
-The complete Scala/Kafka-Java suite now passes **445/445** tests. The Linux storage/coordinator campaign passes **79/79**, including actual directory forcing and reclamation; Windows still conservatively retains object history when forcing is unavailable. The new snapshot preparation comparison verifies 500 mixed candidates byte-for-byte, alternates full/cached order over four trials, and measures a **3.55× lower median preparation time** and **75.45% less current-thread allocation**. This excludes live state capture, quorum, storage, and installation; it is not a broker-throughput result. The [snapshot runbook](coordinator-snapshots.md) records the contract and boundaries.
+The complete Scala/Kafka-Java suite now passes **456/456** tests. The Linux storage/coordinator campaign previously passed **79/79**, including actual directory forcing and reclamation; Windows still conservatively retains object history when forcing is unavailable. The snapshot preparation comparison verifies 500 mixed candidates byte-for-byte, alternates full/cached order over four trials, and measures a **3.55× lower median preparation time** and **75.45% less current-thread allocation**. This excludes live state capture, quorum, storage, and installation; it is not a broker-throughput result. The [snapshot runbook](coordinator-snapshots.md) records the contract and boundaries.
+
+The controller publication campaign commits 3,000 writes across 1,000 groups and recovers 1,000/1,000 exact offsets after controller failover and full restart. It combines 1,675 requests into 1,156 batches with zero queue rejection. The 57.934 writes/s and 4,714.624 ms p99 are not production-capacity evidence or a matched comparison. The [publication report](performance/2026-09-05-coordinator-publication.md) records the host, retries, metrics, limitations, and full regression results.
 
 The new 8/32-worker persistent campaigns each commit **3,000 writes across 1,000 groups** and preserve every final offset through controller failover and full restart, with zero batch/connection admission rejections. They measure **41.249 / 97.773 writes/s**, with **2,117.376 / 2,303.257 ms p99**. At 32 workers, 1,388 of 5,388 dispatched requests still end in errors before client retries succeed. I do not treat these single-host observations as production SLOs or a controlled comparison with the [historical batching results](performance/2026-09-03-offset-batching.md). Shared consensus, service-lock contention, remaining full-image work, and high-cardinality membership/transaction churn remain open.
 
