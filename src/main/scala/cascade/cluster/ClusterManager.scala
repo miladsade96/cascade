@@ -1236,15 +1236,6 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       )
       if propose(next) then Errors.None else Errors.RequestTimedOut
 
-  private def commitCoordinatorDeltaOnController(delta: CoordinatorDelta): Short =
-    if !isActiveController then Errors.NotController
-    else if !supportsFeature(ClusterFeature.CoordinatorDeltas) then Errors.UnsupportedVersion
-    else CoordinatorShardState.merge(current.coordinator, delta, currentTerm) match
-      case Left(_) => Errors.CoordinatorLoadInProgress
-      case Right(coordinator) =>
-        val next = current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, coordinator = coordinator)
-        if propose(next) then Errors.None else Errors.RequestTimedOut
-
   private def publishCoordinatorBatch(deltas: Vector[CoordinatorDelta]): Vector[Short] = metadataMutationLock.synchronized {
     if !isActiveController then Vector.fill(deltas.size)(Errors.NotController)
     else if !supportsFeature(ClusterFeature.CoordinatorDeltas) then Vector.fill(deltas.size)(Errors.UnsupportedVersion)
