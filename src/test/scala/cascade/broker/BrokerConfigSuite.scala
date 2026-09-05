@@ -6,6 +6,33 @@ import java.nio.file.Files
 import munit.FunSuite
 
 final class BrokerConfigSuite extends FunSuite:
+  test("parses bounded coordinator publication settings") {
+    val config = BrokerConfig.parse(Array(
+      "--coordinator-publication-max-requests", "32",
+      "--coordinator-publication-max-bytes", "2097152",
+      "--coordinator-publication-pending-requests", "256",
+      "--coordinator-publication-pending-bytes", "8388608",
+      "--coordinator-publication-linger-ms", "7",
+      "--coordinator-publication-queue-timeout-ms", "4000"
+    ))
+
+    assertEquals(config.coordinatorPublication.maxRequests, 32)
+    assertEquals(config.coordinatorPublication.maxBytes, 2_097_152L)
+    assertEquals(config.coordinatorPublication.maxPendingRequests, 256)
+    assertEquals(config.coordinatorPublication.maxPendingBytes, 8_388_608L)
+    assertEquals(config.coordinatorPublication.lingerMillis, 7L)
+    assertEquals(config.coordinatorPublication.queueTimeoutMillis, 4000L)
+  }
+
+  test("rejects invalid coordinator publication bounds after parsing") {
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--coordinator-publication-max-requests", "0")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--coordinator-publication-linger-ms", "101")))
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array(
+      "--coordinator-publication-max-bytes", "2097152",
+      "--coordinator-publication-pending-bytes", "1048576"
+    )))
+  }
+
   test("parses flush durability settings") {
     val config = BrokerConfig.parse(
       Array(
