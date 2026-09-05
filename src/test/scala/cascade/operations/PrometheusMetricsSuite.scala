@@ -21,7 +21,7 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 103)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 117)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
@@ -60,6 +60,22 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_coordinator_snapshot_preparation_seconds_total{node_id=\"7\"} 1.5\n"))
     assert(!output.contains("group_id="))
     assert(!output.contains("transactional_id="))
+  }
+
+  test("controller publication metrics expose bounds and merge outcomes without shard labels") {
+    val measured = cascade.coordinator.CoordinatorPublicationSnapshot(
+      pendingRequests = 2, pendingBytes = 300L, peakRequests = 5, peakBytes = 900L,
+      accepted = 12L, rejected = 1L, completed = 10L, failed = 2L,
+      batches = 4L, batchRequests = 10L, committedBatches = 3L, committedRequests = 8L,
+      conflictedRequests = 2L, queueNanos = 1_500_000_000L
+    )
+    val output = PrometheusMetrics.encode(snapshot.copy(coordinatorPublication = measured))
+    assert(output.contains("cascade_coordinator_publication_pending_requests{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_publication_committed_requests_total{node_id=\"7\"} 8.0\n"))
+    assert(output.contains("cascade_coordinator_publication_conflicts_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_publication_queue_seconds_total{node_id=\"7\"} 1.5\n"))
+    assert(!output.contains("shard_id="))
+    assert(!output.contains("group_id="))
   }
 
   private val snapshot = BrokerMetricsSnapshot(
