@@ -7,6 +7,9 @@ import cascade.protocol.ByteCursor
 import scala.util.control.NonFatal
 
 object CoordinatorShardState:
+  final case class BatchMerge(metadata: CoordinatorMetadata, accepted: Vector[Boolean]):
+    require(accepted.nonEmpty, "coordinator merge batch must not be empty")
+
   /** Equal shard versions need content identity: failed quorum attempts can reuse a version. */
   def includes(current: CoordinatorMetadata, delta: CoordinatorDelta): Boolean =
     lazy val state = current.shardPayloads
@@ -39,6 +42,22 @@ object CoordinatorShardState:
 
   /** Validate the complete read/write set before building any replacement image. */
   def merge(current: CoordinatorMetadata, delta: CoordinatorDelta, controllerTerm: Long): Either[String, CoordinatorMetadata] =
+    mergeOne(current, delta, controllerTerm)
+
+  /** Accept independent deltas in FIFO order while rejecting conflicts without poisoning compatible work. */
+  def mergeBatch(current: CoordinatorMetadata, deltas: Vector[CoordinatorDelta], controllerTerm: Long): BatchMerge =
+    require(deltas.nonEmpty, "coordinator merge batch must not be empty")
+    var candidate = current
+    val accepted = deltas.map { delta =>
+      mergeOne(candidate, delta, controllerTerm) match
+        case Right(next) =>
+          candidate = next
+          true
+        case Left(_) => false
+    }
+    BatchMerge(candidate, accepted)
+
+  private def mergeOne(current: CoordinatorMetadata, delta: CoordinatorDelta, controllerTerm: Long): Either[String, CoordinatorMetadata] =
     if delta.controllerTerm != controllerTerm then Left("stale controller term")
     else if delta.updates.exists(update => current.shardVersion(update.id) != update.expectedVersion) then Left("stale coordinator shard")
     else
