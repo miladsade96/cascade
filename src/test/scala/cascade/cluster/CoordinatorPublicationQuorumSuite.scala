@@ -5,6 +5,7 @@ import cascade.fault.FaultCluster
 import cascade.group.OffsetBatchConfig
 import java.util.Properties
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
 import org.apache.kafka.clients.consumer.{KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
@@ -26,22 +27,25 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
     val executor = Executors.newFixedThreadPool(12)
     val partition = TopicPartition("publication-qualification", 0)
     var clients = Vector.empty[KafkaConsumer[Array[Byte], Array[Byte]]]
+    var tasks = Vector.empty[java.util.concurrent.Future[Unit]]
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
+      createTopic(cluster.bootstrapServers, partition.topic())
       val groups = selectGroups(cluster, 12)
       clients = groups.map(group => consumer(cluster.bootstrapServers, group))
       clients.foreach(_.assign(java.util.List.of(partition)))
       val start = CountDownLatch(1)
-      val results = clients.zipWithIndex.map { case (client, index) =>
+      tasks = clients.zipWithIndex.map { case (client, index) =>
         executor.submit[Unit](() =>
           start.await()
           client.commitSync(Map(partition -> OffsetAndMetadata(index.toLong + 1L)).asJava)
         )
       }
       start.countDown()
-      results.foreach(_.get(20L, TimeUnit.SECONDS))
+      tasks.foreach(_.get(20L, TimeUnit.SECONDS))
+      tasks = Vector.empty
       clients.zipWithIndex.foreach { case (client, index) =>
         assertEquals(client.committed(java.util.Set.of(partition)).get(partition).offset(), index.toLong + 1L)
       }
@@ -65,8 +69,10 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
         finally client.close()
       }
     finally
-      clients.foreach(_.close())
+      tasks.foreach(_.cancel(true): Unit)
       executor.shutdownNow(): Unit
+      executor.awaitTermination(10L, TimeUnit.SECONDS): Unit
+      clients.foreach(_.close())
       cluster.close()
   }
 
@@ -101,3 +107,12 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
     properties.setProperty("request.timeout.ms", "5000")
     properties.setProperty("enable.metrics.push", "false")
     KafkaConsumer[Array[Byte], Array[Byte]](properties)
+
+  private def createTopic(bootstrap: String, name: String): Unit =
+    val properties = Properties()
+    properties.setProperty(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)
+    properties.setProperty(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "20000")
+    properties.setProperty(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
+    val admin = Admin.create(properties)
+    try admin.createTopics(java.util.List.of(NewTopic(name, 1, 3.toShort))).all().get(20L, TimeUnit.SECONDS)
+    finally admin.close()
