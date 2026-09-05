@@ -1,7 +1,7 @@
 package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
-import cascade.coordinator.CoordinatorMetricsSnapshot
+import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot}
 import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot, ShardObjectSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
@@ -94,6 +94,7 @@ final case class BrokerMetricsSnapshot(
     tlsReload: TlsReloadSnapshot = TlsReloadSnapshot.Empty,
     trafficQuotas: TrafficQuotaSnapshot = TrafficQuotaSnapshot.Empty,
     coordinator: CoordinatorMetricsSnapshot = CoordinatorMetricsSnapshot.Empty,
+    coordinatorPublication: CoordinatorPublicationSnapshot = CoordinatorPublicationSnapshot(),
     metadataJournal: MetadataJournalSnapshot = MetadataJournalSnapshot.Empty,
     metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty,
     shardObjects: ShardObjectSnapshot = ShardObjectSnapshot(),

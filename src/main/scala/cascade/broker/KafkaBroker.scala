@@ -276,6 +276,7 @@ final class KafkaBroker(
       tlsReload = tlsContext.map(_.snapshot).getOrElse(cascade.security.TlsReloadSnapshot.Empty),
       trafficQuotas = TrafficQuotaSnapshot(requestQuota.snapshot, responseQuota.snapshot, produceQuota.snapshot, fetchQuota.snapshot),
       coordinator = Option(coordinatorStateMachine).map(_.metricsSnapshot).getOrElse(cascade.coordinator.CoordinatorMetricsSnapshot.Empty),
+      coordinatorPublication = cluster.map(_.coordinatorPublicationSnapshot).getOrElse(cascade.coordinator.CoordinatorPublicationSnapshot()),
       metadataJournal = cluster.map(_.metadataJournalSnapshot).getOrElse(cascade.cluster.MetadataJournalSnapshot.Empty),
       shardObjects = cluster.map(_.shardObjectSnapshot).getOrElse(cascade.cluster.ShardObjectSnapshot()),
       offsetBatch = Option(handler).map(_.offsetBatchSnapshot).getOrElse(cascade.group.OffsetBatchSnapshot()),
