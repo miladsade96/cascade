@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
+import cascade.coordinator.CoordinatorPublicationConfig
 import cascade.group.OffsetBatchConfig
 import cascade.operations.OperationsConfig
 import cascade.security.*
@@ -34,7 +35,8 @@ final case class BrokerConfig(
     security: BrokerSecurityConfig = BrokerSecurityConfig(),
     operations: OperationsConfig = OperationsConfig(),
     autoCreateTopics: Boolean = true,
-    offsetBatch: OffsetBatchConfig = OffsetBatchConfig()
+    offsetBatch: OffsetBatchConfig = OffsetBatchConfig(),
+    coordinatorPublication: CoordinatorPublicationConfig = CoordinatorPublicationConfig()
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
   require(advertisedPort.forall(value => value > 0 && value <= 65535), "advertised port must be valid")
