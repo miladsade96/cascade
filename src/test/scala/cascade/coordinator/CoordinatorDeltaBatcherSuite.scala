@@ -36,5 +36,35 @@ final class CoordinatorDeltaBatcherSuite extends FunSuite:
       executor.shutdownNow(): Unit
   }
 
+  test("rejects oversized and over-capacity proposals before publication") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val batcher = CoordinatorDeltaBatcher(
+      CoordinatorPublicationConfig(maxRequests = 1, maxBytes = 1024L, maxPendingRequests = 1,
+        maxPendingBytes = 1024L, lingerMillis = 0L, queueTimeoutMillis = 2000L),
+      deltas =>
+        entered.countDown()
+        assert(release.await(2L, TimeUnit.SECONDS))
+        Vector.fill(deltas.size)(Errors.None)
+    )
+    val executor = Executors.newSingleThreadExecutor()
+    try
+      assertEquals(batcher.submit(delta(0, 2000)), Errors.InvalidRequest)
+      val admitted = executor.submit[Short](() => batcher.submit(delta(1)))
+      assert(entered.await(1L, TimeUnit.SECONDS))
+      assertEquals(batcher.submit(delta(2)), Errors.RequestTimedOut)
+      release.countDown()
+      assertEquals(admitted.get(2L, TimeUnit.SECONDS), Errors.None)
+      val snapshot = batcher.snapshot
+      assertEquals(snapshot.accepted, 1L)
+      assertEquals(snapshot.rejected, 2L)
+      assertEquals(snapshot.peakRequests, 1)
+      assert(snapshot.peakBytes <= 1024L)
+    finally
+      release.countDown()
+      batcher.close()
+      executor.shutdownNow(): Unit
+  }
+
   private def delta(shard: Int, bytes: Int = 1): CoordinatorDelta =
     CoordinatorDelta(1L, Vector(CoordinatorShardUpdate(shard, 0L, Vector.fill(bytes)(shard.toByte))))
