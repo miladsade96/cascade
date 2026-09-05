@@ -31,6 +31,16 @@ final class CoordinatorShardStateSuite extends FunSuite:
     assert(CoordinatorShardState.merge(first, delta(1, 2), 7L).isLeft)
     assertEquals(first.shardVersion(2), 0L)
   }
+
+  test("a conflicting or malformed proposal does not poison later compatible work") {
+    val malformed = CoordinatorDelta(7L, Vector(CoordinatorShardUpdate(4, 0L, Vector.empty)))
+    val merged = CoordinatorShardState.mergeBatch(empty, Vector(delta(1), delta(1), malformed, delta(2)), 7L)
+    assertEquals(merged.accepted, Vector(true, false, false, true))
+    assertEquals(merged.metadata.version, 2L)
+    assertEquals(merged.metadata.shardVersion(1), 1L)
+    assertEquals(merged.metadata.shardVersion(2), 1L)
+    assertEquals(merged.metadata.shardVersion(4), 0L)
+  }
   test("stale controller terms are rejected even when versions match") {
     assert(CoordinatorShardState.merge(empty, delta(1), 8L).isLeft)
   }
