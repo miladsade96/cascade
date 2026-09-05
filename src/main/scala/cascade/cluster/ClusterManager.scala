@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorShardState}
+import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorPublicationSnapshot, CoordinatorShardState}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -79,6 +79,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def shardObjectSnapshot: ShardObjectSnapshot = metadataStore.map(_.objectSnapshot).getOrElse(ShardObjectSnapshot())
   def metadataTransferSnapshot: MetadataTransferSnapshot = metadataTransfers.snapshot
 
+  def coordinatorPublicationSnapshot: CoordinatorPublicationSnapshot =
+    coordinatorPublisher.map(_.snapshot).getOrElse(CoordinatorPublicationSnapshot())
+
   private val recoveredControllerState = controllerStore.map(_.state).getOrElse(ControllerState.Empty)
   private val initialControllerState =
     if current.controllerTerm > recoveredControllerState.term then
@@ -107,6 +110,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val recoveringNodes = ConcurrentHashMap.newKeySet[Int]()
   private val monitor: Option[ScheduledExecutorService] = Option.when(enabled) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-cluster-monitor").factory())
+  }
+  private val coordinatorPublisher = Option.when(enabled) {
+    CoordinatorDeltaBatcher(config.coordinatorPublication, publishCoordinatorBatch)
   }
 
   applyMetadata(current)
@@ -218,7 +224,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     if !supportsFeature(ClusterFeature.CoordinatorDeltas) then false
     else controllerNode match
       case Some(controller) if controller.id == config.nodeId =>
-        metadataMutationLock.synchronized(commitCoordinatorDeltaOnController(delta) == Errors.None)
+        coordinatorPublisher.exists(_.submit(delta) == Errors.None)
       case Some(controller) =>
         try
           val response = peerClient.call(controller, InternalApi.CoordinatorDeltaCommit, CoordinatorDeltaCodec.encode(delta), config.peerTimeoutMillis)
@@ -385,7 +391,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       ByteWriter().writeShort(error).result()
     case InternalApi.CoordinatorDeltaCommit =>
       val delta = CoordinatorDeltaCodec.decode(cursor)
-      val error = metadataMutationLock.synchronized(commitCoordinatorDeltaOnController(delta))
+      val error = coordinatorPublisher.map(_.submit(delta)).getOrElse(Errors.UnsupportedVersion)
       ByteWriter().writeShort(error).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
@@ -523,6 +529,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         executor.shutdownNow(): Unit
         executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
       }
+      coordinatorPublisher.foreach(_.close())
       peerExecutor.shutdownNow(): Unit
       Option(coordinatorInstaller).foreach(_.close())
       peerExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
@@ -1237,6 +1244,26 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case Right(coordinator) =>
         val next = current.copy(version = Math.addExact(current.version, 1L), controllerTerm = currentTerm, coordinator = coordinator)
         if propose(next) then Errors.None else Errors.RequestTimedOut
+
+  private def publishCoordinatorBatch(deltas: Vector[CoordinatorDelta]): Vector[Short] = metadataMutationLock.synchronized {
+    if !isActiveController then Vector.fill(deltas.size)(Errors.NotController)
+    else if !supportsFeature(ClusterFeature.CoordinatorDeltas) then Vector.fill(deltas.size)(Errors.UnsupportedVersion)
+    else
+      val merged = CoordinatorShardState.mergeBatch(current.coordinator, deltas, currentTerm)
+      if !merged.accepted.contains(true) then Vector.fill(deltas.size)(Errors.CoordinatorLoadInProgress)
+      else
+        val next = current.copy(
+          version = Math.addExact(current.version, 1L),
+          controllerTerm = currentTerm,
+          coordinator = merged.metadata
+        )
+        val committed = propose(next)
+        merged.accepted.map { accepted =>
+          if !accepted then Errors.CoordinatorLoadInProgress
+          else if committed then Errors.None
+          else Errors.RequestTimedOut
+        }
+  }
 
   private def forwardCoordinatorCommit(
       controller: ClusterNode,
