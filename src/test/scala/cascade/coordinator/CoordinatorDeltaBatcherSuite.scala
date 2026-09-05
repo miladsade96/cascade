@@ -97,5 +97,34 @@ final class CoordinatorDeltaBatcherSuite extends FunSuite:
       executor.shutdownNow(): Unit
   }
 
+  test("close drains queued callers and waits for an active quorum publication") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val batcher = CoordinatorDeltaBatcher(
+      CoordinatorPublicationConfig(maxRequests = 1, maxPendingRequests = 2, lingerMillis = 0L, queueTimeoutMillis = 2000L),
+      deltas =>
+        entered.countDown()
+        assert(release.await(2L, TimeUnit.SECONDS))
+        Vector.fill(deltas.size)(Errors.None)
+    )
+    val executor = Executors.newFixedThreadPool(3)
+    try
+      val active = executor.submit[Short](() => batcher.submit(delta(0)))
+      assert(entered.await(1L, TimeUnit.SECONDS))
+      val queued = executor.submit[Short](() => batcher.submit(delta(1)))
+      while batcher.snapshot.accepted < 2L do Thread.onSpinWait()
+      val closing = executor.submit[Unit](() => batcher.close())
+      assertEquals(queued.get(1L, TimeUnit.SECONDS), Errors.CoordinatorNotAvailable)
+      assert(!closing.isDone)
+      release.countDown()
+      assertEquals(active.get(2L, TimeUnit.SECONDS), Errors.None)
+      closing.get(2L, TimeUnit.SECONDS)
+      assertEquals(batcher.submit(delta(2)), Errors.CoordinatorNotAvailable)
+    finally
+      release.countDown()
+      batcher.close()
+      executor.shutdownNow(): Unit
+  }
+
   private def delta(shard: Int, bytes: Int = 1): CoordinatorDelta =
     CoordinatorDelta(1L, Vector(CoordinatorShardUpdate(shard, 0L, Vector.fill(bytes)(shard.toByte))))
