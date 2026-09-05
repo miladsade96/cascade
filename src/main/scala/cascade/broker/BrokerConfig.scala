@@ -110,6 +110,18 @@ object BrokerConfig:
         loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(lingerMillis = value.toLong)))
       case "--offset-batch-queue-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(offsetBatch = config.offsetBatch.copy(queueTimeoutMillis = value.toLong)))
+      case "--coordinator-publication-max-requests" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(maxRequests = value.toInt)))
+      case "--coordinator-publication-max-bytes" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(maxBytes = value.toLong)))
+      case "--coordinator-publication-pending-requests" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(maxPendingRequests = value.toInt)))
+      case "--coordinator-publication-pending-bytes" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(maxPendingBytes = value.toLong)))
+      case "--coordinator-publication-linger-ms" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(lingerMillis = value.toLong)))
+      case "--coordinator-publication-queue-timeout-ms" :: value :: tail =>
+        loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(queueTimeoutMillis = value.toLong)))
       case "--cleanup-policy" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(cleanupPolicy = CleanupPolicy.parse(value))))
       case "--retention-ms" :: value :: tail =>
