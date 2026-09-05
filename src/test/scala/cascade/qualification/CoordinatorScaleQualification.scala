@@ -1,6 +1,7 @@
 package cascade.qualification
 
 import cascade.coordinator.CoordinatorProbe
+import cascade.coordinator.CoordinatorPublicationConfig
 import cascade.fault.FaultCluster
 import cascade.group.OffsetBatchConfig
 import java.nio.file.{Files, Path}
@@ -29,10 +30,15 @@ final case class CoordinatorScaleReport(
     batches: Long = 0L, batchedRequests: Long = 0L, batchFailed: Long = 0L,
     batchRejected: Long = 0L, batchPeakRequests: Int = 0, batchPeakBytes: Long = 0L,
     snapshotEncodedShards: Long = 0L, snapshotReusedShards: Long = 0L,
-    snapshotEncodedBytes: Long = 0L, snapshotPreparationNanos: Long = 0L
+    snapshotEncodedBytes: Long = 0L, snapshotPreparationNanos: Long = 0L,
+    publicationMaxRequests: Int = 64, publicationLingerMillis: Long = 2L,
+    publicationBatches: Long = 0L, publicationBatchRequests: Long = 0L,
+    publicationCommittedBatches: Long = 0L, publicationCommittedRequests: Long = 0L,
+    publicationConflicts: Long = 0L, publicationFailed: Long = 0L, publicationRejected: Long = 0L,
+    publicationPeakRequests: Int = 0, publicationPeakBytes: Long = 0L
 ):
   def json: String = batchingJson.dropRight(1) +
-    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos}"""
+    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos,"publication_max_requests":$publicationMaxRequests,"publication_linger_ms":$publicationLingerMillis,"publication_batches":$publicationBatches,"publication_batch_requests":$publicationBatchRequests,"publication_committed_batches":$publicationCommittedBatches,"publication_committed_requests":$publicationCommittedRequests,"publication_conflicts":$publicationConflicts,"publication_failed":$publicationFailed,"publication_rejected":$publicationRejected,"publication_peak_requests":$publicationPeakRequests,"publication_peak_bytes":$publicationPeakBytes}"""
 
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
@@ -50,7 +56,7 @@ object CoordinatorScaleQualification:
     val pairs = arguments.grouped(2).map(a => a(0) -> a(1)).toVector
     require(pairs.map(_._1).distinct.size == pairs.size, "duplicate option")
     require(pairs.forall(p => Set("--groups", "--concurrency", "--rounds", "--report", "--client-lifecycle",
-      "--batch-max-requests", "--batch-linger-ms")(p._1)), "unknown option")
+      "--batch-max-requests", "--batch-linger-ms", "--publication-max-requests", "--publication-linger-ms")(p._1)), "unknown option")
     val options = pairs.toMap
     val path = Path.of(options.getOrElse("--report", "artifacts/coordinator-scale.json")).toAbsolutePath
     Files.createDirectories(path.getParent)
@@ -60,7 +66,10 @@ object CoordinatorScaleQualification:
       val result = run(options.getOrElse("--groups", "1000").toInt, options.getOrElse("--concurrency", "8").toInt,
         options.getOrElse("--rounds", "2").toInt, persistent = lifecycle == "persistent",
         batchConfig = OffsetBatchConfig(maxRequests = options.getOrElse("--batch-max-requests", "64").toInt,
-          lingerMillis = options.getOrElse("--batch-linger-ms", "2").toLong))
+          lingerMillis = options.getOrElse("--batch-linger-ms", "2").toLong),
+        publicationConfig = CoordinatorPublicationConfig(
+          maxRequests = options.getOrElse("--publication-max-requests", "64").toInt,
+          lingerMillis = options.getOrElse("--publication-linger-ms", "2").toLong))
       Files.writeString(path, result.json + "\n")
       println(s"COORDINATOR_SCALE_RESULT ${result.json}")
     catch
@@ -69,7 +78,8 @@ object CoordinatorScaleQualification:
         throw error
 
   def run(groupCount: Int, concurrency: Int, rounds: Int, persistent: Boolean = false,
-      batchConfig: OffsetBatchConfig = OffsetBatchConfig()): CoordinatorScaleReport =
+      batchConfig: OffsetBatchConfig = OffsetBatchConfig(),
+      publicationConfig: CoordinatorPublicationConfig = CoordinatorPublicationConfig()): CoordinatorScaleReport =
     require(groupCount >= 3 && groupCount <= 100000, "groups must be between 3 and 100000")
     require(concurrency > 0 && concurrency <= 64, "concurrency must be between 1 and 64")
     require(rounds > 0 && rounds <= 100, "rounds must be between 1 and 100")
@@ -77,7 +87,8 @@ object CoordinatorScaleQualification:
     val startedAt = Instant.now()
     val revision = currentRevision()
     val perIpLimit = connectionLimit(groupCount, persistent)
-    val cluster = FaultCluster(3, recordCalls = false, maxConnectionsPerIp = perIpLimit, offsetBatch = batchConfig)
+    val cluster = FaultCluster(3, recordCalls = false, maxConnectionsPerIp = perIpLimit, offsetBatch = batchConfig,
+      coordinatorPublication = publicationConfig)
     val executor = Executors.newFixedThreadPool(concurrency)
     val partition = TopicPartition("coordinator-qualification", 0)
     val latencies = new java.util.concurrent.ConcurrentLinkedQueue[Long]()
@@ -167,9 +178,13 @@ object CoordinatorScaleQualification:
       }
       val coordinatorMetrics = metrics.map(_.coordinator)
       val batching = metrics.map(_.offsetBatch)
+      val publications = metrics.map(_.coordinatorPublication)
       require(batching.map(_.rejected).sum == 0L, "coordinator campaign exceeded offset batch admission")
       require(batching.forall(m => m.peakRequests <= batchConfig.maxPendingRequests && m.peakBytes <= batchConfig.maxPendingBytes),
         "offset batching exceeded its configured retained-work bounds")
+      require(publications.map(_.rejected).sum == 0L, "coordinator campaign exceeded publication admission")
+      require(publications.forall(m => m.peakRequests <= publicationConfig.maxPendingRequests &&
+        m.peakBytes <= publicationConfig.maxPendingBytes), "controller publication exceeded its retained-work bounds")
       val admissionRejections = metrics.map(_.rejectedConnections).sum
       require(admissionRejections == 0L, s"coordinator capacity campaign hit connection admission: $admissionRejections")
       require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
@@ -198,7 +213,12 @@ object CoordinatorScaleQualification:
         batchConfig.maxRequests, batchConfig.lingerMillis, batching.map(_.batches).sum, batching.map(_.batchRequests).sum,
         batching.map(_.failed).sum, batching.map(_.rejected).sum, batching.map(_.peakRequests).max, batching.map(_.peakBytes).max,
         coordinatorMetrics.map(_.encodedShards).sum, coordinatorMetrics.map(_.reusedShards).sum,
-        coordinatorMetrics.map(_.encodedBytes).sum, coordinatorMetrics.map(_.preparationNanos).sum)
+        coordinatorMetrics.map(_.encodedBytes).sum, coordinatorMetrics.map(_.preparationNanos).sum,
+        publicationConfig.maxRequests, publicationConfig.lingerMillis,
+        publications.map(_.batches).sum, publications.map(_.batchRequests).sum,
+        publications.map(_.committedBatches).sum, publications.map(_.committedRequests).sum,
+        publications.map(_.conflictedRequests).sum, publications.map(_.failed).sum, publications.map(_.rejected).sum,
+        publications.map(_.peakRequests).max, publications.map(_.peakBytes).max)
     catch
       case scala.util.control.NonFatal(error) =>
         System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")
