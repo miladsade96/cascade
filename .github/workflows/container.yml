@@ -61,6 +61,12 @@ jobs:
       - name: Test fail-closed image security policy
         run: node --test scripts/qualify-image-security.test.mjs
 
+      - name: Qualify bounded cross-owner coordinator publication
+        run: >-
+          ./sbt "testOnly cascade.coordinator.CoordinatorDeltaBatcherSuite
+          cascade.coordinator.CoordinatorShardStateSuite
+          cascade.cluster.CoordinatorPublicationQuorumSuite"
+
       - name: Run the complete Scala test suite
         run: |
           chmod 0755 sbt
