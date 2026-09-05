@@ -18,6 +18,14 @@ final class CoordinatorShardStateSuite extends FunSuite:
     assertEquals(second.shardVersion(2), 1L)
     assertEquals(second.shardVersion(3), 0L)
   }
+
+  test("one publication merges compatible shards from a shared base") {
+    val merged = CoordinatorShardState.mergeBatch(empty, Vector(delta(1), delta(2), delta(3)), 7L)
+    assertEquals(merged.accepted, Vector(true, true, true))
+    assertEquals(merged.metadata.version, 3L)
+    assertEquals((1 to 3).map(merged.metadata.shardVersion).toVector, Vector(1L, 1L, 1L))
+    assertEquals(merged.metadata.shardVersion(4), 0L)
+  }
   test("one stale shard rejects the entire multi-shard transaction") {
     val first = CoordinatorShardState.merge(empty, delta(1), 7L).toOption.get
     assert(CoordinatorShardState.merge(first, delta(1, 2), 7L).isLeft)
