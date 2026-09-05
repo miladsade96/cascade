@@ -20,7 +20,8 @@ final class FaultCluster(
     electionTimeoutMillis: Int = 600,
     journalCompactionBytes: Long = 128L * 1024 * 1024,
     maxConnectionsPerIp: Int = 1000,
-    offsetBatch: cascade.group.OffsetBatchConfig = cascade.group.OffsetBatchConfig()
+    offsetBatch: cascade.group.OffsetBatchConfig = cascade.group.OffsetBatchConfig(),
+    coordinatorPublication: cascade.coordinator.CoordinatorPublicationConfig = cascade.coordinator.CoordinatorPublicationConfig()
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
   private val voterCount = if initialVoters < 0 then size else initialVoters
@@ -49,6 +50,7 @@ final class FaultCluster(
       controllerHeartbeatMillis = heartbeatMillis,
       controllerElectionTimeoutMillis = electionTimeoutMillis,
       offsetBatch = offsetBatch,
+      coordinatorPublication = coordinatorPublication,
       security = cascade.security.BrokerSecurityConfig(resources = cascade.security.ResourceLimits(
         maxConnectionsPerIp = maxConnectionsPerIp)),
       storageLifecycle = cascade.storage.StorageLifecycleConfig(journalCompactionBytes = journalCompactionBytes)
