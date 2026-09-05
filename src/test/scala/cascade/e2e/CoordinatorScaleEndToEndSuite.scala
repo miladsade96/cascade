@@ -12,4 +12,10 @@ final class CoordinatorScaleEndToEndSuite extends FunSuite:
     assertEquals(report.owners, Vector(1, 2, 3))
     assert(report.controllerFailover && report.restartRecovery)
     assert(report.deltaBytes < report.fullImageBytes, report)
+    assertEquals(report.publicationRejected, 0L)
+    assert(report.publicationPeakRequests <= 1024, report)
+    assert(report.publicationPeakBytes <= 64L * 1024 * 1024, report)
+    assert(report.publicationBatchRequests >= report.publicationCommittedRequests, report)
+    assert(report.publicationCommittedRequests > 0L, report)
+    assert(report.json.contains("\"publication_committed_requests\""))
   }
