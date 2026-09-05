@@ -33,6 +33,7 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       createTopic(cluster.bootstrapServers, partition.topic())
+      val before = cluster.broker(controller.id).metricsSnapshot.coordinatorPublication
       val groups = selectGroups(cluster, 12)
       clients = groups.map(group => consumer(cluster.bootstrapServers, group))
       clients.foreach(_.assign(java.util.List.of(partition)))
@@ -50,10 +51,10 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
         assertEquals(client.committed(java.util.Set.of(partition)).get(partition).offset(), index.toLong + 1L)
       }
       val publication = cluster.broker(controller.id).metricsSnapshot.coordinatorPublication
-      assertEquals(publication.committedRequests, 12L)
-      assertEquals(publication.failed, 0L)
-      assertEquals(publication.conflictedRequests, 0L)
-      assert(publication.committedBatches < publication.committedRequests, publication)
+      assertEquals(publication.committedRequests - before.committedRequests, 12L)
+      assertEquals(publication.failed - before.failed, 0L)
+      assertEquals(publication.conflictedRequests - before.conflictedRequests, 0L)
+      assert(publication.committedBatches - before.committedBatches < 12L, publication)
       assert(publication.peakRequests <= 16, publication)
 
       clients.foreach(_.close())
@@ -114,5 +115,5 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
     properties.setProperty(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "20000")
     properties.setProperty(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "5000")
     val admin = Admin.create(properties)
-    try admin.createTopics(java.util.List.of(NewTopic(name, 1, 3.toShort))).all().get(20L, TimeUnit.SECONDS)
+    try admin.createTopics(java.util.List.of(NewTopic(name, 1, 3.toShort))).all().get(20L, TimeUnit.SECONDS): Unit
     finally admin.close()
