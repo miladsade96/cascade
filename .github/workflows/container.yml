@@ -67,6 +67,14 @@ jobs:
           cascade.coordinator.CoordinatorShardStateSuite
           cascade.cluster.CoordinatorPublicationQuorumSuite"
 
+      - name: Qualify acknowledged coordinator read isolation
+        run: >-
+          ./sbt "testOnly cascade.group.OffsetReadViewSuite
+          cascade.group.OffsetCommitIsolationSuite
+          cascade.delivery.DeliveryReadViewSuite
+          cascade.delivery.DeliveryCoordinatorSuite
+          cascade.coordinator.CoordinatorReadMetricsSuite"
+
       - name: Run the complete Scala test suite
         run: |
           chmod 0755 sbt
