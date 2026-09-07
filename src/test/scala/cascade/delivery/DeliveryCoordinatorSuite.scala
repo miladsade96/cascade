@@ -5,7 +5,7 @@ import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
 import cascade.coordinator.CoordinatorCheckpoint
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
 import cascade.protocol.Errors
-import cascade.storage.{FlushPolicy, TopicPartition, TopicRegistry}
+import cascade.storage.{FlushPolicy, RecordBatch, TopicPartition, TopicRegistry}
 import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
@@ -213,6 +213,83 @@ final class DeliveryCoordinatorSuite extends FunSuite:
       }
     finally deleteTree(directory)
   }
+
+  for accepted <- Vector(true, false) do
+    test(s"read_committed visibility remains acknowledged while an outcome is publishing: accepted=$accepted") {
+      val directory = Files.createTempDirectory("cascade-delivery-read-view")
+      val registry = TopicRegistry(directory.resolve("data"), 1024 * 1024, FlushPolicy.Sync)
+      val groups = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+      val delivery = DeliveryCoordinator(
+        directory.resolve("delivery.log"),
+        registry,
+        groups,
+        scheduleExpiration = false
+      )
+      val executor = Executors.newFixedThreadPool(2)
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      try
+        registry.getOrCreate("events")
+        val producer = delivery.initProducerId(Some("read-view"), 30_000)
+        assertEquals(
+          delivery.addPartitions(
+            "read-view",
+            producer.producerId,
+            producer.producerEpoch,
+            Vector(TopicPartition("events", 0))
+          ),
+          Errors.None
+        )
+        val records = TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true)
+        val appended = delivery.append(
+          Some("read-view"),
+          "events",
+          0,
+          records,
+          -1,
+          30_000,
+          new ReplicatedAppender:
+            override def append(
+                topic: String,
+                partition: Int,
+                records: Array[Byte],
+                acknowledgements: Short,
+                timeoutMillis: Int
+            ): ReplicatedAppendResult = ReplicatedAppendResult(Errors.None, 0L)
+        )
+        assertEquals(appended.errorCode, Errors.None)
+        val batch = RecordBatch.metadata(records)
+        val baseline = delivery.snapshotBytes.toVector
+        delivery.attachCheckpoint(new CoordinatorCheckpoint:
+          override def commit(): Boolean =
+            entered.countDown()
+            if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("outcome publication timed out")
+            if !accepted then delivery.installSnapshot(baseline)
+            accepted
+        )
+
+        val outcome = executor.submit[Short](() =>
+          delivery.endTransaction("read-view", producer.producerId, producer.producerEpoch, committed = true)
+        )
+        assert(entered.await(5L, TimeUnit.SECONDS))
+        val read = executor.submit[(Long, Boolean)](() =>
+          (delivery.lastStableOffset("events", 0, 1L), delivery.visible("events", 0, batch))
+        )
+        assertEquals(read.get(1L, TimeUnit.SECONDS), (0L, false))
+
+        release.countDown()
+        assertEquals(outcome.get(5L, TimeUnit.SECONDS), if accepted then Errors.None else Errors.CoordinatorNotAvailable)
+        val expected = if accepted then (1L, true) else (0L, false)
+        assertEquals((delivery.lastStableOffset("events", 0, 1L), delivery.visible("events", 0, batch)), expected)
+      finally
+        release.countDown()
+        executor.shutdownNow(): Unit
+        executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
+        delivery.close()
+        groups.close()
+        registry.close()
+        deleteTree(directory)
+    }
 
   test("producer fencing and active transactions continue from an installed snapshot") {
     val directory = Files.createTempDirectory("cascade-delivery-install")

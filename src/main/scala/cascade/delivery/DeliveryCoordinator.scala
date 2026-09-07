@@ -1,7 +1,7 @@
 package cascade.delivery
 
 import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
-import cascade.coordinator.CoordinatorCheckpoint
+import cascade.coordinator.{CoordinatorCheckpoint, CoordinatorReadMetrics}
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
 import cascade.protocol.{Errors, ProtocolException}
 import cascade.storage.{RecordBatch, RecordBatchMetadata, TopicPartition, TopicRegistry}
@@ -27,7 +27,8 @@ final class DeliveryCoordinator(
     stateLock: Object = Object(),
     durableLocal: Boolean = true,
     scheduleExpiration: Boolean = true,
-    journalCompactionBytes: Long = Long.MaxValue
+    journalCompactionBytes: Long = Long.MaxValue,
+    readMetrics: CoordinatorReadMetrics = CoordinatorReadMetrics()
 ) extends AutoCloseable:
   private val MaximumTransactionTimeoutMillis = 15 * 60 * 1000
   private val store = DeliveryStore(statePath, journalCompactionBytes)
@@ -39,6 +40,7 @@ final class DeliveryCoordinator(
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-transaction-expirer").factory())
   }
   @volatile private var current = store.image
+  @volatile private var acknowledged = DeliveryReadView.from(current)
 
   recoverActiveRanges()
   replayCommittedOffsets()
@@ -56,6 +58,7 @@ final class DeliveryCoordinator(
   private[cascade] def installCommittedImage(image: DeliveryImage): Unit = stateLock.synchronized {
     store.install(image)
     current = image
+    acknowledged = DeliveryReadView.from(image)
     stateLock.notifyAll()
   }
 
@@ -213,6 +216,7 @@ final class DeliveryCoordinator(
           )
         )
         if !transitionCommitted then return Errors.CoordinatorNotAvailable
+        if useAtomicSnapshot then groups.publishAcknowledgedOffsets()
         if committed && completed.pendingOffsets.nonEmpty && !useAtomicSnapshot then
           applyOffsets(completed.pendingOffsets)
           if !markOffsetsApplied(completed) then return Errors.CoordinatorNotAvailable
@@ -291,27 +295,30 @@ final class DeliveryCoordinator(
     }
 
   def lastStableOffset(topic: String, partition: Int, highWatermark: Long): Long =
-    expireNow()
-    current.activeTransactions.iterator
-      .flatMap(_.ranges.iterator)
-      .filter(range => range.topic == topic && range.partition == partition)
-      .map(_.firstOffset)
-      .minOption
-      .fold(highWatermark)(math.min(highWatermark, _))
+    lastStableOffset(acknowledged, topic, partition, highWatermark)
+
+  private[cascade] def acknowledgedReadView: DeliveryReadView = acknowledged
+
+  private[cascade] def lastStableOffset(
+      view: DeliveryReadView,
+      topic: String,
+      partition: Int,
+      highWatermark: Long
+  ): Long =
+    readMetrics.recordStableOffset()
+    view.lastStableOffset(TopicPartition(topic, partition), highWatermark)
 
   def visible(topic: String, partition: Int, batch: RecordBatchMetadata): Boolean =
-    if !batch.transactional then true
-    else
-      current.completedTransactions.reverseIterator
-        .find { transaction =>
-          transaction.producerId == batch.producerId &&
-          transaction.producerEpoch == batch.producerEpoch &&
-          transaction.ranges.exists(range =>
-            range.topic == topic && range.partition == partition &&
-            batch.baseOffset >= range.firstOffset && batch.lastOffset <= range.lastOffset
-          )
-        }
-        .exists(transaction => transaction.committed && transaction.offsetsApplied)
+    visible(acknowledged, topic, partition, batch)
+
+  private[cascade] def visible(
+      view: DeliveryReadView,
+      topic: String,
+      partition: Int,
+      batch: RecordBatchMetadata
+  ): Boolean =
+    readMetrics.recordTransactionVisibility()
+    view.visible(TopicPartition(topic, partition), batch)
 
   def latestOffset(topic: String, partition: Int, highWatermark: Long, readCommitted: Boolean): Long =
     if readCommitted then lastStableOffset(topic, partition, highWatermark) else highWatermark
@@ -420,7 +427,9 @@ final class DeliveryCoordinator(
 
   private def commitTransactionalAppend(): Boolean = stateLock.synchronized {
     current = current.copy(version = Math.addExact(current.version, 1L))
-    checkpoint.commit()
+    val committed = checkpoint.commit()
+    if committed then acknowledged = DeliveryReadView.from(current)
+    committed
   }
 
   private def recordTransactionalRange(
@@ -490,7 +499,9 @@ final class DeliveryCoordinator(
   private def commit(next: DeliveryImage): Boolean =
     store.commit(next, durableLocal)
     current = next
-    checkpoint.commit()
+    val committed = checkpoint.commit()
+    if committed then acknowledged = DeliveryReadView.from(current)
+    committed
 
   private def fromReplication(result: ReplicatedAppendResult): DeliveryAppendResult =
     DeliveryAppendResult(result.errorCode, result.baseOffset)
