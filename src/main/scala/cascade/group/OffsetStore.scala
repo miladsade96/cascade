@@ -25,9 +25,12 @@ final class OffsetStore(path: Path) extends AutoCloseable:
   private val keysByGroup = mutable.HashMap.empty[String, mutable.HashSet[GroupOffsetKey]]
   private var cachedEntries: Option[Vector[OffsetCommitValue]] = None
   private var appendPosition = recover()
+  @volatile private var acknowledged = OffsetReadView.from(offsets.iterator.map { case (key, value) => OffsetCommitValue(key, value) })
+  private val pendingUpserts = mutable.LinkedHashMap.empty[GroupOffsetKey, CommittedOffset]
+  private val pendingRemovals = mutable.HashSet.empty[GroupOffsetKey]
   private var closed = false
 
-  def commit(values: Vector[OffsetCommitValue], durable: Boolean = true): Unit = synchronized {
+  def commit(values: Vector[OffsetCommitValue], durable: Boolean = true, publish: Boolean = true): Unit = synchronized {
     ensureOpen()
     if values.nonEmpty then
       if durable then
@@ -39,6 +42,11 @@ final class OffsetStore(path: Path) extends AutoCloseable:
         channel.force(false)
       values.foreach(put)
       cachedEntries = None
+      values.foreach { value =>
+        pendingRemovals -= value.key
+        pendingUpserts.update(value.key, value.value)
+      }
+      if publish then publishAcknowledged()
   }
 
   def entries: Vector[OffsetCommitValue] = synchronized {
@@ -60,14 +68,25 @@ final class OffsetStore(path: Path) extends AutoCloseable:
       keysByGroup.clear()
       values.foreach(put)
       cachedEntries = None
+    acknowledged = OffsetReadView.from(offsets.iterator.map { case (key, value) => OffsetCommitValue(key, value) })
+    pendingUpserts.clear()
+    pendingRemovals.clear()
   }
 
-  def get(key: GroupOffsetKey): Option[CommittedOffset] = synchronized(offsets.get(key))
+  def acknowledgedView: OffsetReadView = acknowledged
 
-  def all(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = synchronized {
-    keysByGroup.get(groupId).iterator.flatMap(_.iterator).map(key => key -> offsets(key))
-      .toVector.sortBy { case (key, _) => (key.topic, key.partition) }
+  def publishAcknowledged(): Unit = synchronized {
+    ensureOpen()
+    if pendingUpserts.nonEmpty || pendingRemovals.nonEmpty then
+      val values = pendingUpserts.iterator.map { case (key, value) => OffsetCommitValue(key, value) }.toVector
+      acknowledged = acknowledged.updated(values, pendingRemovals)
+      pendingUpserts.clear()
+      pendingRemovals.clear()
   }
+
+  def get(key: GroupOffsetKey): Option[CommittedOffset] = acknowledged.get(key)
+
+  def all(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = acknowledged.all(groupId)
 
   def journalSize: Long = synchronized(channel.size())
 
@@ -98,7 +117,12 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     appendPosition = position
   }
 
-  def expireBefore(cutoffMillis: Long, durable: Boolean = true, eligible: GroupOffsetKey => Boolean = _ => true): Vector[GroupOffsetKey] = synchronized {
+  def expireBefore(
+      cutoffMillis: Long,
+      durable: Boolean = true,
+      eligible: GroupOffsetKey => Boolean = _ => true,
+      publish: Boolean = true
+  ): Vector[GroupOffsetKey] = synchronized {
     ensureOpen()
     val expired = offsets.iterator.collect { case (key, value) if value.committedAtMillis < cutoffMillis && eligible(key) => key }.toVector
     expired.foreach { key =>
@@ -108,8 +132,14 @@ final class OffsetStore(path: Path) extends AutoCloseable:
         if keys.isEmpty then keysByGroup.remove(key.groupId): Unit
       }
     }
-    if expired.nonEmpty then cachedEntries = None
+    if expired.nonEmpty then
+      cachedEntries = None
+      expired.foreach { key =>
+        pendingUpserts -= key
+        pendingRemovals += key
+      }
     if durable && expired.nonEmpty then compact()
+    if publish then publishAcknowledged()
     expired.sortBy(key => (key.groupId, key.topic, key.partition))
   }
 

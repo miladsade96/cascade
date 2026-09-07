@@ -98,6 +98,30 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("staged offsets remain invisible until their acknowledged view is published") {
+    val directory = Files.createTempDirectory("cascade-offset-read-view-test")
+    val path = directory.resolve("offsets.log")
+    val key = GroupOffsetKey("workers", "events", 0)
+    val first = OffsetCommitValue(key, CommittedOffset(10L, -1, None, 1000L))
+    val second = OffsetCommitValue(key, CommittedOffset(20L, -1, None, 2000L))
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(first))
+        val before = store.acknowledgedView
+        store.commit(Vector(second), durable = false, publish = false)
+
+        assertEquals(store.entries, Vector(second))
+        assertEquals(store.get(key), Some(first.value))
+        assertEquals(before.get(key), Some(first.value))
+
+        store.publishAcknowledged()
+        assertEquals(store.get(key), Some(second.value))
+        assertEquals(before.get(key), Some(first.value))
+      finally store.close()
+    finally deleteTree(directory)
+  }
+
   test("compaction atomically retains only the latest offset for every key") {
     val directory = Files.createTempDirectory("cascade-offset-compaction-test")
     val path = directory.resolve("offsets.log")
@@ -143,6 +167,26 @@ final class OffsetStoreSuite extends FunSuite:
         assertEquals(recovered.get(old.key), None)
         assertEquals(recovered.get(recent.key), Some(recent.value))
       finally recovered.close()
+    finally deleteTree(directory)
+  }
+
+  test("staged expiration preserves the acknowledged view until publication") {
+    val directory = Files.createTempDirectory("cascade-offset-expiration-view-test")
+    val path = directory.resolve("offsets.log")
+    val old = OffsetCommitValue(GroupOffsetKey("workers", "events", 0), CommittedOffset(10L, -1, None, 1000L))
+    val recent = OffsetCommitValue(GroupOffsetKey("workers", "events", 1), CommittedOffset(20L, -1, None, 3000L))
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(old, recent), durable = false)
+        assertEquals(store.expireBefore(2000L, durable = false, publish = false), Vector(old.key))
+        assertEquals(store.get(old.key), Some(old.value))
+        assertEquals(store.get(recent.key), Some(recent.value))
+
+        store.publishAcknowledged()
+        assertEquals(store.get(old.key), None)
+        assertEquals(store.get(recent.key), Some(recent.value))
+      finally store.close()
     finally deleteTree(directory)
   }
 
