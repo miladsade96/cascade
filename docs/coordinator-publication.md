@@ -40,6 +40,12 @@ The scale runner records publication bounds and outcomes alongside existing snap
 ./sbt "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency 32 --rounds 2 --client-lifecycle persistent --batch-max-requests 64 --batch-linger-ms 2 --publication-max-requests 64 --publication-linger-ms 2 --report artifacts/coordinator-publication.json"
 ```
 
+## Read isolation while publication waits
+
+Offset and `read_committed` Fetch decisions no longer wait on the publication monitor. They capture immutable views derived only from the last acknowledged coordinator image. A staged proposal cannot enter those views, and a failed proposal leaves the existing objects unchanged. One Kafka Fetch response holds one transaction view across last-stable-offset and batch-visibility checks.
+
+I gate this contract with a three-broker fault test that pauses one owner's commit RPC at the controller rather than sleeping for a guessed interval. `OffsetFetch` must finish with the previous acknowledged value while the write is paused, then expose the new value after the quorum result. The full design and metrics are in [acknowledged coordinator read isolation](coordinator-read-isolation.md).
+
 ## Remaining boundary
 
-This removes redundant quorum rounds when compatible proposals arrive together. It does not remove the controller's metadata mutation lock, shared metadata quorum, full coordinator image held by every broker, group/delivery service lock, or per-proposal snapshot capture. Workloads that touch the allocator or the same hash bucket still conflict by design. Independent per-shard consensus and execution, finer-grained service locking, controlled dedicated-host RF=3 capacity, membership rebalance churn, and high-cardinality transaction churn remain release gates.
+This removes redundant quorum rounds when compatible proposals arrive together, and acknowledged read views keep covered reads off the publication monitor. It does not remove the controller's metadata mutation lock, shared metadata quorum, full coordinator image held by every broker, group/delivery mutation lock, or per-proposal snapshot capture. Workloads that touch the allocator or the same hash bucket still conflict by design. Independent per-shard consensus and execution, finer-grained mutation locking, controlled dedicated-host RF=3 capacity, membership rebalance churn, and high-cardinality transaction churn remain release gates.
