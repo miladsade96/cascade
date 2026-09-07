@@ -76,6 +76,17 @@
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "targets": [{"expr": "sum by (quota) (rate(cascade_traffic_quota_throttle_seconds_total[5m]))", "legendFormat": "{{quota}}", "refId": "A"}],
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+    },
+    {
+      "type": "timeseries",
+      "title": "Acknowledged coordinator reads",
+      "targets": [
+        {"expr": "sum(rate(cascade_coordinator_offset_read_snapshots_total[5m]))", "legendFormat": "offset snapshots", "refId": "A"},
+        {"expr": "sum(rate(cascade_coordinator_offset_read_keys_total[5m]))", "legendFormat": "offset keys", "refId": "B"},
+        {"expr": "sum(rate(cascade_coordinator_stable_offset_snapshots_total[5m]))", "legendFormat": "stable offsets", "refId": "C"},
+        {"expr": "sum(rate(cascade_coordinator_transaction_visibility_snapshots_total[5m]))", "legendFormat": "transaction visibility", "refId": "D"}
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
     }
   ],
   "refresh": "15s",
