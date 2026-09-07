@@ -73,7 +73,9 @@ jobs:
           cascade.group.OffsetCommitIsolationSuite
           cascade.delivery.DeliveryReadViewSuite
           cascade.delivery.DeliveryCoordinatorSuite
-          cascade.coordinator.CoordinatorReadMetricsSuite"
+          cascade.coordinator.CoordinatorReadMetricsSuite
+          cascade.fault.NetworkFaultControllerSuite
+          cascade.cluster.CoordinatorReadIsolationQuorumSuite"
 
       - name: Run the complete Scala test suite
         run: |
