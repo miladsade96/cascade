@@ -1,6 +1,7 @@
 package cascade.fault
 
 import java.net.SocketTimeoutException
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import cascade.protocol.ByteCursor
 
 final case class PeerCall(sourceId: Int, targetId: Int, apiKey: Short, payload: Vector[Byte])
@@ -28,12 +29,21 @@ final class ArmedFault(
         armed = matches >= triggerMatches
       false
 
+final case class PeerPause(
+    selector: FaultSelector,
+    entered: CountDownLatch,
+    release: CountDownLatch,
+    timeoutMillis: Long
+):
+  require(timeoutMillis > 0L, "pause timeout must be positive")
+
 /** Thread-safe deterministic link control used by the cluster fault-qualification suites. */
 final class NetworkFaultController(maxRecordedCalls: Int = 10000):
   require(maxRecordedCalls >= 0, "recorded call limit must be non-negative")
   private var blocked = Set.empty[FaultSelector]
   private var observed = Vector.empty[PeerCall]
   private var armedFaults = Vector.empty[ArmedFault]
+  private var pauses = Vector.empty[PeerPause]
   @volatile private var replyObserver: Option[(PeerCall, Array[Byte]) => Unit] = None
 
   /** Observe or pause a completed RPC after its connection lock has been released. */
@@ -69,18 +79,38 @@ final class NetworkFaultController(maxRecordedCalls: Int = 10000):
     armedFaults :+= fault
   }
 
+  def pause(value: PeerPause): Unit = synchronized {
+    pauses :+= value
+  }
+
+  def resume(selector: FaultSelector): Unit = synchronized {
+    pauses.filter(_.selector == selector).foreach(_.release.countDown())
+    pauses = pauses.filterNot(_.selector == selector)
+  }
+
   def heal(): Unit = synchronized {
     blocked = Set.empty
     armedFaults = Vector.empty
+    pauses.foreach(_.release.countDown())
+    pauses = Vector.empty
     replyObserver = None
   }
 
   def calls: Vector[PeerCall] = synchronized(observed)
 
-  private[fault] def beforeCall(call: PeerCall): Unit = synchronized {
-    if maxRecordedCalls > 0 then observed = (observed :+ call).takeRight(maxRecordedCalls)
-    if blocked.exists(_.matches(call)) || armedFaults.exists(_.evaluate(call)) then
-      throw SocketTimeoutException(
-        s"injected peer partition ${call.sourceId}->${call.targetId} api=${call.apiKey}"
-      )
-  }
+  private[fault] def beforeCall(call: PeerCall): Unit =
+    val pause = synchronized {
+      if maxRecordedCalls > 0 then observed = (observed :+ call).takeRight(maxRecordedCalls)
+      if blocked.exists(_.matches(call)) || armedFaults.exists(_.evaluate(call)) then
+        throw SocketTimeoutException(
+          s"injected peer partition ${call.sourceId}->${call.targetId} api=${call.apiKey}"
+        )
+      pauses.find(_.selector.matches(call))
+    }
+    pause.foreach { value =>
+      value.entered.countDown()
+      if !value.release.await(value.timeoutMillis, TimeUnit.MILLISECONDS) then
+        throw SocketTimeoutException(
+          s"injected peer pause timed out ${call.sourceId}->${call.targetId} api=${call.apiKey}"
+        )
+    }

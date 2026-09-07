@@ -3,6 +3,7 @@ package cascade.fault
 import cascade.cluster.{ClusterNode, PeerTransport}
 import cascade.protocol.ByteCursor
 import java.net.SocketTimeoutException
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
 
 final class NetworkFaultControllerSuite extends FunSuite:
@@ -91,4 +92,35 @@ final class NetworkFaultControllerSuite extends FunSuite:
 
     faults.heal()
     faults.beforeCall(PeerCall(1, 2, -101, Vector.empty))
+  }
+
+  test("a peer pause waits outside controller synchronization and resumes selectively") {
+    val faults = NetworkFaultController()
+    val selector = FaultSelector(1, 2, Some((-101).toShort))
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val executor = Executors.newSingleThreadExecutor()
+    faults.pause(PeerPause(selector, entered, release, 5000L))
+    try
+      val paused = executor.submit[Unit](() => faults.beforeCall(PeerCall(1, 2, -101, Vector.empty)))
+      assert(entered.await(5L, TimeUnit.SECONDS))
+
+      faults.beforeCall(PeerCall(1, 3, -101, Vector.empty))
+      faults.resume(selector)
+      paused.get(5L, TimeUnit.SECONDS)
+    finally
+      faults.heal()
+      executor.shutdownNow(): Unit
+      executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
+  }
+
+  test("a peer pause fails closed when its release deadline expires") {
+    val faults = NetworkFaultController()
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    faults.pause(PeerPause(FaultSelector(1, 2), entered, release, 10L))
+
+    intercept[SocketTimeoutException](faults.beforeCall(PeerCall(1, 2, -101, Vector.empty)))
+    assertEquals(entered.getCount, 0L)
+    faults.heal()
   }
