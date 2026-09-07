@@ -41,6 +41,18 @@ final class OffsetReadViewSuite extends FunSuite:
     assertEquals(before.get(second.key), Some(second.value))
   }
 
+  test("reuses untouched group indexes and the whole view for no-op updates") {
+    val workers = value("workers", "events", 0, 10L)
+    val billing = value("billing", "charges", 0, 30L)
+    val before = OffsetReadView.from(Vector(workers, billing))
+
+    val after = before.updated(Vector(value("workers", "events", 0, 20L)))
+    assert(after.byGroup("billing").eq(before.byGroup("billing")))
+
+    val unchanged = after.updated(Vector.empty, Vector.empty)
+    assert(unchanged.eq(after))
+  }
+
   test("an upsert wins over a simultaneous removal of the same key") {
     val first = value("workers", "events", 0, 10L)
     val replacement = value("workers", "events", 0, 20L)
