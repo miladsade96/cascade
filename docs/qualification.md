@@ -2,6 +2,26 @@
 
 I use these runners to produce auditable evidence rather than treating a short unit test as a production qualification.
 
+## Coordinator read isolation
+
+I run the deterministic blocked-publication and real three-broker pause tests before a coordinator release:
+
+```powershell
+.\sbt.bat "testOnly cascade.group.OffsetReadViewSuite cascade.group.OffsetCommitIsolationSuite cascade.delivery.DeliveryReadViewSuite cascade.delivery.DeliveryCoordinatorSuite cascade.coordinator.CoordinatorReadMetricsSuite cascade.fault.NetworkFaultControllerSuite cascade.cluster.CoordinatorReadIsolationQuorumSuite"
+```
+
+The real-cluster test pauses one specific owner-to-controller coordinator commit. It fails if `OffsetFetch` waits for that paused write, returns the tentative value, or fails to return the new value after publication resumes. The fault controller has bounded waits and fails closed if the expected RPC never arrives.
+
+I then run the cardinality/recovery campaign with explicit batching and publication settings:
+
+```powershell
+.\sbt.bat "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency 32 --rounds 2 --client-lifecycle persistent --batch-max-requests 64 --batch-linger-ms 2 --publication-max-requests 64 --publication-linger-ms 2 --report artifacts/coordinator-read-isolation-1000.json"
+```
+
+I require `status=passed`, 1,000/1,000 verified groups, 3,000 timed writes, controller failover, full restart recovery, all three owners, no connection/batch/publication admission rejection, and at least 2,000 acknowledged offset snapshots and keys. I archive the raw JSON, source revision, Java version, processor count, and command. This workload does not exercise transactional Fetch, so zero stable-offset or transaction-visibility counters are expected here; their blocked-checkpoint and Kafka-client suites remain mandatory.
+
+The current development-host result is recorded in the [2026-09-07 report](performance/2026-09-07-coordinator-read-isolation.md). I do not compare throughput across different batching/publication settings or use it as dedicated-host capacity evidence.
+
 ## Multi-day soak
 
 The soak runner starts an isolated Cascade broker, creates one topic per tenant, continuously produces deterministic payloads, consumes exact offsets and bytes, samples heap use, and writes an atomic JSON report. The default duration is 72 hours.
