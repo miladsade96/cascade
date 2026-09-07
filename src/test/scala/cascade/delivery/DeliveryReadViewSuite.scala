@@ -57,6 +57,16 @@ final class DeliveryReadViewSuite extends FunSuite:
     assert(!view.visible(partition, batch(0L, 4L, transactional = true)))
   }
 
+  test("completed outcomes are isolated by producer epoch") {
+    val nextEpoch = completed(committed = true, first = 0L, last = 4L).copy(producerEpoch = 2)
+    val view = DeliveryReadView.from(image(Vector.empty, Vector(nextEpoch)))
+    val oldEpochBatch = batch(0L, 4L, transactional = true)
+    val nextEpochBatch = oldEpochBatch.copy(producerEpoch = 2)
+
+    assert(!view.visible(partition, oldEpochBatch))
+    assert(view.visible(partition, nextEpochBatch))
+  }
+
   private def image(active: Vector[ActiveTransaction], completed: Vector[CompletedTransaction]): DeliveryImage =
     DeliveryImage.Empty.copy(version = 7L, activeTransactions = active, completedTransactions = completed)
 
