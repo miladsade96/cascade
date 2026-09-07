@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.{ClusterManager, ClusterNode, PeerClient, PeerTransport, ReplicationManager}
-import cascade.coordinator.CoordinatorStateMachine
+import cascade.coordinator.{CoordinatorReadMetrics, CoordinatorStateMachine}
 import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics, TrafficQuotaSnapshot}
@@ -100,6 +100,7 @@ final class KafkaBroker(
     (event, error) => eventLog.error(event, error, brokerFields)
   )
   private val coordinatorLock = Object()
+  private val coordinatorReadMetrics = CoordinatorReadMetrics()
   private val clustered = config.clusterNodes.nonEmpty
   private val groupCoordinator = GroupCoordinator(
     config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"),
@@ -107,7 +108,8 @@ final class KafkaBroker(
     durableLocal = !clustered,
     scheduleExpiration = !clustered,
     offsetRetentionMillis = config.storageLifecycle.offsetRetentionMillis,
-    journalCompactionBytes = config.storageLifecycle.journalCompactionBytes
+    journalCompactionBytes = config.storageLifecycle.journalCompactionBytes,
+    readMetrics = coordinatorReadMetrics
   )
   @volatile private var acceptThread: Thread | Null = null
   @volatile private var handler: RequestHandler | Null = null
@@ -139,7 +141,8 @@ final class KafkaBroker(
       coordinatorLock,
       durableLocal = !clustered,
       scheduleExpiration = !clustered,
-      journalCompactionBytes = config.storageLifecycle.journalCompactionBytes
+      journalCompactionBytes = config.storageLifecycle.journalCompactionBytes,
+      readMetrics = coordinatorReadMetrics
     )
     val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery, coordinatorLock))
     peerClient = peers
@@ -280,7 +283,8 @@ final class KafkaBroker(
       metadataJournal = cluster.map(_.metadataJournalSnapshot).getOrElse(cascade.cluster.MetadataJournalSnapshot.Empty),
       shardObjects = cluster.map(_.shardObjectSnapshot).getOrElse(cascade.cluster.ShardObjectSnapshot()),
       offsetBatch = Option(handler).map(_.offsetBatchSnapshot).getOrElse(cascade.group.OffsetBatchSnapshot()),
-      metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty)
+      metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty),
+      coordinatorReads = coordinatorReadMetrics.snapshot
     )
 
   def healthSnapshot: BrokerHealth =

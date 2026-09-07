@@ -1,7 +1,7 @@
 package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
-import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot}
+import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot, CoordinatorReadSnapshot}
 import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot, ShardObjectSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
@@ -98,7 +98,8 @@ final case class BrokerMetricsSnapshot(
     metadataJournal: MetadataJournalSnapshot = MetadataJournalSnapshot.Empty,
     metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty,
     shardObjects: ShardObjectSnapshot = ShardObjectSnapshot(),
-    offsetBatch: cascade.group.OffsetBatchSnapshot = cascade.group.OffsetBatchSnapshot()
+    offsetBatch: cascade.group.OffsetBatchSnapshot = cascade.group.OffsetBatchSnapshot(),
+    coordinatorReads: CoordinatorReadSnapshot = CoordinatorReadSnapshot()
 )
 
 object PrometheusMetrics:
@@ -136,6 +137,10 @@ object PrometheusMetrics:
     counter(builder, "cascade_coordinator_publication_committed_requests_total", "Shard proposals acknowledged by committed controller batches.", snapshot.coordinatorPublication.committedRequests.toDouble, labels)
     counter(builder, "cascade_coordinator_publication_conflicts_total", "Shard proposals rejected because their term, version, or payload conflicted.", snapshot.coordinatorPublication.conflictedRequests.toDouble, labels)
     counter(builder, "cascade_coordinator_publication_queue_seconds_total", "Cumulative wait before controller publication dispatch.", snapshot.coordinatorPublication.queueNanos / 1_000_000_000d, labels)
+    counter(builder, "cascade_coordinator_offset_read_snapshots_total", "Offset reads served from one immutable acknowledged view.", snapshot.coordinatorReads.offsetSnapshots.toDouble, labels)
+    counter(builder, "cascade_coordinator_offset_read_keys_total", "Acknowledged offset keys returned by immutable views.", snapshot.coordinatorReads.offsetKeys.toDouble, labels)
+    counter(builder, "cascade_coordinator_stable_offset_snapshots_total", "Last-stable-offset decisions served from acknowledged transaction views.", snapshot.coordinatorReads.stableOffsetSnapshots.toDouble, labels)
+    counter(builder, "cascade_coordinator_transaction_visibility_snapshots_total", "Transactional batch visibility decisions served from acknowledged views.", snapshot.coordinatorReads.transactionVisibilitySnapshots.toDouble, labels)
     gauge(builder, "cascade_offset_batch_pending_requests", "Retained queued and in-flight offset requests.", snapshot.offsetBatch.pendingRequests.toDouble, labels)
     gauge(builder, "cascade_offset_batch_pending_bytes", "Estimated retained queued and in-flight offset bytes.", snapshot.offsetBatch.pendingBytes.toDouble, labels)
     gauge(builder, "cascade_offset_batch_peak_requests", "Peak retained offset request count since startup.", snapshot.offsetBatch.peakRequests.toDouble, labels)
