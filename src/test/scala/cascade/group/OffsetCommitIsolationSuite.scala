@@ -120,15 +120,18 @@ final class OffsetCommitIsolationSuite extends FunSuite:
         try
           val write = executor.submit[Short](() => coordinator.commitOffsets("workers", -1, "", Vector(offset("workers", 2L))))
           assert(entered.await(5L, TimeUnit.SECONDS))
-          val read = executor.submit[(Option[CommittedOffset], Vector[(GroupOffsetKey, CommittedOffset)])](() =>
+          val read = executor.submit[Vector[(GroupOffsetKey, CommittedOffset)]](() =>
             readerStarted.countDown()
-            (coordinator.fetchOffset(original.key), coordinator.allOffsets("workers"))
+            val requested = coordinator.readOffsets("workers", Some(Vector(original.key)), () => Errors.None)
+            val all = coordinator.readOffsets("workers", None, () => Errors.None)
+            assertEquals(coordinator.fetchOffset(original.key), Some(original.value))
+            assertEquals(coordinator.allOffsets("workers"), Vector(original.key -> original.value))
+            assertEquals(requested, (Errors.None, Vector(original.key -> original.value)))
+            assertEquals(all, requested)
+            requested._2
           )
           assert(readerStarted.await(5L, TimeUnit.SECONDS))
-          assertEquals(
-            read.get(1L, TimeUnit.SECONDS),
-            (Some(original.value), Vector(original.key -> original.value))
-          )
+          assertEquals(read.get(1L, TimeUnit.SECONDS), Vector(original.key -> original.value))
           release.countDown()
           assertEquals(write.get(5L, TimeUnit.SECONDS), if accepted then Errors.None else Errors.CoordinatorNotAvailable)
           val expected = if accepted then offset("workers", 2L).value else original.value
