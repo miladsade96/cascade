@@ -118,6 +118,19 @@ final class DeploymentArtifactsSuite extends FunSuite:
     assert(dashboard.contains("Cascade production overview"))
   }
 
+  test("dashboard exposes every acknowledged coordinator read decision") {
+    val dashboard = read("deploy/kubernetes/dashboards/cascade.json")
+    val metrics = Vector(
+      "cascade_coordinator_offset_read_snapshots_total",
+      "cascade_coordinator_offset_read_keys_total",
+      "cascade_coordinator_stable_offset_snapshots_total",
+      "cascade_coordinator_transaction_visibility_snapshots_total"
+    )
+
+    assert(dashboard.contains("Acknowledged coordinator reads"))
+    metrics.foreach(metric => assertEquals(occurrences(dashboard, metric), 1))
+  }
+
   private def read(path: String): String = Files.readString(Paths.get(path))
 
   private def occurrences(source: String, value: String): Int =
