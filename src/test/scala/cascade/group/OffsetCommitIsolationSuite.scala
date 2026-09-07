@@ -3,7 +3,7 @@ package cascade.group
 import cascade.coordinator.CoordinatorCheckpoint
 import cascade.protocol.Errors
 import java.nio.file.Files
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit, TimeoutException}
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
@@ -101,7 +101,7 @@ final class OffsetCommitIsolationSuite extends FunSuite:
   }
 
   for accepted <- Vector(true, false) do
-    test(s"offset readers wait for publication and observe only authoritative state: accepted=$accepted") {
+    test(s"offset readers remain available and observe only acknowledged state: accepted=$accepted") {
       withCoordinator { coordinator =>
         val original = offset("workers", 1L)
         assertEquals(coordinator.commitOffsets("workers", -1, "", Vector(original)), Errors.None)
@@ -125,11 +125,15 @@ final class OffsetCommitIsolationSuite extends FunSuite:
             (coordinator.fetchOffset(original.key), coordinator.allOffsets("workers"))
           )
           assert(readerStarted.await(5L, TimeUnit.SECONDS))
-          intercept[TimeoutException](read.get(50L, TimeUnit.MILLISECONDS))
+          assertEquals(
+            read.get(1L, TimeUnit.SECONDS),
+            (Some(original.value), Vector(original.key -> original.value))
+          )
           release.countDown()
           assertEquals(write.get(5L, TimeUnit.SECONDS), if accepted then Errors.None else Errors.CoordinatorNotAvailable)
           val expected = if accepted then offset("workers", 2L).value else original.value
-          assertEquals(read.get(5L, TimeUnit.SECONDS), (Some(expected), Vector(original.key -> expected)))
+          assertEquals(coordinator.fetchOffset(original.key), Some(expected))
+          assertEquals(coordinator.allOffsets("workers"), Vector(original.key -> expected))
         finally
           release.countDown()
           executor.close()

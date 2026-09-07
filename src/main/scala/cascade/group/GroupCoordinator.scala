@@ -1,6 +1,6 @@
 package cascade.group
 
-import cascade.coordinator.CoordinatorCheckpoint
+import cascade.coordinator.{CoordinatorCheckpoint, CoordinatorReadMetrics}
 import cascade.protocol.Errors
 import java.nio.file.Path
 import java.util.UUID
@@ -59,7 +59,8 @@ final class GroupCoordinator(
     durableLocal: Boolean = true,
     scheduleExpiration: Boolean = true,
     offsetRetentionMillis: Long = -1L,
-    journalCompactionBytes: Long = Long.MaxValue
+    journalCompactionBytes: Long = Long.MaxValue,
+    readMetrics: CoordinatorReadMetrics = CoordinatorReadMetrics()
 ) extends AutoCloseable:
   require(offsetRetentionMillis == -1L || offsetRetentionMillis > 0L, "offset retention must be -1 or positive")
   require(journalCompactionBytes >= 1024L, "offset journal compaction threshold must be at least 1 KiB")
@@ -394,36 +395,49 @@ final class GroupCoordinator(
     // FIFO concatenation deliberately preserves last-write-wins, including decreasing offsets.
     val values = commands.zip(results).collect { case (command, Errors.None) => command.values }.flatten
     if values.nonEmpty then
-      offsets.commit(values, durableLocal)
+      // The mutable image is staged for checkpoint capture, but readers retain the
+      // previous acknowledged view until the checkpoint has a terminal success.
+      offsets.commit(values, durableLocal, publish = false)
       if durableLocal && offsets.journalSize >= journalCompactionBytes then offsets.compact()
       if !checkpointState() then return results.map(code => if code == Errors.None then Errors.CoordinatorNotAvailable else code)
     results
   }
 
-  def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] = stateLock.synchronized(offsets.get(key))
+  def fetchOffset(key: GroupOffsetKey): Option[CommittedOffset] =
+    val value = offsets.get(key)
+    readMetrics.recordOffsets(value.size)
+    value
 
-  def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] = stateLock.synchronized(offsets.all(groupId))
+  def allOffsets(groupId: String): Vector[(GroupOffsetKey, CommittedOffset)] =
+    val values = offsets.all(groupId)
+    readMetrics.recordOffsets(values.size)
+    values
 
   /** Capture readiness and values once; response encoding must not recheck a changing readiness flag. */
   private[cascade] def readOffsets(
       groupId: String,
       requested: Option[Vector[GroupOffsetKey]],
       admission: () => Short
-  ): (Short, Vector[(GroupOffsetKey, CommittedOffset)]) = stateLock.synchronized {
+  ): (Short, Vector[(GroupOffsetKey, CommittedOffset)]) = {
     val error = admission()
+    val view = offsets.acknowledgedView
     val values =
       if error != Errors.None then Vector.empty
       else requested match
-        case Some(keys) => keys.flatMap(key => offsets.get(key).map(key -> _))
-        case None => offsets.all(groupId)
+        case Some(keys) => keys.flatMap(key => view.get(key).map(key -> _))
+        case None => view.all(groupId)
+    readMetrics.recordOffsets(values.size)
     (error, values)
   }
 
   /** Stages offsets inside a caller-owned combined coordinator checkpoint. */
   private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
-    offsets.commit(values, durableLocal)
+    offsets.commit(values, durableLocal, publish = false)
     stateVersion = Math.addExact(stateVersion, 1L)
   }
+
+  /** Publishes transaction-staged offsets after their combined checkpoint succeeds. */
+  private[cascade] def publishAcknowledgedOffsets(): Unit = offsets.publishAcknowledged()
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
@@ -537,7 +551,12 @@ final class GroupCoordinator(
         rebalanceConsumerGroup(group, _ => 0)
     }
     if offsetRetentionMillis > 0L then
-      val expiredOffsets = offsets.expireBefore(now - offsetRetentionMillis, durableLocal, key => eligible(key.groupId))
+      val expiredOffsets = offsets.expireBefore(
+        now - offsetRetentionMillis,
+        durableLocal,
+        key => eligible(key.groupId),
+        publish = false
+      )
       changed ||= expiredOffsets.nonEmpty
     if changed then checkpointState(): Unit
   }
@@ -557,7 +576,9 @@ final class GroupCoordinator(
 
   private def checkpointState(): Boolean =
     stateVersion = Math.addExact(stateVersion, 1L)
-    checkpoint.commit()
+    val committed = checkpoint.commit()
+    if committed then offsets.publishAcknowledged()
+    committed
 
   private def snapshotImage(): GroupImage =
     val storedGroups = groups.iterator.toVector.sortBy(_._1).map { case (groupId, group) =>
