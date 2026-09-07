@@ -1302,6 +1302,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
 
     var responseBudget = math.max(0, requestMaxBytes)
+    val transactionView = Option.when(readCommitted)(deliveryCoordinator.acknowledgedReadView)
     val results = requests.map { case (topic, partitions) =>
       val values = partitions.map { case (index, offset, partitionMaxBytes) =>
         val partitionMetadata = clusterManager.partition(topic, index)
@@ -1319,13 +1320,14 @@ final class RequestHandler(
             case Some(log) =>
               val budget = math.min(math.max(0, partitionMaxBytes), responseBudget)
               val lastStableOffset =
-                if readCommitted then deliveryCoordinator.lastStableOffset(topic, index, log.highWatermark)
-                else log.highWatermark
+                transactionView
+                  .map(deliveryCoordinator.lastStableOffset(_, topic, index, log.highWatermark))
+                  .getOrElse(log.highWatermark)
               val result = log.fetch(
                 offset,
                 budget,
                 lastStableOffset,
-                batch => !readCommitted || deliveryCoordinator.visible(topic, index, batch)
+                batch => transactionView.forall(deliveryCoordinator.visible(_, topic, index, batch))
               )
               responseBudget = math.max(0, responseBudget - result.records.length)
               (index, Errors.None, Some(result))
