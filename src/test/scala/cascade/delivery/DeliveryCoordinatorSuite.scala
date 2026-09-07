@@ -272,6 +272,7 @@ final class DeliveryCoordinatorSuite extends FunSuite:
           delivery.endTransaction("read-view", producer.producerId, producer.producerEpoch, committed = true)
         )
         assert(entered.await(5L, TimeUnit.SECONDS))
+        val captured = delivery.acknowledgedReadView
         val read = executor.submit[(Long, Boolean)](() =>
           (delivery.lastStableOffset("events", 0, 1L), delivery.visible("events", 0, batch))
         )
@@ -281,6 +282,10 @@ final class DeliveryCoordinatorSuite extends FunSuite:
         assertEquals(outcome.get(5L, TimeUnit.SECONDS), if accepted then Errors.None else Errors.CoordinatorNotAvailable)
         val expected = if accepted then (1L, true) else (0L, false)
         assertEquals((delivery.lastStableOffset("events", 0, 1L), delivery.visible("events", 0, batch)), expected)
+        assertEquals(
+          (delivery.lastStableOffset(captured, "events", 0, 1L), delivery.visible(captured, "events", 0, batch)),
+          (0L, false)
+        )
       finally
         release.countDown()
         executor.shutdownNow(): Unit
