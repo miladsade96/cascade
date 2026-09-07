@@ -62,5 +62,19 @@ final class OffsetReadViewSuite extends FunSuite:
     assertEquals(view.get(first.key), Some(replacement.value))
   }
 
+  test("keeps the last duplicate and removes an empty group index") {
+    val first = value("workers", "events", 0, 10L)
+    val replacement = value("workers", "events", 0, 20L)
+    val built = OffsetReadView.from(Vector(first, replacement))
+
+    assertEquals(built.get(first.key), Some(replacement.value))
+    assertEquals(built.entries, Vector(replacement))
+
+    val removed = built.updated(Vector.empty, Vector(first.key))
+    assertEquals(removed.get(first.key), None)
+    assertEquals(removed.all("workers"), Vector.empty)
+    assert(!removed.byGroup.contains("workers"))
+  }
+
   private def value(group: String, topic: String, partition: Int, offset: Long): OffsetCommitValue =
     OffsetCommitValue(GroupOffsetKey(group, topic, partition), CommittedOffset(offset, -1, None, offset))
