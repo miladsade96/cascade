@@ -101,6 +101,7 @@ jobs:
           jq -e '.object_written_bytes > 0 and .objects_written > 0 and .rejected_connections == 0 and (if .client_lifecycle == "persistent" then .clients_created == .groups and .warmup_writes == .groups else .clients_created > .groups end)' artifacts/coordinator-scale.json
           jq -e '.batch_rejected == 0 and .batch_peak_requests <= 1024 and .batch_peak_bytes <= 16777216 and (if .batch_max_requests == 1 then .batches == .batched_requests else .batches < .batched_requests end)' artifacts/coordinator-scale.json
           jq -e '.snapshot_encoded_shards > 0 and .snapshot_reused_shards > .snapshot_encoded_shards and .snapshot_encoded_bytes > 0 and .snapshot_preparation_nanos > 0' artifacts/coordinator-scale.json
+          jq -e '.offset_read_snapshots >= (.groups * 2) and .offset_read_keys >= (.groups * 2) and .stable_offset_snapshots >= 0 and .transaction_visibility_snapshots >= 0' artifacts/coordinator-scale.json
       - name: Archive coordinator qualification evidence
         if: always()
         uses: actions/upload-artifact@v4

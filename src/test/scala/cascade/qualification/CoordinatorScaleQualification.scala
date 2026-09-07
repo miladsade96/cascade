@@ -35,10 +35,12 @@ final case class CoordinatorScaleReport(
     publicationBatches: Long = 0L, publicationBatchRequests: Long = 0L,
     publicationCommittedBatches: Long = 0L, publicationCommittedRequests: Long = 0L,
     publicationConflicts: Long = 0L, publicationFailed: Long = 0L, publicationRejected: Long = 0L,
-    publicationPeakRequests: Int = 0, publicationPeakBytes: Long = 0L
+    publicationPeakRequests: Int = 0, publicationPeakBytes: Long = 0L,
+    offsetReadSnapshots: Long = 0L, offsetReadKeys: Long = 0L,
+    stableOffsetSnapshots: Long = 0L, transactionVisibilitySnapshots: Long = 0L
 ):
   def json: String = batchingJson.dropRight(1) +
-    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos,"publication_max_requests":$publicationMaxRequests,"publication_linger_ms":$publicationLingerMillis,"publication_batches":$publicationBatches,"publication_batch_requests":$publicationBatchRequests,"publication_committed_batches":$publicationCommittedBatches,"publication_committed_requests":$publicationCommittedRequests,"publication_conflicts":$publicationConflicts,"publication_failed":$publicationFailed,"publication_rejected":$publicationRejected,"publication_peak_requests":$publicationPeakRequests,"publication_peak_bytes":$publicationPeakBytes}"""
+    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos,"publication_max_requests":$publicationMaxRequests,"publication_linger_ms":$publicationLingerMillis,"publication_batches":$publicationBatches,"publication_batch_requests":$publicationBatchRequests,"publication_committed_batches":$publicationCommittedBatches,"publication_committed_requests":$publicationCommittedRequests,"publication_conflicts":$publicationConflicts,"publication_failed":$publicationFailed,"publication_rejected":$publicationRejected,"publication_peak_requests":$publicationPeakRequests,"publication_peak_bytes":$publicationPeakBytes,"offset_read_snapshots":$offsetReadSnapshots,"offset_read_keys":$offsetReadKeys,"stable_offset_snapshots":$stableOffsetSnapshots,"transaction_visibility_snapshots":$transactionVisibilitySnapshots}"""
 
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
@@ -179,12 +181,15 @@ object CoordinatorScaleQualification:
       val coordinatorMetrics = metrics.map(_.coordinator)
       val batching = metrics.map(_.offsetBatch)
       val publications = metrics.map(_.coordinatorPublication)
+      val reads = metrics.map(_.coordinatorReads)
       require(batching.map(_.rejected).sum == 0L, "coordinator campaign exceeded offset batch admission")
       require(batching.forall(m => m.peakRequests <= batchConfig.maxPendingRequests && m.peakBytes <= batchConfig.maxPendingBytes),
         "offset batching exceeded its configured retained-work bounds")
       require(publications.map(_.rejected).sum == 0L, "coordinator campaign exceeded publication admission")
       require(publications.forall(m => m.peakRequests <= publicationConfig.maxPendingRequests &&
         m.peakBytes <= publicationConfig.maxPendingBytes), "controller publication exceeded its retained-work bounds")
+      require(reads.map(_.offsetSnapshots).sum >= groupCount.toLong * 2L,
+        "coordinator campaign did not exercise acknowledged offset views before and after failover")
       val admissionRejections = metrics.map(_.rejectedConnections).sum
       require(admissionRejections == 0L, s"coordinator capacity campaign hit connection admission: $admissionRejections")
       require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
@@ -218,7 +223,9 @@ object CoordinatorScaleQualification:
         publications.map(_.batches).sum, publications.map(_.batchRequests).sum,
         publications.map(_.committedBatches).sum, publications.map(_.committedRequests).sum,
         publications.map(_.conflictedRequests).sum, publications.map(_.failed).sum, publications.map(_.rejected).sum,
-        publications.map(_.peakRequests).max, publications.map(_.peakBytes).max)
+        publications.map(_.peakRequests).max, publications.map(_.peakBytes).max,
+        reads.map(_.offsetSnapshots).sum, reads.map(_.offsetKeys).sum,
+        reads.map(_.stableOffsetSnapshots).sum, reads.map(_.transactionVisibilitySnapshots).sum)
     catch
       case scala.util.control.NonFatal(error) =>
         System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")
