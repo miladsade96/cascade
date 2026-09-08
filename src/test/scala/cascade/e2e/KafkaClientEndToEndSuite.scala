@@ -71,6 +71,45 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("Apache Kafka 4.3 Admin client lists describes and deletes consumer groups") {
+    val directory = Files.createTempDirectory("cascade-group-admin-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val groupId = "admin-managed-group"
+      val topicPartition = TopicPartition("admin-managed-events", 0)
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic(topicPartition.topic(), 1, 1.toShort))).all().get()
+
+        val listings = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
+        assert(!listings.exists(_.groupId() == groupId))
+
+        val groupedConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(broker.bootstrapServers, groupId)
+        )
+        try
+          groupedConsumer.assign(java.util.List.of(topicPartition))
+          groupedConsumer.commitSync(Map(topicPartition -> OffsetAndMetadata(1L)).asJava)
+        finally groupedConsumer.close()
+
+        val managedListings = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
+        assert(managedListings.exists(_.groupId() == groupId))
+
+        val description = admin.describeConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS).get(groupId)
+        assertEquals(description.groupId(), groupId)
+        assertEquals(description.state().toString, "Empty")
+        assertEquals(description.members().size(), 0)
+
+        admin.deleteConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS)
+        val afterDelete = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
+        assert(!afterDelete.exists(_.groupId() == groupId))
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   test("Apache Kafka 4.3 consumer protocol receives a server-side assignment") {
     val directory = Files.createTempDirectory("cascade-modern-consumer-e2e")
     val broker = testBroker(directory)
