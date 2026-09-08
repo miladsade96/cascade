@@ -118,6 +118,7 @@ final class RequestHandler(
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
+      case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(body)
       case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.DescribeAcls => describeAcls(body, session)
@@ -423,6 +424,44 @@ final class RequestHandler(
         writer.writeString(group.groupId).writeString(group.protocolType): Unit
       }
     Some(writer.result())
+
+  private def describeGroups(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val groupIds = cursor.readArray(cursor.readString())
+    val includeAuthorizedOperations = version >= 3 && cursor.readBoolean()
+    cursor.ensureFullyRead()
+    val writer = ByteWriter()
+    if version >= 1 then writer.writeInt(0)
+    writer.writeArray(groupIds) { groupId =>
+      val (error, description) =
+        if !isCoordinatorFor(groupId) then Errors.NotCoordinator -> None
+        else if !isAuthorized(session, AclOperation.Describe, ResourceType.Group, groupId) then
+          Errors.GroupAuthorizationFailed -> None
+        else groupCoordinator.describeGroup(groupId).fold(Errors.GroupIdNotFound -> None)(Errors.None -> Some(_))
+      writer.writeShort(error).writeString(groupId)
+      writer.writeString(description.map(_.state).getOrElse(""))
+      writer.writeString(description.map(_.protocolType).getOrElse(""))
+      writer.writeString(description.map(_.protocolData).getOrElse(""))
+      writer.writeArray(description.toVector.flatMap(_.members)) { member =>
+        writer.writeString(member.memberId)
+        if version >= 4 then writer.writeNullableString(member.groupInstanceId)
+        writer.writeString(member.clientId)
+        writer.writeString(member.clientHost)
+        writer.writeByteArray(member.metadata.toArray)
+        writer.writeByteArray(member.assignment.toArray): Unit
+      }
+      if version >= 3 then
+        val operations =
+          if includeAuthorizedOperations && error == Errors.None then groupAuthorizedOperations(session, groupId)
+          else Int.MinValue
+        writer.writeInt(operations)
+    }
+    Some(writer.result())
+
+  private def groupAuthorizedOperations(session: ConnectionSession, groupId: String): Int =
+    Vector(AclOperation.Read, AclOperation.Delete, AclOperation.Describe).foldLeft(0) { (mask, operation) =>
+      if isAuthorized(session, operation, ResourceType.Group, groupId) then mask | (1 << operationCode(operation))
+      else mask
+    }
 
   private def consumerGroupHeartbeat(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readCompactString()
