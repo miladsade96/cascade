@@ -271,6 +271,26 @@ final class GroupCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("deletes an empty offset-only group and reports missing groups") {
+    val directory = Files.createTempDirectory("cascade-delete-empty-group-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    val key = GroupOffsetKey("workers", "events", 0)
+    try
+      val value = OffsetCommitValue(key, CommittedOffset(42L, -1, None, 1000L))
+      assertEquals(coordinator.commitOffsets("workers", -1, "", Vector(value)), Errors.None)
+      assert(coordinator.adminView.contains("workers"))
+
+      assertEquals(coordinator.deleteGroup("workers", () => Errors.None), Errors.None)
+      assertEquals(coordinator.fetchOffset(key), None)
+      assert(!coordinator.adminView.contains("workers"))
+      assertEquals(coordinator.deleteGroup("workers", () => Errors.None), Errors.GroupIdNotFound)
+      assertEquals(coordinator.deleteGroup("", () => Errors.None), Errors.InvalidGroupId)
+      assertEquals(coordinator.deleteGroup("workers", () => Errors.NotCoordinator), Errors.NotCoordinator)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   private def command(
       memberId: String,
       metadata: Array[Byte],
