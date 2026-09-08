@@ -26,6 +26,9 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
   private val journals = mutable.HashMap.empty[Int, CoordinatorShardJournal]
   private val pending = mutable.HashMap.empty[CoordinatorTransactionId, CoordinatorDelta]
   private val decisions = mutable.HashSet.empty[CoordinatorTransactionId]
+  private val preparedParts = mutable.HashMap.empty[CoordinatorTransactionId, mutable.Set[Int]]
+  private val decisionParts = mutable.HashMap.empty[CoordinatorTransactionId, mutable.Set[Int]]
+  private val finalizedParts = mutable.HashMap.empty[CoordinatorTransactionId, mutable.Set[Int]]
   private var state = baseline
   private var preparedCount = 0L
   private var decidedCount = 0L
@@ -38,7 +41,10 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
 
   def prepare(transactionId: CoordinatorTransactionId, delta: CoordinatorDelta, expectedTerm: Long): Short = synchronized {
     pending.get(transactionId) match
-      case Some(existing) => if existing == delta then Errors.None else Errors.InvalidRequest
+      case Some(existing) if existing != delta => Errors.InvalidRequest
+      case Some(existing) =>
+        appendMissing(existing, CoordinatorQuorumRecord.prepare(transactionId, existing), preparedParts, transactionId)
+        Errors.None
       case None if delta.controllerTerm != expectedTerm => Errors.CoordinatorLoadInProgress
       case None if delta.updates.exists(update => state.shardVersion(update.id) != update.expectedVersion) =>
         conflictCount += 1L
@@ -47,8 +53,8 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
         conflictCount += 1L
         Errors.CoordinatorLoadInProgress
       case None =>
-        appendAll(delta, CoordinatorQuorumRecord.prepare(transactionId, delta))
         pending.update(transactionId, delta)
+        appendMissing(delta, CoordinatorQuorumRecord.prepare(transactionId, delta), preparedParts, transactionId)
         preparedCount += 1L
         Errors.None
   }
@@ -56,11 +62,11 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
   def decide(transactionId: CoordinatorTransactionId): Short = synchronized {
     pending.get(transactionId) match
       case None => Errors.CoordinatorLoadInProgress
-      case Some(_) if decisions(transactionId) => Errors.None
       case Some(delta) =>
-        appendAll(delta, CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Decide))
-        decisions += transactionId
-        decidedCount += 1L
+        appendMissing(delta, CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Decide), decisionParts, transactionId)
+        if complete(transactionId, delta, decisionParts) && !decisions(transactionId) then
+          decisions += transactionId
+          decidedCount += 1L
         Errors.None
   }
 
@@ -74,10 +80,14 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
             conflictCount += 1L
             Left(Errors.CoordinatorLoadInProgress)
           case Right(next) =>
-            appendAll(delta, CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Finalize))
+            appendMissing(delta, CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Finalize), finalizedParts, transactionId)
+            if !complete(transactionId, delta, finalizedParts) then return Left(Errors.CoordinatorNotAvailable)
             state = next
             pending.remove(transactionId): Unit
             decisions -= transactionId
+            preparedParts.remove(transactionId): Unit
+            decisionParts.remove(transactionId): Unit
+            finalizedParts.remove(transactionId): Unit
             finalizedCount += 1L
             Right(next)
   }
@@ -86,6 +96,9 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
     pending.remove(transactionId).foreach { delta =>
       appendAll(delta, CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Abort))
       decisions -= transactionId
+      preparedParts.remove(transactionId): Unit
+      decisionParts.remove(transactionId): Unit
+      finalizedParts.remove(transactionId): Unit
       abortedCount += 1L
     }
   }
@@ -113,6 +126,24 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
 
   private def appendAll(delta: CoordinatorDelta, record: CoordinatorQuorumRecord): Unit =
     delta.updates.map(_.id).distinct.sorted.foreach(id => journal(id).append(record))
+
+  private def appendMissing(
+      delta: CoordinatorDelta,
+      record: CoordinatorQuorumRecord,
+      parts: mutable.Map[CoordinatorTransactionId, mutable.Set[Int]],
+      transactionId: CoordinatorTransactionId
+  ): Unit =
+    val completed = parts.getOrElseUpdate(transactionId, mutable.HashSet.empty)
+    delta.updates.map(_.id).distinct.sorted.filterNot(completed).foreach { id =>
+      journal(id).append(record)
+      completed += id
+    }
+
+  private def complete(
+      transactionId: CoordinatorTransactionId,
+      delta: CoordinatorDelta,
+      parts: mutable.Map[CoordinatorTransactionId, mutable.Set[Int]]
+  ): Boolean = delta.updates.forall(update => parts.get(transactionId).exists(_(update.id)))
 
   private def journal(shard: Int): CoordinatorShardJournal =
     journals.getOrElseUpdate(shard, CoordinatorShardJournal(CoordinatorShardJournal.path(root, shard), shard))
@@ -178,7 +209,17 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
               progressed = true
           else if shards.subsetOf(recovered.preparedShards) then
             pending.update(transactionId, delta)
+            preparedParts.update(transactionId, mutable.HashSet.from(recovered.preparedShards))
+            decisionParts.update(transactionId, mutable.HashSet.from(recovered.decidedShards))
+            finalizedParts.update(transactionId, mutable.HashSet.from(recovered.finalizedShards))
             if shards.subsetOf(recovered.decidedShards) then decisions += transactionId
+            remaining.remove(transactionId): Unit
+            progressed = true
+          else if recovered.preparedShards.nonEmpty then
+            pending.update(transactionId, delta)
+            preparedParts.update(transactionId, mutable.HashSet.from(recovered.preparedShards))
+            decisionParts.update(transactionId, mutable.HashSet.from(recovered.decidedShards))
+            finalizedParts.update(transactionId, mutable.HashSet.from(recovered.finalizedShards))
             remaining.remove(transactionId): Unit
             progressed = true
         }
