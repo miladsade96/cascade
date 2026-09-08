@@ -19,3 +19,16 @@ final class CoordinatorShardSuite extends FunSuite:
     assert(counts.values.forall(count => count > 90 && count < 220), counts)
     assert((0L until 10000L).forall(id => CoordinatorShard.producer(id, None) >= 64))
   }
+
+  test("typed coordinator keys route every key in one shard to one owner key") {
+    val first = CoordinatorKey.group("orders-a")
+    val sameShard = Iterator.from(0).map(index => CoordinatorKey.group(s"orders-$index"))
+      .find(candidate => candidate.value != first.value && candidate.shard == first.shard).get
+    val transaction = CoordinatorKey.transaction("orders-a")
+
+    assertEquals(first.routingKey, sameShard.routingKey)
+    assertNotEquals(first.shard, transaction.shard)
+    assertEquals(first.routingKey, CoordinatorShard.routingKey(first.shard))
+    intercept[IllegalArgumentException](CoordinatorKey.group(""))
+    intercept[IllegalArgumentException](CoordinatorShard.routingKey(-1))
+  }
