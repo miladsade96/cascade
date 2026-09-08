@@ -112,7 +112,7 @@ final class RequestHandler(
       case ApiKey.Metadata     => metadata(header.apiVersion, body, session)
       case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body)
       case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body)
-      case ApiKey.FindCoordinator => findCoordinator(body)
+      case ApiKey.FindCoordinator => findCoordinator(body, session)
       case ApiKey.JoinGroup    => joinGroup(header, body)
       case ApiKey.Heartbeat    => heartbeat(body)
       case ApiKey.LeaveGroup   => leaveGroup(body)
@@ -306,20 +306,32 @@ final class RequestHandler(
       .decode(ByteBuffer.wrap(bytes, offset, length))
       .toString
 
-  private def findCoordinator(cursor: ByteCursor): Option[Array[Byte]] =
+  private def findCoordinator(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val coordinatorKey = cursor.readString()
     val coordinatorType = cursor.readByte()
     cursor.ensureFullyRead()
     val supported = coordinatorType == 0.toByte || coordinatorType == 1.toByte
+    val authorized =
+      coordinatorType match
+        case 0 => isAuthorized(session, AclOperation.Describe, ResourceType.Group, coordinatorKey)
+        case 1 => isAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, coordinatorKey)
+        case _ => true
     val coordinator =
       if clusterManager.isEnabled then clusterManager.coordinatorNode(coordinatorKey)
       else Some(ClusterNode(config.nodeId, config.advertisedHost, advertisedPort))
-    val available = supported && coordinator.nonEmpty
+    val available = supported && authorized && coordinator.nonEmpty
+    val error =
+      if !supported then Errors.CoordinatorNotAvailable
+      else if !authorized && coordinatorType == 0.toByte then Errors.GroupAuthorizationFailed
+      else if !authorized then Errors.TransactionalIdAuthorizationFailed
+      else if coordinator.isEmpty then Errors.CoordinatorNotAvailable
+      else Errors.None
     val writer = ByteWriter()
     writer.writeInt(0)
-    writer.writeShort(if available then Errors.None else Errors.CoordinatorNotAvailable)
+    writer.writeShort(error)
     writer.writeNullableString(
       if !supported then Some("unsupported coordinator type")
+      else if !authorized then Some("coordinator authorization failed")
       else if coordinator.isEmpty then Some("controller election is in progress")
       else None
     )
@@ -1580,11 +1592,6 @@ final class RequestHandler(
       case ApiKey.OffsetCommit | ApiKey.OffsetFetch | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
           ApiKey.SyncGroup =>
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
-      case ApiKey.FindCoordinator =>
-        val resource = cursor.readString()
-        val coordinatorType = cursor.readByte()
-        if coordinatorType == 0.toByte then requireAuthorized(session, AclOperation.Describe, ResourceType.Group, resource)
-        else requireAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, resource)
       case ApiKey.InitProducerId =>
         cursor.readNullableString() match
           case Some(transactionalId) =>
