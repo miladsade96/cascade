@@ -210,6 +210,26 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("durable group removal survives offset-store restart") {
+    val directory = Files.createTempDirectory("cascade-offset-group-removal-restart-test")
+    val path = directory.resolve("offsets.log")
+    val removed = OffsetCommitValue(GroupOffsetKey("workers", "events", 0), CommittedOffset(10L, -1, None, 1000L))
+    val retained = OffsetCommitValue(GroupOffsetKey("billing", "events", 0), CommittedOffset(20L, -1, None, 1000L))
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(removed, retained))
+        assertEquals(store.removeGroup("workers"), Vector(removed.key))
+      finally store.close()
+
+      val recovered = OffsetStore(path)
+      try
+        assertEquals(recovered.all("workers"), Vector.empty)
+        assertEquals(recovered.all("billing"), Vector(retained.key -> retained.value))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
