@@ -1,6 +1,11 @@
 package cascade.group
 
+import cascade.coordinator.CoordinatorCheckpoint
+import cascade.protocol.Errors
+import java.nio.file.Files
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
+import scala.jdk.CollectionConverters.*
 
 final class GroupAdminReadViewSuite extends FunSuite:
   test("indexes a classic group with its selected metadata and assignment") {
@@ -69,3 +74,46 @@ final class GroupAdminReadViewSuite extends FunSuite:
     assertEquals(view.get("z-consumer").map(_.protocolType), Some("consumer"))
     assertEquals(view.get("z-consumer").map(_.protocolData), Some("uniform"))
   }
+
+  for accepted <- Vector(true, false) do
+    test(s"admin reads expose only acknowledged checkpoints: accepted=$accepted") {
+      val directory = Files.createTempDirectory("cascade-group-admin-view")
+      val coordinator = GroupCoordinator(directory.resolve("offsets.log"), durableLocal = false, scheduleExpiration = false)
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val executor = Executors.newSingleThreadExecutor()
+      try
+        assertEquals(coordinator.commitOffsets("existing", -1, "", Vector(offset("existing"))), Errors.None)
+        val baseline = coordinator.snapshotBytes.toVector
+        coordinator.attachCheckpoint(new CoordinatorCheckpoint:
+          override def commit(): Boolean =
+            entered.countDown()
+            if !release.await(5L, TimeUnit.SECONDS) then throw IllegalStateException("admin publication timed out")
+            if !accepted then coordinator.installSnapshot(baseline)
+            accepted
+        )
+        val write = executor.submit[Short](() =>
+          coordinator.commitOffsets("new-group", -1, "", Vector(offset("new-group")))
+        )
+        assert(entered.await(5L, TimeUnit.SECONDS))
+
+        val during = coordinator.adminView
+        assert(during.contains("existing"))
+        assert(!during.contains("new-group"))
+
+        release.countDown()
+        assertEquals(write.get(5L, TimeUnit.SECONDS), if accepted then Errors.None else Errors.CoordinatorNotAvailable)
+        assertEquals(coordinator.adminView.contains("new-group"), accepted)
+        assert(!during.contains("new-group"))
+      finally
+        release.countDown()
+        executor.shutdownNow(): Unit
+        executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
+        coordinator.close()
+        val paths = Files.walk(directory)
+        try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
+        finally paths.close()
+    }
+
+  private def offset(groupId: String): OffsetCommitValue =
+    OffsetCommitValue(GroupOffsetKey(groupId, "events", 0), CommittedOffset(10L, -1, None, 1000L))
