@@ -291,6 +291,35 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("rejects deletion of active classic and consumer-protocol groups") {
+    val directory = Files.createTempDirectory("cascade-delete-active-group-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    try
+      val classic = coordinator.join(command("", Array[Byte](1)))
+      assertEquals(classic.errorCode, Errors.MemberIdRequired)
+      assertEquals(coordinator.deleteGroup("workers", () => Errors.None), Errors.NonEmptyGroup)
+
+      val consumer = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "modern-workers",
+          "member-a",
+          0,
+          None,
+          None,
+          30_000,
+          Some(Vector("events")),
+          Some("uniform"),
+          Some(Vector.empty)
+        ),
+        _ => 1
+      )
+      assertEquals(consumer.errorCode, Errors.None)
+      assertEquals(coordinator.deleteGroup("modern-workers", () => Errors.None), Errors.NonEmptyGroup)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   private def command(
       memberId: String,
       metadata: Array[Byte],
