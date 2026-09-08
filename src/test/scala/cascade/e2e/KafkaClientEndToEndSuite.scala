@@ -21,7 +21,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.config.ConfigResource
-import org.apache.kafka.common.errors.{FencedInstanceIdException, GroupNotEmptyException, InvalidReplicaAssignmentException, NoReassignmentInProgressException}
+import org.apache.kafka.common.errors.{FencedInstanceIdException, GroupIdNotFoundException, GroupNotEmptyException, InvalidReplicaAssignmentException, NoReassignmentInProgressException}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
 
@@ -643,6 +643,12 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         consumer.subscribe(java.util.List.of("group-failover-events"))
         assertEquals(pollValues(consumer, expected = 10), (0 until 10).map(index => s"before-$index").toVector)
         consumer.commitSync()
+        assert(admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala.exists(_.groupId() == "failover-workers"))
+        assertEquals(
+          admin.describeConsumerGroups(java.util.List.of("failover-workers")).all().get(10, TimeUnit.SECONDS)
+            .get("failover-workers").groupId(),
+          "failover-workers"
+        )
 
         val firstController = awaitController(admin)
         brokers(firstController - 1).close()
@@ -669,6 +675,18 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           val partition = TopicPartition("group-failover-events", 0)
           assertEquals(Option(verifier.committed(java.util.Set.of(partition)).get(partition)).map(_.offset()), Some(15L))
         finally verifier.close()
+
+        assertEquals(
+          admin.describeConsumerGroups(java.util.List.of("failover-workers")).all().get(10, TimeUnit.SECONDS)
+            .get("failover-workers").groupId(),
+          "failover-workers"
+        )
+        consumer.close()
+        admin.deleteConsumerGroups(java.util.List.of("failover-workers")).all().get(10, TimeUnit.SECONDS)
+        val deleted = intercept[ExecutionException] {
+          admin.describeConsumerGroups(java.util.List.of("failover-workers")).all().get(10, TimeUnit.SECONDS)
+        }
+        assert(deleted.getCause.isInstanceOf[GroupIdNotFoundException])
       finally
         consumer.close()
         admin.close(Duration.ofSeconds(5))
