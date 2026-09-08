@@ -31,6 +31,24 @@ final class CoordinatorReadMetricsSuite extends FunSuite:
     assertEquals(metrics.snapshot.offsetKeys, 0L)
   }
 
+  test("records group administration without group ID labels") {
+    val metrics = CoordinatorReadMetrics()
+    metrics.recordGroupList(3)
+    metrics.recordGroupList(-1)
+    metrics.recordGroupDescribe(found = true)
+    metrics.recordGroupDescribe(found = false)
+    metrics.recordGroupDelete(succeeded = true)
+    metrics.recordGroupDelete(succeeded = false)
+
+    val snapshot = metrics.snapshot
+    assertEquals(snapshot.groupListSnapshots, 2L)
+    assertEquals(snapshot.groupListEntries, 3L)
+    assertEquals(snapshot.groupDescribeSnapshots, 2L)
+    assertEquals(snapshot.groupDescribeHits, 1L)
+    assertEquals(snapshot.groupDeleteAttempts, 2L)
+    assertEquals(snapshot.groupDeleteFailures, 1L)
+  }
+
   test("retains exact totals under concurrent read traffic") {
     val metrics = CoordinatorReadMetrics()
     val workers = 8

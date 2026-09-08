@@ -91,28 +91,34 @@ final class GroupCoordinator(
 
   private[cascade] def listGroups(states: Set[String]): Vector[GroupAdminDescription] =
     val view = acknowledgedAdmin
-    if states.isEmpty then view.groups
-    else view.groups.filter(group => states(group.state))
+    val result = if states.isEmpty then view.groups else view.groups.filter(group => states(group.state))
+    readMetrics.recordGroupList(result.size)
+    result
 
   private[cascade] def describeGroup(groupId: String): Option[GroupAdminDescription] =
-    acknowledgedAdmin.get(groupId)
+    val result = acknowledgedAdmin.get(groupId)
+    readMetrics.recordGroupDescribe(result.nonEmpty)
+    result
 
   private[cascade] def deleteGroup(groupId: String, admission: () => Short): Short = stateLock.synchronized {
+    def complete(error: Short): Short =
+      readMetrics.recordGroupDelete(error == Errors.None)
+      error
     val gate = admission()
-    if gate != Errors.None then return gate
-    if groupId.isEmpty then return Errors.InvalidGroupId
+    if gate != Errors.None then return complete(gate)
+    if groupId.isEmpty then return complete(Errors.InvalidGroupId)
     val activeClassic = groups.get(groupId).exists(group =>
       group.phase != GroupStatus.Empty || group.members.nonEmpty || group.pendingMemberIds.nonEmpty
     )
     val activeConsumer = consumerGroups.get(groupId).exists(_.members.nonEmpty)
-    if activeClassic || activeConsumer then return Errors.NonEmptyGroup
+    if activeClassic || activeConsumer then return complete(Errors.NonEmptyGroup)
     val exists = groups.contains(groupId) || consumerGroups.contains(groupId) || offsets.entries.exists(_.key.groupId == groupId)
-    if !exists then return Errors.GroupIdNotFound
+    if !exists then return complete(Errors.GroupIdNotFound)
 
     groups.remove(groupId): Unit
     consumerGroups.remove(groupId): Unit
     offsets.removeGroup(groupId, durableLocal, publish = false)
-    if checkpointState() then Errors.None else Errors.CoordinatorNotAvailable
+    complete(if checkpointState() then Errors.None else Errors.CoordinatorNotAvailable)
   }
 
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
