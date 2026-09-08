@@ -119,6 +119,7 @@ final class RequestHandler(
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
       case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
+      case ApiKey.DeleteGroups => deleteGroups(body, session)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(body)
       case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.DescribeAcls => describeAcls(body, session)
@@ -462,6 +463,21 @@ final class RequestHandler(
       if isAuthorized(session, operation, ResourceType.Group, groupId) then mask | (1 << operationCode(operation))
       else mask
     }
+
+  private def deleteGroups(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val groupIds = cursor.readArray(cursor.readString())
+    cursor.ensureFullyRead()
+    val results = groupIds.map { groupId =>
+      val error =
+        if !isAuthorized(session, AclOperation.Delete, ResourceType.Group, groupId) then Errors.GroupAuthorizationFailed
+        else groupCoordinator.deleteGroup(groupId, () => if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
+      groupId -> error
+    }
+    val writer = ByteWriter().writeInt(0)
+    writer.writeArray(results) { case (groupId, error) =>
+      writer.writeString(groupId).writeShort(error): Unit
+    }
+    Some(writer.result())
 
   private def consumerGroupHeartbeat(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readCompactString()
