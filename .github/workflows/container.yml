@@ -77,6 +77,13 @@ jobs:
           cascade.fault.NetworkFaultControllerSuite
           cascade.cluster.CoordinatorReadIsolationQuorumSuite"
 
+      - name: Qualify Kafka consumer group administration
+        run: >-
+          ./sbt "testOnly cascade.group.GroupAdminReadViewSuite
+          cascade.group.GroupCoordinatorSuite
+          cascade.broker.BrokerIntegrationSuite
+          cascade.e2e.AclAdminEndToEndSuite"
+
       - name: Run the complete Scala test suite
         run: |
           chmod 0755 sbt
