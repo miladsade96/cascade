@@ -204,6 +204,44 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("describes acknowledged groups with Kafka DescribeGroups v4") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("describe-events", correlationId = 64))
+        request(output, input, offsetCommitV5Request("describe-readers", "describe-events", 11L, correlationId = 65))
+
+        val writer = requestHeader(ApiKey.DescribeGroups, 4, 66)
+        writer.writeArray(Vector("describe-readers", "missing"))(writer.writeString).writeBoolean(true)
+        val response = request(output, input, writer.result())
+        assertEquals(response.readInt(), 66)
+        assertEquals(response.readInt(), 0)
+        val groups = response.readArray {
+          val error = response.readShort()
+          val groupId = response.readString()
+          val state = response.readString()
+          val protocolType = response.readString()
+          response.readString()
+          val members = response.readArray {
+            response.readString()
+            response.readNullableString()
+            response.readString()
+            response.readString()
+            response.readByteArray()
+            response.readByteArray()
+          }
+          val operations = response.readInt()
+          (groupId, error, state, protocolType, members.size, operations)
+        }
+        assertEquals(groups.head, ("describe-readers", Errors.None, "Empty", "", 0, 328))
+        assertEquals(groups(1), ("missing", Errors.GroupIdNotFound, "", "", 0, Int.MinValue))
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("idempotent producer retries return the original offset and reject sequence gaps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
