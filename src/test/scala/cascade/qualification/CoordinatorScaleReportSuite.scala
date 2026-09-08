@@ -33,7 +33,13 @@ final class CoordinatorScaleReportSuite extends FunSuite:
       offsetReadSnapshots = 3000L,
       offsetReadKeys = 3000L,
       stableOffsetSnapshots = 40L,
-      transactionVisibilitySnapshots = 80L
+      transactionVisibilitySnapshots = 80L,
+      quorumAttempts = 3010L,
+      quorumCommitted = 3000L,
+      quorumFailed = 10L,
+      quorumPeakInflight = 9,
+      shardJournalRecords = 27000L,
+      shardJournalBytes = 900000L
     )
 
     val json = report.json
@@ -45,5 +51,8 @@ final class CoordinatorScaleReportSuite extends FunSuite:
     assert(json.contains("\"offset_read_keys\":3000"))
     assert(json.contains("\"stable_offset_snapshots\":40"))
     assert(json.contains("\"transaction_visibility_snapshots\":80"))
+    assert(json.contains("\"quorum_committed\":3000"))
+    assert(json.contains("\"quorum_peak_inflight\":9"))
+    assert(json.contains("\"shard_journal_records\":27000"))
     assertEquals("\"offset_read_snapshots\"".r.findAllIn(json).size, 1)
   }

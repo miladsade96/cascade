@@ -37,10 +37,17 @@ final case class CoordinatorScaleReport(
     publicationConflicts: Long = 0L, publicationFailed: Long = 0L, publicationRejected: Long = 0L,
     publicationPeakRequests: Int = 0, publicationPeakBytes: Long = 0L,
     offsetReadSnapshots: Long = 0L, offsetReadKeys: Long = 0L,
-    stableOffsetSnapshots: Long = 0L, transactionVisibilitySnapshots: Long = 0L
+    stableOffsetSnapshots: Long = 0L, transactionVisibilitySnapshots: Long = 0L,
+    quorumAttempts: Long = 0L, quorumCommitted: Long = 0L, quorumFailed: Long = 0L,
+    quorumRejected: Long = 0L, quorumPeakInflight: Int = 0,
+    quorumPrepareMessages: Long = 0L, quorumDecisionMessages: Long = 0L,
+    quorumFinalizeMessages: Long = 0L, quorumAbortMessages: Long = 0L,
+    quorumPhaseNanos: Long = 0L, quorumRecordBytes: Long = 0L,
+    shardJournalRecords: Long = 0L, shardJournalBytes: Long = 0L,
+    shardJournalForceNanos: Long = 0L, shardJournalTruncatedBytes: Long = 0L
 ):
   def json: String = batchingJson.dropRight(1) +
-    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos,"publication_max_requests":$publicationMaxRequests,"publication_linger_ms":$publicationLingerMillis,"publication_batches":$publicationBatches,"publication_batch_requests":$publicationBatchRequests,"publication_committed_batches":$publicationCommittedBatches,"publication_committed_requests":$publicationCommittedRequests,"publication_conflicts":$publicationConflicts,"publication_failed":$publicationFailed,"publication_rejected":$publicationRejected,"publication_peak_requests":$publicationPeakRequests,"publication_peak_bytes":$publicationPeakBytes,"offset_read_snapshots":$offsetReadSnapshots,"offset_read_keys":$offsetReadKeys,"stable_offset_snapshots":$stableOffsetSnapshots,"transaction_visibility_snapshots":$transactionVisibilitySnapshots}"""
+    s""", "snapshot_encoded_shards":$snapshotEncodedShards,"snapshot_reused_shards":$snapshotReusedShards,"snapshot_encoded_bytes":$snapshotEncodedBytes,"snapshot_preparation_nanos":$snapshotPreparationNanos,"publication_max_requests":$publicationMaxRequests,"publication_linger_ms":$publicationLingerMillis,"publication_batches":$publicationBatches,"publication_batch_requests":$publicationBatchRequests,"publication_committed_batches":$publicationCommittedBatches,"publication_committed_requests":$publicationCommittedRequests,"publication_conflicts":$publicationConflicts,"publication_failed":$publicationFailed,"publication_rejected":$publicationRejected,"publication_peak_requests":$publicationPeakRequests,"publication_peak_bytes":$publicationPeakBytes,"offset_read_snapshots":$offsetReadSnapshots,"offset_read_keys":$offsetReadKeys,"stable_offset_snapshots":$stableOffsetSnapshots,"transaction_visibility_snapshots":$transactionVisibilitySnapshots,"quorum_attempts":$quorumAttempts,"quorum_committed":$quorumCommitted,"quorum_failed":$quorumFailed,"quorum_rejected":$quorumRejected,"quorum_peak_inflight":$quorumPeakInflight,"quorum_prepare_messages":$quorumPrepareMessages,"quorum_decision_messages":$quorumDecisionMessages,"quorum_finalize_messages":$quorumFinalizeMessages,"quorum_abort_messages":$quorumAbortMessages,"quorum_phase_nanos":$quorumPhaseNanos,"quorum_record_bytes":$quorumRecordBytes,"shard_journal_records":$shardJournalRecords,"shard_journal_bytes":$shardJournalBytes,"shard_journal_force_nanos":$shardJournalForceNanos,"shard_journal_truncated_bytes":$shardJournalTruncatedBytes}"""
 
   private def baseJson: String =
     f"""{"status":"passed","started_at":"$startedAt","revision":"$revision","release":"${cascade.BuildInfo.Version}","java_version":"${System.getProperty("java.version")}","available_processors":${Runtime.getRuntime.availableProcessors()},"groups":$groups,"concurrency":$concurrency,"rounds":$rounds,"verified":$verified,"writes":$writes,"write_seconds":$seconds%.3f,"writes_per_second":${writes / seconds}%.3f,"p50_ms":$p50Millis%.3f,"p95_ms":$p95Millis%.3f,"p99_ms":$p99Millis%.3f,"checkpoint_attempts":$checkpointAttempts,"checkpoint_failures":$checkpointFailures,"delta_bytes":$deltaBytes,"full_image_bytes":$fullImageBytes,"owner_ids":${owners.mkString("[", ",", "]")},"controller_failover":$controllerFailover,"restart_recovery":$restartRecovery,"journal_delta_bytes":$journalDeltaBytes,"journal_full_bytes":$journalFullBytes,"journal_checkpoint_bytes":$journalCheckpointBytes,"replication_delta_bytes":$replicationDeltaBytes,"replication_full_bytes":$replicationFullBytes,"replication_fallbacks":$replicationFallbacks}"""
@@ -181,6 +188,7 @@ object CoordinatorScaleQualification:
       val coordinatorMetrics = metrics.map(_.coordinator)
       val batching = metrics.map(_.offsetBatch)
       val publications = metrics.map(_.coordinatorPublication)
+      val quorums = metrics.map(_.coordinatorQuorum)
       val reads = metrics.map(_.coordinatorReads)
       require(batching.map(_.rejected).sum == 0L, "coordinator campaign exceeded offset batch admission")
       require(batching.forall(m => m.peakRequests <= batchConfig.maxPendingRequests && m.peakBytes <= batchConfig.maxPendingBytes),
@@ -192,8 +200,12 @@ object CoordinatorScaleQualification:
         "coordinator campaign did not exercise acknowledged offset views before and after failover")
       val admissionRejections = metrics.map(_.rejectedConnections).sum
       require(admissionRejections == 0L, s"coordinator capacity campaign hit connection admission: $admissionRejections")
-      require(metrics.map(_.metadataJournal.deltaBytes).sum > 0L, "incremental journal path was not exercised")
-      require(metrics.map(_.metadataTransfers.deltaBytes).sum > 0L, "incremental replication path was not exercised")
+      require(quorums.map(_.rejected).sum == 0L, "coordinator campaign exceeded shard quorum admission")
+      require(quorums.map(_.store.pending).sum == 0, "coordinator campaign left prepared shard transactions")
+      require(quorums.map(_.committed).sum > 0L, "independent shard quorum path was not exercised")
+      require(quorums.map(_.store.finalized).sum >= quorums.map(_.committed).sum * 2L,
+        "acknowledged shard transactions did not retain majority finalize evidence")
+      require(quorums.map(_.store.journalBytes).sum > 0L, "independent shard journal path was not exercised")
       // Restart every process from its existing disk, including the controller that missed the last phase.
       enter("full-restart")
       survivors.foreach(n => cluster.stop(n.id))
@@ -225,7 +237,14 @@ object CoordinatorScaleQualification:
         publications.map(_.conflictedRequests).sum, publications.map(_.failed).sum, publications.map(_.rejected).sum,
         publications.map(_.peakRequests).max, publications.map(_.peakBytes).max,
         reads.map(_.offsetSnapshots).sum, reads.map(_.offsetKeys).sum,
-        reads.map(_.stableOffsetSnapshots).sum, reads.map(_.transactionVisibilitySnapshots).sum)
+        reads.map(_.stableOffsetSnapshots).sum, reads.map(_.transactionVisibilitySnapshots).sum,
+        quorums.map(_.attempts).sum, quorums.map(_.committed).sum, quorums.map(_.failed).sum,
+        quorums.map(_.rejected).sum, quorums.map(_.peakInflight).max,
+        quorums.map(_.prepareMessages).sum, quorums.map(_.decisionMessages).sum,
+        quorums.map(_.finalizeMessages).sum, quorums.map(_.abortMessages).sum,
+        quorums.map(_.phaseNanos).sum, quorums.map(_.recordBytes).sum,
+        quorums.map(_.store.journalRecords).sum, quorums.map(_.store.journalBytes).sum,
+        quorums.map(_.store.forceNanos).sum, quorums.map(_.store.truncatedBytes).sum)
     catch
       case scala.util.control.NonFatal(error) =>
         System.err.println(s"COORDINATOR_SCALE_FAILURE phase=$phase")
