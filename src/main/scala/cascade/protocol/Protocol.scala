@@ -112,6 +112,7 @@ object Compatibility:
     ApiVersion(ApiKey.Heartbeat, 3, 3),
     ApiVersion(ApiKey.LeaveGroup, 2, 2),
     ApiVersion(ApiKey.SyncGroup, 3, 3),
+    ApiVersion(ApiKey.ListGroups, 0, 4),
     ApiVersion(ApiKey.SaslHandshake, 1, 1),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
     ApiVersion(ApiKey.CreateTopics, 2, 2),
@@ -142,6 +143,7 @@ object Compatibility:
   def isFlexibleRequest(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.ApiVersions && version >= 3) ||
       (apiKey == ApiKey.Metadata && version >= 9) ||
+      (apiKey == ApiKey.ListGroups && version >= 3) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
@@ -150,6 +152,7 @@ object Compatibility:
   // All other flexible APIs use response header v1.
   def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.Metadata && version >= 9) ||
+      (apiKey == ApiKey.ListGroups && version >= 3) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
