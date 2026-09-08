@@ -87,6 +87,19 @@
         {"expr": "sum(rate(cascade_coordinator_transaction_visibility_snapshots_total[5m]))", "legendFormat": "transaction visibility", "refId": "D"}
       ],
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer group administration",
+      "targets": [
+        {"expr": "sum(rate(cascade_coordinator_group_list_snapshots_total[5m]))", "legendFormat": "list requests", "refId": "A"},
+        {"expr": "sum(rate(cascade_coordinator_group_list_entries_total[5m]))", "legendFormat": "listed groups", "refId": "B"},
+        {"expr": "sum(rate(cascade_coordinator_group_describe_snapshots_total[5m]))", "legendFormat": "describe requests", "refId": "C"},
+        {"expr": "sum(rate(cascade_coordinator_group_describe_hits_total[5m]))", "legendFormat": "describe hits", "refId": "D"},
+        {"expr": "sum(rate(cascade_coordinator_group_delete_attempts_total[5m]))", "legendFormat": "delete attempts", "refId": "E"},
+        {"expr": "sum(rate(cascade_coordinator_group_delete_failures_total[5m]))", "legendFormat": "delete failures", "refId": "F"}
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28}
     }
   ],
   "refresh": "15s",

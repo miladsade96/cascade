@@ -131,6 +131,21 @@ final class DeploymentArtifactsSuite extends FunSuite:
     metrics.foreach(metric => assertEquals(occurrences(dashboard, metric), 1))
   }
 
+  test("dashboard exposes bounded consumer group administration rates") {
+    val dashboard = read("deploy/kubernetes/dashboards/cascade.json")
+    val metrics = Vector(
+      "cascade_coordinator_group_list_snapshots_total",
+      "cascade_coordinator_group_list_entries_total",
+      "cascade_coordinator_group_describe_snapshots_total",
+      "cascade_coordinator_group_describe_hits_total",
+      "cascade_coordinator_group_delete_attempts_total",
+      "cascade_coordinator_group_delete_failures_total"
+    )
+
+    assert(dashboard.contains("Consumer group administration"))
+    metrics.foreach(metric => assertEquals(occurrences(dashboard, metric), 1))
+  }
+
   private def read(path: String): String = Files.readString(Paths.get(path))
 
   private def occurrences(source: String, value: String): Int =
