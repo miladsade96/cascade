@@ -1,0 +1,97 @@
+package cascade.coordinator
+
+import cascade.cluster.CoordinatorMetadata
+import cascade.group.{CommittedOffset, GroupCodec, GroupImage, GroupOffsetKey, GroupShardCodec, OffsetCommitValue}
+import cascade.protocol.{ByteWriter, Errors}
+import java.nio.file.Files
+import munit.FunSuite
+
+final class CoordinatorShardStoreSuite extends FunSuite:
+  private val baseline = CoordinatorMetadata.Empty
+
+  test("finalizes one shard without rewriting unrelated shard journals") {
+    val directory = Files.createTempDirectory("cascade-coordinator-store")
+    val (group, delta) = groupDelta("orders", 41L, 7L)
+    val transaction = CoordinatorTransactionId(1L, 1L)
+    val store = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(store.prepare(transaction, delta, 7L), Errors.None)
+      assertEquals(store.decide(transaction), Errors.None)
+      val committed = store.finalizeTransaction(transaction).toOption.get
+      assertEquals(committed.shardVersion(CoordinatorShard.group(group)), 1L)
+      assertEquals(committed.groupImage.offsets.map(_.value.offset), Vector(41L))
+      assertEquals(Files.list(directory).count(), 1L)
+      assertEquals(store.snapshot.finalized, 1L)
+      assertEquals(store.snapshot.pending, 0)
+    finally store.close()
+  }
+
+  test("recovers a decided transaction and finalizes it after restart") {
+    val directory = Files.createTempDirectory("cascade-coordinator-decided")
+    val (_, delta) = groupDelta("payments", 82L, 9L)
+    val transaction = CoordinatorTransactionId(2L, 2L)
+    val first = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(first.prepare(transaction, delta, 9L), Errors.None)
+      assertEquals(first.decide(transaction), Errors.None)
+    finally first.close()
+
+    val recovered = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(recovered.snapshot.pending, 1)
+      assertEquals(recovered.decide(transaction), Errors.None)
+      assertEquals(recovered.finalizeTransaction(transaction).toOption.get.groupImage.offsets.head.value.offset, 82L)
+    finally recovered.close()
+  }
+
+  test("multi-shard transactions recover atomically only after every finalize marker") {
+    val directory = Files.createTempDirectory("cascade-coordinator-atomic")
+    val (_, groupChange) = groupDelta("atomic", 123L, 11L)
+    val allocator = CoordinatorShardUpdate(
+      CoordinatorShard.Allocator,
+      baseline.shardVersion(CoordinatorShard.Allocator),
+      ByteWriter().writeLong(2L).result().toVector
+    )
+    val delta = groupChange.copy(updates = groupChange.updates :+ allocator)
+    val transaction = CoordinatorTransactionId(3L, 3L)
+    val store = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(store.prepare(transaction, delta, 11L), Errors.None)
+      assertEquals(store.decide(transaction), Errors.None)
+      val committed = store.finalizeTransaction(transaction).toOption.get
+      assertEquals(committed.groupImage.offsets.head.value.offset, 123L)
+      assertEquals(committed.deliveryImage.nextProducerId, 2L)
+      assertEquals(Files.list(directory).count(), 2L)
+    finally store.close()
+
+    val recovered = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(recovered.metadata.groupImage.offsets.head.value.offset, 123L)
+      assertEquals(recovered.metadata.deliveryImage.nextProducerId, 2L)
+    finally recovered.close()
+  }
+
+  test("rejects overlap and releases a shard after an abort") {
+    val directory = Files.createTempDirectory("cascade-coordinator-conflict")
+    val (_, first) = groupDelta("conflict", 1L, 4L)
+    val second = first.copy(updates = first.updates.map(_.copy(payload = first.updates.head.payload.updated(0, 1.toByte))))
+    val firstId = CoordinatorTransactionId(4L, 1L)
+    val secondId = CoordinatorTransactionId(4L, 2L)
+    val store = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(store.prepare(firstId, first, 4L), Errors.None)
+      assertEquals(store.prepare(secondId, second, 4L), Errors.CoordinatorLoadInProgress)
+      store.abort(firstId)
+      assertEquals(store.prepare(secondId, second, 4L), Errors.None)
+      assertEquals(store.snapshot.aborted, 1L)
+      assertEquals(store.snapshot.conflicts, 1L)
+    finally store.close()
+  }
+
+  private def groupDelta(seed: String, offset: Long, term: Long): (String, CoordinatorDelta) =
+    val group = Iterator.from(0).map(index => s"$seed-$index").find(value => CoordinatorShard.group(value) != 0).get
+    val shard = CoordinatorShard.group(group)
+    val value = OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, 1L))
+    val image = GroupCodec.encode(GroupImage(0L, Vector.empty, Vector(value))).toVector
+    val payload = GroupShardCodec.split(image)(shard)
+    group -> CoordinatorDelta(term, Vector(CoordinatorShardUpdate(shard, baseline.shardVersion(shard), payload)))
