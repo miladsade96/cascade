@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorShardState}
+import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -74,6 +74,23 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var current = metadataStore.map(_.metadata).getOrElse(ClusterMetadata.Empty)
   private var lastMetadataDelta: Option[MetadataDelta] = None
   private val metadataTransfers = MetadataTransferMetrics()
+  private val coordinatorShardStore = Option.when(enabled)(CoordinatorShardStore(
+    config.dataDirectory.resolve(".cascade").resolve("coordinator-quorum"),
+    current.coordinator
+  ))
+  if current.featureLevels.getOrElse(ClusterFeature.IndependentCoordinator, 0.toShort) >= 1 then
+    coordinatorShardStore.foreach(store => current = current.copy(coordinator = store.metadata))
+  private lazy val coordinatorShardQuorum = coordinatorShardStore.map { store =>
+    CoordinatorShardQuorum(
+      config.nodeId,
+      store,
+      config.coordinatorQuorum,
+      () => effectiveMembership,
+      () => currentTerm,
+      replicateCoordinatorQuorum,
+      installIndependentCoordinator
+    )
+  }
 
   def metadataJournalSnapshot: MetadataJournalSnapshot = metadataStore.map(_.snapshot).getOrElse(MetadataJournalSnapshot.Empty)
   def shardObjectSnapshot: ShardObjectSnapshot = metadataStore.map(_.objectSnapshot).getOrElse(ShardObjectSnapshot())
@@ -81,6 +98,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def coordinatorPublicationSnapshot: CoordinatorPublicationSnapshot =
     coordinatorPublisher.map(_.snapshot).getOrElse(CoordinatorPublicationSnapshot())
+
+  def coordinatorQuorumSnapshot: CoordinatorQuorumSnapshot =
+    coordinatorShardQuorum.map(_.snapshot).getOrElse(CoordinatorQuorumSnapshot())
 
   private val recoveredControllerState = controllerStore.map(_.state).getOrElse(ControllerState.Empty)
   private val initialControllerState =
@@ -193,7 +213,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def quorumMembership: QuorumMembership = effectiveMembership
 
-  def coordinatorMetadata: CoordinatorMetadata = current.coordinator
+  def coordinatorMetadata: CoordinatorMetadata =
+    if supportsFeature(ClusterFeature.IndependentCoordinator) then coordinatorShardQuorum.map(_.metadata).getOrElse(current.coordinator)
+    else current.coordinator
 
   def negotiatedCapabilities: Either[String, NegotiatedCapabilities] = synchronized {
     val committedVoterIds = effectiveMembership.voterIds
@@ -228,6 +250,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def commitCoordinatorDelta(delta: CoordinatorDelta): Boolean =
     if !supportsFeature(ClusterFeature.CoordinatorDeltas) then false
+    else if supportsFeature(ClusterFeature.IndependentCoordinator) then coordinatorShardQuorum.exists(_.commit(delta))
     else controllerNode match
       case Some(controller) if controller.id == config.nodeId =>
         coordinatorPublisher.exists(_.submit(delta) == Errors.None)
@@ -399,6 +422,19 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val delta = CoordinatorDeltaCodec.decode(cursor)
       val error = coordinatorPublisher.map(_.submit(delta)).getOrElse(Errors.UnsupportedVersion)
       ByteWriter().writeShort(error).result()
+    case api @ (InternalApi.CoordinatorShardPrepare | InternalApi.CoordinatorShardDecide |
+        InternalApi.CoordinatorShardFinalize | InternalApi.CoordinatorShardAbort) =>
+      val request = CoordinatorQuorumRequestCodec.decode(cursor)
+      val expectedPhase = api match
+        case InternalApi.CoordinatorShardPrepare  => CoordinatorQuorumPhase.Prepare
+        case InternalApi.CoordinatorShardDecide   => CoordinatorQuorumPhase.Decide
+        case InternalApi.CoordinatorShardFinalize => CoordinatorQuorumPhase.Finalize
+        case _                                    => CoordinatorQuorumPhase.Abort
+      val error =
+        if request.record.phase != expectedPhase then Errors.InvalidRequest
+        else if !supportsFeature(ClusterFeature.IndependentCoordinator) then Errors.UnsupportedVersion
+        else coordinatorShardQuorum.map(_.receive(request.record, request.controllerTerm)).getOrElse(Errors.CoordinatorNotAvailable)
+      ByteWriter().writeShort(error).result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataDeltaCommit => metadataDeltaCommit(cursor)
@@ -536,6 +572,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         executor.awaitTermination(5L, TimeUnit.SECONDS): Unit
       }
       coordinatorPublisher.foreach(_.close())
+      coordinatorShardQuorum.foreach(_.close())
       peerExecutor.shutdownNow(): Unit
       Option(coordinatorInstaller).foreach(_.close())
       peerExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
@@ -1209,10 +1246,36 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     metadataStore.foreach(_.commit(metadata))
     lastMetadataDelta = None
     current = metadata
+    if metadata.featureLevels.getOrElse(ClusterFeature.IndependentCoordinator, 0.toShort) >= 1 then
+      coordinatorShardQuorum.foreach(_.installBaseline(metadata.coordinator))
     applyMetadata(metadata)
     // The bounded installer never acquires the service lock on this publication thread.
     Option(coordinatorInstaller).foreach(_.offer(metadata.coordinator))
   }
+
+  private def installIndependentCoordinator(metadata: CoordinatorMetadata): Unit = synchronized {
+    if metadata.version >= current.coordinator.version then
+      current = current.copy(coordinator = metadata)
+      Option(coordinatorInstaller).foreach(_.offer(metadata))
+  }
+
+  private def replicateCoordinatorQuorum(
+      targets: Vector[ClusterNode],
+      record: CoordinatorQuorumRecord
+  ): Map[Int, Short] =
+    val api = record.phase match
+      case CoordinatorQuorumPhase.Prepare  => InternalApi.CoordinatorShardPrepare
+      case CoordinatorQuorumPhase.Decide   => InternalApi.CoordinatorShardDecide
+      case CoordinatorQuorumPhase.Finalize => InternalApi.CoordinatorShardFinalize
+      case CoordinatorQuorumPhase.Abort    => InternalApi.CoordinatorShardAbort
+    val request = CoordinatorQuorumRequest(currentTerm, record)
+    val payload = CoordinatorQuorumRequestCodec.encode(request)
+    callPeers(targets, config.peerTimeoutMillis) { node =>
+      val response = peerClient.call(node, api, payload, config.peerTimeoutMillis)
+      val error = response.readShort()
+      response.ensureFullyRead()
+      error
+    }.map((node, code) => node.id -> code).toMap
 
   private[cascade] def coordinatorStateInstalled(metadata: CoordinatorMetadata): Unit = synchronized {
     if metadata.version >= installedCoordinatorVersion then
