@@ -60,6 +60,30 @@ object CoordinatorShardState:
     }
     BatchMerge(candidate, accepted)
 
+  /** Joins independently advancing shard images without allowing an older shard to overwrite a newer one. */
+  def mergeMonotonic(left: CoordinatorMetadata, right: CoordinatorMetadata): Either[String, CoordinatorMetadata] =
+    try
+      val leftPayloads = left.shardPayloads
+      val rightPayloads = right.shardPayloads
+      val selected = Vector.tabulate(CoordinatorShard.Count) { shard =>
+        val comparison = java.lang.Long.compare(left.shardVersion(shard), right.shardVersion(shard))
+        if comparison > 0 then (left.shardVersion(shard), leftPayloads(shard))
+        else if comparison < 0 then (right.shardVersion(shard), rightPayloads(shard))
+        else
+          require(leftPayloads(shard) == rightPayloads(shard), s"coordinator shard $shard diverged at equal version")
+          (left.shardVersion(shard), leftPayloads(shard))
+      }
+      val version = math.max(left.version, right.version)
+      val payloads = selected.map(_._2)
+      Right(CoordinatorMetadata(
+        version,
+        math.max(left.ownerTerm, right.ownerTerm),
+        GroupShardCodec.merge(payloads.take(CoordinatorShard.Buckets), version),
+        DeliveryShardCodec.merge(payloads.drop(CoordinatorShard.Buckets), version),
+        selected.map(_._1)
+      ))
+    catch case NonFatal(error) => Left(error.getMessage)
+
   private def mergeOne(current: CoordinatorMetadata, delta: CoordinatorDelta, controllerTerm: Long): Either[String, CoordinatorMetadata] =
     if delta.controllerTerm != controllerTerm then Left("stale controller term")
     else if delta.updates.exists(update => current.shardVersion(update.id) != update.expectedVersion) then Left("stale coordinator shard")

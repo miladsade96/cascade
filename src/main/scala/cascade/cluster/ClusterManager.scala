@@ -1257,9 +1257,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   }
 
   private def installIndependentCoordinator(metadata: CoordinatorMetadata): Unit = synchronized {
-    if metadata.version >= current.coordinator.version then
-      current = current.copy(coordinator = metadata)
-      Option(coordinatorInstaller).foreach(_.offer(metadata))
+    CoordinatorShardState.mergeMonotonic(current.coordinator, metadata).foreach { merged =>
+      current = current.copy(coordinator = merged)
+      Option(coordinatorInstaller).foreach(_.offer(merged))
+    }
   }
 
   private def replicateCoordinatorQuorum(

@@ -78,13 +78,18 @@ final class CoordinatorStateMachine(
   private def install(metadata: CoordinatorMetadata): Unit = installLatest(metadata, force = false)
 
   private def installLatest(metadata: CoordinatorMetadata, force: Boolean): Unit = stateLock.synchronized {
-    if metadata.version > installedVersion || (force && metadata.version == installedVersion) then
+    val candidate =
+      if installedVersion < 0L then metadata
+      else CoordinatorShardState.mergeMonotonic(installed, metadata).getOrElse(installed)
+    val advancesShard = installedVersion < 0L || Vector.tabulate(CoordinatorShard.Count)(identity)
+      .exists(shard => candidate.shardVersion(shard) > installed.shardVersion(shard))
+    if advancesShard || force || candidate.ownerTerm > installed.ownerTerm then
       // Recovery/controller-term changes grant a fresh session window. Ordinary
       // checkpoints are not heartbeats and must not keep abandoned members alive.
-      groups.installCommittedImage(metadata.groupImage, renewSessions = installedVersion < 0L || metadata.ownerTerm != installed.ownerTerm)
-      delivery.installCommittedImage(metadata.deliveryImage)
-      installedVersion = metadata.version
-      installed = metadata
-      baseline = metadata.shardPayloads
-      cluster.coordinatorStateInstalled(metadata)
+      groups.installCommittedImage(candidate.groupImage, renewSessions = installedVersion < 0L || candidate.ownerTerm != installed.ownerTerm)
+      delivery.installCommittedImage(candidate.deliveryImage)
+      installedVersion = candidate.version
+      installed = candidate
+      baseline = candidate.shardPayloads
+      cluster.coordinatorStateInstalled(candidate)
   }

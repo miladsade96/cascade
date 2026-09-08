@@ -1,6 +1,7 @@
 package cascade.coordinator
 
 import cascade.cluster.CoordinatorMetadata
+import cascade.group.{CommittedOffset, GroupCodec, GroupImage, GroupOffsetKey, GroupShardCodec, OffsetCommitValue}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.CopyOnWriteArrayList
 import munit.FunSuite
@@ -32,3 +33,41 @@ final class CoordinatorImageInstallerSuite extends FunSuite:
       release.countDown()
       installer.close()
   }
+
+  test("equal global versions retain disjoint shard advances") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val complete = CountDownLatch(1)
+    val installed = CopyOnWriteArrayList[CoordinatorMetadata]()
+    val baseline = CoordinatorMetadata.Empty
+    val first = advanced(baseline, 1, 1L)
+    val second = advanced(baseline, 2, 2L)
+    val installer = CoordinatorImageInstaller { image =>
+      if image.version == 1L && installed.isEmpty then
+        entered.countDown()
+        release.await()
+      installed.add(image)
+      if image.shardVersion(1) == 1L && image.shardVersion(2) == 1L then complete.countDown()
+    }
+    try
+      installer.offer(first)
+      assert(entered.await(5L, TimeUnit.SECONDS))
+      installer.offer(first)
+      installer.offer(second)
+      release.countDown()
+      assert(complete.await(5L, TimeUnit.SECONDS))
+      val image = installed.asScala.last
+      assertEquals(image.shardVersion(1), 1L)
+      assertEquals(image.shardVersion(2), 1L)
+    finally
+      release.countDown()
+      installer.close()
+  }
+
+  private def advanced(base: CoordinatorMetadata, shard: Int, offset: Long): CoordinatorMetadata =
+    val group = Iterator.from(0).map(index => s"installer-$shard-$index").find(CoordinatorShard.group(_) == shard).get
+    val value = OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, 1L))
+    val image = GroupCodec.encode(GroupImage(1L, Vector.empty, Vector(value))).toVector
+    val payload = GroupShardCodec.split(image)(shard)
+    val update = CoordinatorShardUpdate(shard, base.shardVersion(shard), payload)
+    CoordinatorShardState.merge(base, CoordinatorDelta(0L, Vector(update)), 0L).toOption.get

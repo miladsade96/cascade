@@ -15,7 +15,8 @@ final class CoordinatorImageInstaller(install: CoordinatorMetadata => Unit) exte
   def offer(image: CoordinatorMetadata): Unit =
     if !closed.get() then
       val previous = pending.getAndUpdate { existing =>
-        if existing == null || image.version > existing.version then image else existing
+        if existing == null then image
+        else CoordinatorShardState.mergeMonotonic(existing, image).getOrElse(existing)
       }
       if previous == null then ready.release()
 
