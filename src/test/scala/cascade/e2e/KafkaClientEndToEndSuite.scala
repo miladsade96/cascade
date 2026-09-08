@@ -13,7 +13,7 @@ import java.util.Collection
 import java.util.Optional
 import java.util.Properties
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
-import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, ExecutionException, Executors, TimeUnit}
 import munit.FunSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, AlterConfigOp, ConfigEntry, NewPartitionReassignment, NewTopic, RaftVoterEndpoint}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata}
@@ -21,7 +21,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.config.ConfigResource
-import org.apache.kafka.common.errors.{FencedInstanceIdException, InvalidReplicaAssignmentException, NoReassignmentInProgressException}
+import org.apache.kafka.common.errors.{FencedInstanceIdException, GroupNotEmptyException, InvalidReplicaAssignmentException, NoReassignmentInProgressException}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import scala.jdk.CollectionConverters.*
 
@@ -104,6 +104,37 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         admin.deleteConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS)
         val afterDelete = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
         assert(!afterDelete.exists(_.groupId() == groupId))
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
+  test("Apache Kafka Admin client cannot delete an active consumer group") {
+    val directory = Files.createTempDirectory("cascade-active-group-admin-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val groupId = "active-admin-group"
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic("active-admin-events", 1, 1.toShort))).all().get()
+        val consumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(broker.bootstrapServers, groupId)
+        )
+        try
+          consumer.subscribe(java.util.List.of("active-admin-events"))
+          awaitAssignment(consumer)
+
+          val failure = intercept[ExecutionException] {
+            admin.deleteConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS)
+          }
+          assert(failure.getCause.isInstanceOf[GroupNotEmptyException])
+
+          val description = admin.describeConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS).get(groupId)
+          assertEquals(description.groupId(), groupId)
+          assert(!description.members().isEmpty)
+        finally consumer.close()
       finally admin.close(Duration.ofSeconds(5))
     finally
       broker.close()
