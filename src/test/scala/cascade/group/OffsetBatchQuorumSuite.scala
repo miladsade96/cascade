@@ -2,7 +2,7 @@ package cascade.group
 
 import cascade.cluster.{ClusterNode, CoordinatorRouting, InternalApi, MetadataStore, ShardStorageFixture}
 import cascade.backup.BackupRestore
-import cascade.coordinator.CoordinatorProbe
+import cascade.coordinator.{CoordinatorKey, CoordinatorProbe, CoordinatorShardStore}
 import cascade.fault.{FaultCluster, FaultSelector}
 import cascade.protocol.{ApiKey, ByteCursor, ByteWriter, Errors}
 import java.io.{DataInputStream, DataOutputStream}
@@ -25,9 +25,9 @@ final class OffsetBatchQuorumSuite extends FunSuite:
         CoordinatorProbe.activate(cluster.bootstrapServers)
         val controller = CoordinatorProbe.controller(cluster.nodes)
         val group = Iterator.from(0).map(i => s"batch-snapshot-$i")
-          .find(key => CoordinatorRouting.owner(key, cluster.nodes).exists(_.id == controller.id)).get
+          .find(key => CoordinatorRouting.owner(CoordinatorKey.group(key).routingKey, cluster.nodes).exists(_.id == controller.id)).get
         cluster.faults.observeReplies { (call, _) =>
-          if call.sourceId == controller.id && call.apiKey == InternalApi.MetadataDeltaCommit then
+          if call.sourceId == controller.id && call.apiKey == InternalApi.CoordinatorShardFinalize then
             persisted.countDown()
             if !release.await(3L, TimeUnit.SECONDS) then throw IllegalStateException("snapshot publication barrier timed out")
         }
@@ -44,10 +44,13 @@ final class OffsetBatchQuorumSuite extends FunSuite:
         assert(manifest.entries.exists(_.relativePath.contains(".shards/")))
         BackupRestore.restore(root.resolve("backup"), root.resolve("restored"))
         val recovered = MetadataStore(root.resolve("restored/.cascade/cluster-metadata.log"))
+        val shards = CoordinatorShardStore(root.resolve("restored/.cascade/coordinator-quorum"), recovered.metadata.coordinator)
         try
-          val offsets = GroupCodec.decode(recovered.metadata.coordinator.groupState.toArray).offsets
+          val offsets = shards.metadata.groupImage.offsets
           assertEquals(offsets.map(v => v.key.groupId -> v.value.offset), Vector(group -> 42L))
-        finally recovered.close()
+        finally
+          shards.close()
+          recovered.close()
       finally
         release.countDown()
         cluster.faults.heal()
@@ -65,7 +68,7 @@ final class OffsetBatchQuorumSuite extends FunSuite:
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       val groups = Iterator.from(0).map(i => s"batch-quorum-$i")
-        .filter(group => CoordinatorRouting.owner(group, cluster.nodes).exists(_.id == controller.id)).take(8).toVector
+        .filter(group => CoordinatorRouting.owner(CoordinatorKey.group(group).routingKey, cluster.nodes).exists(_.id == controller.id)).take(8).toVector
       def parallel(value: Long): Vector[Short] =
         val start = CountDownLatch(1)
         val results = groups.map(group => executor.submit[Short](() => { start.await(); commit(controller, group, value) }))
@@ -76,8 +79,7 @@ final class OffsetBatchQuorumSuite extends FunSuite:
       assertEquals(parallel(1L), Vector.fill(8)(Errors.None))
       val baseline = offsets
       cluster.nodes.filterNot(_.id == controller.id).foreach { node =>
-        cluster.faults.block(FaultSelector(controller.id, node.id, Some(InternalApi.MetadataDeltaCommit)))
-        cluster.faults.block(FaultSelector(controller.id, node.id, Some(InternalApi.MetadataCommit)))
+        cluster.faults.block(FaultSelector(controller.id, node.id, Some(InternalApi.CoordinatorShardPrepare)))
       }
       val failed = parallel(2L)
       assert(failed.forall(_ != Errors.None), s"unexpected acknowledgements: $failed")
