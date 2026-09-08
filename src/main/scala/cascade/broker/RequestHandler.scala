@@ -117,6 +117,7 @@ final class RequestHandler(
       case ApiKey.Heartbeat    => heartbeat(body)
       case ApiKey.LeaveGroup   => leaveGroup(body)
       case ApiKey.SyncGroup    => syncGroup(body)
+      case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(body)
       case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.DescribeAcls => describeAcls(body, session)
@@ -399,6 +400,29 @@ final class RequestHandler(
       if isCoordinatorFor(groupId) then groupCoordinator.sync(groupId, generationId, memberId, groupInstanceId, assignments)
       else SyncGroupResult(Errors.NotCoordinator, Array.emptyByteArray)
     Some(ByteWriter().writeInt(0).writeShort(result.errorCode).writeByteArray(result.assignment).result())
+
+  private def listGroups(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val states = if version >= 4 then cursor.readCompactArray(cursor.readCompactString()).toSet else Set.empty[String]
+    if version >= 3 then cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+    val groups = groupCoordinator.listGroups(states).filter(group =>
+      isCoordinatorFor(group.groupId) && isAuthorized(session, AclOperation.Describe, ResourceType.Group, group.groupId)
+    )
+    val writer = ByteWriter()
+    if version >= 1 then writer.writeInt(0)
+    writer.writeShort(Errors.None)
+    if version >= 3 then
+      writer.writeCompactArray(groups) { group =>
+        writer.writeCompactString(group.groupId).writeCompactString(group.protocolType)
+        if version >= 4 then writer.writeCompactString(group.state)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields()
+    else
+      writer.writeArray(groups) { group =>
+        writer.writeString(group.groupId).writeString(group.protocolType): Unit
+      }
+    Some(writer.result())
 
   private def consumerGroupHeartbeat(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readCompactString()
