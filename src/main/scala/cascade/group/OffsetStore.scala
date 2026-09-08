@@ -143,6 +143,26 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     expired.sortBy(key => (key.groupId, key.topic, key.partition))
   }
 
+  /** Removes every offset for one administratively deleted group. */
+  def removeGroup(
+      groupId: String,
+      durable: Boolean = true,
+      publish: Boolean = true
+  ): Vector[GroupOffsetKey] = synchronized {
+    ensureOpen()
+    val removed = keysByGroup.remove(groupId).fold(Vector.empty[GroupOffsetKey])(_.toVector)
+      .sortBy(key => (key.topic, key.partition))
+    removed.foreach { key =>
+      offsets.remove(key): Unit
+      pendingUpserts -= key
+      pendingRemovals += key
+    }
+    if removed.nonEmpty then cachedEntries = None
+    if durable && removed.nonEmpty then compact()
+    if publish then publishAcknowledged()
+    removed
+  }
+
   override def close(): Unit = synchronized {
     if !closed then
       closed = true
