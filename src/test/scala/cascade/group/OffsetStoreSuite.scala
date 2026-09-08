@@ -190,6 +190,26 @@ final class OffsetStoreSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("group removal stays invisible until its acknowledged view is published") {
+    val directory = Files.createTempDirectory("cascade-offset-group-removal-view-test")
+    val path = directory.resolve("offsets.log")
+    val first = OffsetCommitValue(GroupOffsetKey("workers", "events", 0), CommittedOffset(10L, -1, None, 1000L))
+    val second = OffsetCommitValue(GroupOffsetKey("workers", "events", 1), CommittedOffset(20L, -1, None, 1000L))
+    try
+      val store = OffsetStore(path)
+      try
+        store.commit(Vector(first, second), durable = false)
+        assertEquals(store.removeGroup("workers", durable = false, publish = false), Vector(first.key, second.key))
+        assertEquals(store.entries, Vector.empty)
+        assertEquals(store.all("workers"), Vector(first.key -> first.value, second.key -> second.value))
+
+        store.publishAcknowledged()
+        assertEquals(store.all("workers"), Vector.empty)
+        assertEquals(store.removeGroup("missing", durable = false), Vector.empty)
+      finally store.close()
+    finally deleteTree(directory)
+  }
+
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
