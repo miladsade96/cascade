@@ -1,7 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.ClusterNode
-import cascade.coordinator.CoordinatorPublicationConfig
+import cascade.coordinator.{CoordinatorPublicationConfig, CoordinatorQuorumConfig}
 import cascade.group.OffsetBatchConfig
 import cascade.operations.OperationsConfig
 import cascade.security.*
@@ -36,7 +36,8 @@ final case class BrokerConfig(
     operations: OperationsConfig = OperationsConfig(),
     autoCreateTopics: Boolean = true,
     offsetBatch: OffsetBatchConfig = OffsetBatchConfig(),
-    coordinatorPublication: CoordinatorPublicationConfig = CoordinatorPublicationConfig()
+    coordinatorPublication: CoordinatorPublicationConfig = CoordinatorPublicationConfig(),
+    coordinatorQuorum: CoordinatorQuorumConfig = CoordinatorQuorumConfig()
 ):
   require(port >= 0 && port <= 65535, "port must be between 0 and 65535")
   require(advertisedPort.forall(value => value > 0 && value <= 65535), "advertised port must be valid")
@@ -122,6 +123,10 @@ object BrokerConfig:
         loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(lingerMillis = value.toLong)))
       case "--coordinator-publication-queue-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(coordinatorPublication = config.coordinatorPublication.copy(queueTimeoutMillis = value.toLong)))
+      case "--coordinator-quorum-max-inflight" :: value :: tail =>
+        loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(maxInflightTransactions = value.toInt)))
+      case "--coordinator-quorum-admission-timeout-ms" :: value :: tail =>
+        loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(admissionTimeoutMillis = value.toLong)))
       case "--cleanup-policy" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(cleanupPolicy = CleanupPolicy.parse(value))))
       case "--retention-ms" :: value :: tail =>

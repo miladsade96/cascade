@@ -33,6 +33,16 @@ final class BrokerConfigSuite extends FunSuite:
     )))
   }
 
+  test("parses independent coordinator quorum admission settings") {
+    val config = BrokerConfig.parse(Array(
+      "--coordinator-quorum-max-inflight", "512",
+      "--coordinator-quorum-admission-timeout-ms", "8000"
+    ))
+    assertEquals(config.coordinatorQuorum.maxInflightTransactions, 512)
+    assertEquals(config.coordinatorQuorum.admissionTimeoutMillis, 8000L)
+    intercept[IllegalArgumentException](BrokerConfig.parse(Array("--coordinator-quorum-max-inflight", "0")))
+  }
+
   test("parses flush durability settings") {
     val config = BrokerConfig.parse(
       Array(
