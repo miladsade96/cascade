@@ -1,6 +1,6 @@
 package cascade.cluster
 
-import cascade.coordinator.{CoordinatorProbe, CoordinatorPublicationConfig, CoordinatorShard}
+import cascade.coordinator.{CoordinatorKey, CoordinatorProbe, CoordinatorPublicationConfig, CoordinatorShard}
 import cascade.fault.FaultCluster
 import cascade.group.OffsetBatchConfig
 import java.util.Properties
@@ -15,7 +15,7 @@ import munit.FunSuite
 final class CoordinatorPublicationQuorumSuite extends FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(90L, "seconds")
 
-  test("coalesces disjoint owner proposals into fewer quorum publications and recovers exactly") {
+  test("commits disjoint owner proposals through shard quorums and recovers exactly") {
     val cluster = FaultCluster(
       3,
       peerTimeoutMillis = 3000,
@@ -31,9 +31,9 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
-      val controller = CoordinatorProbe.controller(cluster.nodes)
+      CoordinatorProbe.controller(cluster.nodes)
       createTopic(cluster.bootstrapServers, partition.topic())
-      val before = cluster.broker(controller.id).metricsSnapshot.coordinatorPublication
+      val before = cluster.nodes.map(node => node.id -> cluster.broker(node.id).metricsSnapshot.coordinatorQuorum).toMap
       val groups = selectGroups(cluster, 12)
       clients = groups.map(group => consumer(cluster.bootstrapServers, group))
       clients.foreach(_.assign(java.util.List.of(partition)))
@@ -50,12 +50,14 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
       clients.zipWithIndex.foreach { case (client, index) =>
         assertEquals(client.committed(java.util.Set.of(partition)).get(partition).offset(), index.toLong + 1L)
       }
-      val publication = cluster.broker(controller.id).metricsSnapshot.coordinatorPublication
-      assertEquals(publication.committedRequests - before.committedRequests, 12L)
-      assertEquals(publication.failed - before.failed, 0L)
-      assertEquals(publication.conflictedRequests - before.conflictedRequests, 0L)
-      assert(publication.committedBatches - before.committedBatches < 12L, publication)
-      assert(publication.peakRequests <= 16, publication)
+      val quorum = cluster.nodes.map(node => cluster.broker(node.id).metricsSnapshot.coordinatorQuorum)
+      assertEquals(quorum.map(_.committed).sum - before.values.map(_.committed).sum, 12L)
+      assertEquals(quorum.map(_.failed).sum - before.values.map(_.failed).sum, 0L)
+      assertEquals(quorum.map(_.rejected).sum - before.values.map(_.rejected).sum, 0L)
+      assertEquals(quorum.map(_.committed), Vector(4L, 4L, 4L))
+      assert(quorum.forall(value => value.peakInflight >= 1 && value.peakInflight <= 256), quorum)
+      assertEquals(quorum.map(_.store.pending).sum, 0)
+      assert(quorum.map(_.store.journalRecords).sum >= 12L * 3L * 3L, quorum)
 
       clients.foreach(_.close())
       clients = Vector.empty
@@ -85,7 +87,7 @@ final class CoordinatorPublicationQuorumSuite extends FunSuite:
       if selected.result().size >= count then false
       else
         val shard = CoordinatorShard.group(group)
-        val owner = CoordinatorRouting.owner(group, cluster.nodes).map(_.id).get
+        val owner = CoordinatorRouting.owner(CoordinatorKey.group(group).routingKey, cluster.nodes).map(_.id).get
         if !shards(shard) && owners(owner) < count / cluster.nodes.size then
           selected += group
           shards += shard
