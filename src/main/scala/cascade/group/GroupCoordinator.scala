@@ -89,6 +89,14 @@ final class GroupCoordinator(
 
   private[cascade] def adminView: GroupAdminReadView = acknowledgedAdmin
 
+  private[cascade] def listGroups(states: Set[String]): Vector[GroupAdminDescription] =
+    val view = acknowledgedAdmin
+    if states.isEmpty then view.groups
+    else view.groups.filter(group => states(group.state))
+
+  private[cascade] def describeGroup(groupId: String): Option[GroupAdminDescription] =
+    acknowledgedAdmin.get(groupId)
+
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray), renewSessions = true)
   }
