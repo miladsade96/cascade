@@ -115,6 +115,20 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     finally recovered.close()
   }
 
+  test("accepts monotonic metadata checkpoints and rejects crossing baselines") {
+    val directory = Files.createTempDirectory("cascade-coordinator-baseline")
+    val store = CoordinatorShardStore(directory, baseline)
+    val versions = Vector.fill(CoordinatorShard.Count)(2L)
+    try
+      store.installBaseline(baseline.copy(version = 2L, shardVersions = versions))
+      assertEquals(store.metadata.version, 2L)
+      store.installBaseline(baseline)
+      assertEquals(store.metadata.version, 2L)
+      val crossing = versions.updated(0, 1L).updated(1, 3L)
+      intercept[IllegalArgumentException](store.installBaseline(baseline.copy(version = 3L, shardVersions = crossing)))
+    finally store.close()
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): (String, CoordinatorDelta) =
     val group = Iterator.from(0).map(index => s"$seed-$index").find(value => CoordinatorShard.group(value) != 0).get
     val shard = CoordinatorShard.group(group)

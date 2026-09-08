@@ -39,6 +39,20 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
 
   def metadata: CoordinatorMetadata = synchronized(state)
 
+  /** Advances a checkpoint baseline without overwriting any shard already newer in its independent journal. */
+  def installBaseline(metadata: CoordinatorMetadata): Unit = synchronized {
+    val equalVersionConflict = Vector.tabulate(CoordinatorShard.Count)(identity).exists { shard =>
+      metadata.shardVersion(shard) == state.shardVersion(shard) && metadata.shardPayloads(shard) != state.shardPayloads(shard)
+    }
+    if equalVersionConflict then throw IllegalArgumentException("coordinator baseline changes an existing shard version")
+    val comparisons = Vector.tabulate(CoordinatorShard.Count) { shard =>
+      java.lang.Long.compare(metadata.shardVersion(shard), state.shardVersion(shard))
+    }
+    if comparisons.forall(_ >= 0) then state = metadata
+    else if !comparisons.forall(_ <= 0) then
+      throw IllegalArgumentException("coordinator baseline crosses independently committed shard versions")
+  }
+
   def prepare(transactionId: CoordinatorTransactionId, delta: CoordinatorDelta, expectedTerm: Long): Short = synchronized {
     pending.get(transactionId) match
       case Some(existing) if existing != delta => Errors.InvalidRequest

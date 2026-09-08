@@ -107,6 +107,8 @@ final class CoordinatorShardQuorum(
 
   def metadata: CoordinatorMetadata = store.metadata
 
+  def installBaseline(metadata: CoordinatorMetadata): Unit = store.installBaseline(metadata)
+
   override def close(): Unit =
     if closed.compareAndSet(false, true) then store.close()
 
