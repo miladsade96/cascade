@@ -38,3 +38,34 @@ final class GroupAdminReadViewSuite extends FunSuite:
     assertEquals(description.members.map(_.assignment), Vector(Vector[Byte](3, 4)))
     assertEquals(description.members.map(_.groupInstanceId), Vector(Some("instance-1")))
   }
+
+  test("lists consumer-protocol and offset-only groups deterministically") {
+    val consumer = StoredConsumerGroup(
+      "z-consumer",
+      3,
+      Vector(StoredConsumerMember(
+        "member-2",
+        None,
+        Some("rack-a"),
+        30000,
+        Vector("events"),
+        "uniform",
+        2,
+        1000L,
+        Vector.empty
+      ))
+    )
+    val offset = OffsetCommitValue(
+      GroupOffsetKey("a-offsets", "events", 0),
+      CommittedOffset(10L, -1, None, 1000L)
+    )
+
+    val view = GroupAdminReadView.from(GroupImage(8L, Vector.empty, Vector(offset), Vector(consumer)))
+
+    assertEquals(view.groups.map(_.groupId), Vector("a-offsets", "z-consumer"))
+    assertEquals(view.get("a-offsets").map(_.state), Some("Empty"))
+    assertEquals(view.get("a-offsets").map(_.protocolType), Some(""))
+    assertEquals(view.get("z-consumer").map(_.state), Some("Stable"))
+    assertEquals(view.get("z-consumer").map(_.protocolType), Some("consumer"))
+    assertEquals(view.get("z-consumer").map(_.protocolData), Some("uniform"))
+  }
