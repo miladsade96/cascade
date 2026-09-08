@@ -102,6 +102,26 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
     finally follower.close()
   }
 
+  test("the owner stays on its acknowledged image until remote finalization completes") {
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val fixture = QuorumFixture(nodes, finalizeBarrier = Some(entered -> release))
+    val quorum = fixture.quorum()
+    val executor = Executors.newSingleThreadExecutor()
+    try
+      val commit = executor.submit(() => quorum.commit(groupDelta("terminal-order", 101L, 10L)))
+      assert(entered.await(5L, TimeUnit.SECONDS), "remote finalization did not start")
+      assertEquals(quorum.metadata.groupImage.offsets, Vector.empty)
+      release.countDown()
+      assert(commit.get(5L, TimeUnit.SECONDS))
+      assertEquals(quorum.metadata.groupImage.offsets.head.value.offset, 101L)
+    finally
+      release.countDown()
+      executor.shutdownNow(): Unit
+      quorum.close()
+      fixture.closeRemotes()
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): CoordinatorDelta =
     val group = s"$seed-group"
     val shard = CoordinatorShard.group(group)
@@ -112,7 +132,8 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
   private final case class QuorumFixture(
       clusterNodes: Vector[ClusterNode],
       failedNodes: Set[Int] = Set.empty,
-      prepareBarrier: Option[(CountDownLatch, CountDownLatch)] = None
+      prepareBarrier: Option[(CountDownLatch, CountDownLatch)] = None,
+      finalizeBarrier: Option[(CountDownLatch, CountDownLatch)] = None
   ):
     val stores: Vector[CoordinatorShardStore] = clusterNodes.map(node =>
       CoordinatorShardStore(Files.createTempDirectory(s"cascade-quorum-${node.id}"), CoordinatorMetadata.Empty)
@@ -128,6 +149,11 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
       (targets, record) =>
         if record.phase == CoordinatorQuorumPhase.Prepare then
           prepareBarrier.foreach { case (entered, release) =>
+            entered.countDown()
+            release.await(5L, TimeUnit.SECONDS): Unit
+          }
+        if record.phase == CoordinatorQuorumPhase.Finalize then
+          finalizeBarrier.foreach { case (entered, release) =>
             entered.countDown()
             release.await(5L, TimeUnit.SECONDS): Unit
           }
