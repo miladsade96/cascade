@@ -97,6 +97,24 @@ final class GroupCoordinator(
   private[cascade] def describeGroup(groupId: String): Option[GroupAdminDescription] =
     acknowledgedAdmin.get(groupId)
 
+  private[cascade] def deleteGroup(groupId: String, admission: () => Short): Short = stateLock.synchronized {
+    val gate = admission()
+    if gate != Errors.None then return gate
+    if groupId.isEmpty then return Errors.InvalidGroupId
+    val activeClassic = groups.get(groupId).exists(group =>
+      group.phase != GroupStatus.Empty || group.members.nonEmpty || group.pendingMemberIds.nonEmpty
+    )
+    val activeConsumer = consumerGroups.get(groupId).exists(_.members.nonEmpty)
+    if activeClassic || activeConsumer then return Errors.NonEmptyGroup
+    val exists = groups.contains(groupId) || consumerGroups.contains(groupId) || offsets.entries.exists(_.key.groupId == groupId)
+    if !exists then return Errors.GroupIdNotFound
+
+    groups.remove(groupId): Unit
+    consumerGroups.remove(groupId): Unit
+    offsets.removeGroup(groupId, durableLocal, publish = false)
+    if checkpointState() then Errors.None else Errors.CoordinatorNotAvailable
+  }
+
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray), renewSessions = true)
   }
