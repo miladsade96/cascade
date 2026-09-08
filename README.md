@@ -17,7 +17,7 @@ The current release is `1.3.1`. Broker build metadata, Docker labels, the compat
 So far, I've implemented broker-assigned offsets, magic-v2 record batches, classic and server-assigned consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, rendezvous-sharded coordinator ownership, coordinator failover, online partition reassignment, dynamic broker/voter membership, rolling feature negotiation, crash-safe storage lifecycle management, record-level/gzip compaction with tombstone grace and cleanup throttling, TLS, Kafka PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, Kafka ACL Admin APIs, security auditing, conservative cluster-shared principal quotas, Prometheus metrics, health/readiness checks, structured events, Kubernetes artifacts, capacity alerts, offline backup/restore, and write-barrier online snapshots.
 
 > [!IMPORTANT]
-> Cascade isn't a production Kafka replacement yet. The code has peer capability negotiation, a negotiated metadata-format floor, coordinator sharding with incremental replication, immutable shard-object persistence, and bounded cross-owner publication batching, Kafka's ConsumerGroupHeartbeat v0 path, Metadata v4-v12 discovery with v10-v12 topic IDs, online point-in-time broker snapshots, record-level/gzip compaction, conservative cluster-shared quotas, and repeatable soak/power-loss probes. Pinned 1.0.0, format-9, and format-10 source rolling campaigns against 1.3.0-SNAPSHOT pass, including pre-activation rollback and unsafe-downgrade rejection. The published format-8 image pair, multi-day soak, and physical power/device-loss campaign remain unqualified. Independent coordinator consensus and service locks remain open. A cluster-wide snapshot still needs one artifact from every replica host, and compaction for Snappy/LZ4/Zstd batches is still conservative.
+> Cascade isn't a production Kafka replacement yet. The code has peer capability negotiation, a negotiated metadata-format floor, coordinator sharding with incremental replication, immutable shard-object persistence, bounded cross-owner publication batching, Kafka's ConsumerGroupHeartbeat v0 path, and acknowledged consumer-group administration. Metadata v4-v12 discovery with v10-v12 topic IDs, online point-in-time broker snapshots, record-level/gzip compaction, conservative cluster-shared quotas, and repeatable soak/power-loss probes are also implemented. Pinned 1.0.0, format-9, and format-10 source rolling campaigns against 1.3.0-SNAPSHOT pass, including pre-activation rollback and unsafe-downgrade rejection. The published format-8 image pair, multi-day soak, and physical power/device-loss campaign remain unqualified. Independent coordinator consensus and service locks remain open. A cluster-wide snapshot still needs one artifact from every replica host, and compaction for Snappy/LZ4/Zstd batches is still conservative.
 
 ## Performance I measured
 
@@ -60,7 +60,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Efficient record path | Kafka magic-v2 batches remain compressed and opaque; the broker updates only the base offset outside the batch CRC region |
 | Delivery guarantees | Producer IDs, epoch fencing, bounded duplicate detection, sequence recovery, transactions, timeouts, transactional offsets, and `read_committed` |
 | Durable state | CRC32C-protected local journals plus one versioned, quorum-committed coordinator image for groups, offsets, producers, and transactions |
-| Consumer coordination | Classic join, sync, heartbeat, leave, rebalance, session expiry, and durable committed offsets |
+| Consumer coordination | Classic join/sync groups, ConsumerGroupHeartbeat v0, durable offsets, and acknowledged list/describe/delete administration |
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
 | Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
@@ -139,8 +139,11 @@ In cluster mode I commit producer registration, fencing epochs, active transacti
 - Quorum snapshots of group generations, members, assignments, pending identities, and committed offsets.
 - Controller-term ownership, stale-image rejection, and Kafka-client continuation after coordinator failover.
 - Static `group.instance.id` ownership with duplicate-instance fencing across joins and heartbeats.
+- Kafka `ListGroups` v0-v4 and `DescribeGroups` v0-v4 over immutable acknowledged snapshots, including v4 state filtering.
+- Kafka `DeleteGroups` v0-v1 with active-group protection and atomic removal of empty groups and their offsets.
+- Per-group Describe/Delete ACLs, owner routing, restart recovery, coordinator-failover coverage, metrics, and Kafka 4.3.1 Admin interoperability.
 
-If a client exposes Kafka's newer consumer protocol, set `group.protocol=classic` for now.
+Kafka 4.3 clients may use `group.protocol=consumer` for the implemented ConsumerGroupHeartbeat v0 path. Later heartbeat versions and detailed `ConsumerGroupDescribe` remain open. I document the administration and acknowledgement contract in [consumer group administration](docs/group-administration.md).
 
 ### Dynamic replicated cluster
 
@@ -392,6 +395,8 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | Heartbeat | 12 | 3 | Session liveness and generation validation |
 | LeaveGroup | 13 | 2 | Explicit departure and rebalance initiation |
 | SyncGroup | 14 | 3 | Leader assignments and follower synchronization |
+| DescribeGroups | 15 | 0-4 | Acknowledged group state, protocol, members, static IDs, and authorized operations |
+| ListGroups | 16 | 0-4 | Owner-local acknowledged listings with v4 state filters |
 | SaslHandshake | 17 | 1 | Negotiate `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, or `OAUTHBEARER` before authentication |
 | ApiVersions | 18 | 0-4 | Legacy and flexible encodings with tagged fields |
 | CreateTopics | 19 | 2 | Validation and quorum-committed topic metadata |
@@ -405,6 +410,7 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | DeleteAcls | 31 | 1 | Filter, remove, persist, and report matching ACL bindings |
 | DescribeConfigs | 32 | 2 | Read-only non-sensitive broker and effective topic configuration for Kafka Admin |
 | SaslAuthenticate | 36 | 1 | Kafka-framed PLAIN, multi-step SCRAM, or RFC 7628 OAUTHBEARER exchange and session lifetime |
+| DeleteGroups | 42 | 0-1 | Per-group results and atomic empty-group/offset deletion |
 | IncrementalAlterConfigs | 44 | 0 | Quorum-commit supported per-topic cleanup and retention changes |
 | AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
 | ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
@@ -562,7 +568,7 @@ The load harness separately checks exact record counts at one million and ten mi
 | ---: | --- | --- |
 | 1 | Coordinator capacity | Bounded cross-owner publication and immutable acknowledged read views are implemented; independent per-shard consensus beyond the shared metadata quorum, finer-grained mutation locks, remaining full-state CPU work, membership/transaction churn at scale, and dedicated-host capacity qualification remain |
 | 2 | Qualification | Run and archive the 72-hour multi-tenant soak, physical power/device-loss probe, restore drill, arbitrary packet impairment, and dedicated-host RF=3 benchmark |
-| 3 | Consumer groups | Add administrative group APIs and continue expanding ConsumerGroupHeartbeat beyond v0 |
+| 3 | Consumer groups | Expand ConsumerGroupHeartbeat beyond v0 and add ConsumerGroupDescribe plus offset administration APIs |
 | 4 | Storage lifecycle | Snappy/LZ4/Zstd record rewriting and replicated retention coordination |
 | 5 | Operations/security | A cross-node snapshot coordinator/manifest, scheduled retention, opaque-token introspection, OIDC discovery, and a built-in or documented external TLS boundary for operations |
 | 6 | Profile-driven optimization | Zero-copy Fetch, selector/worker pools, multi-device log placement, and further changes justified by profiling |
@@ -580,7 +586,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - Client authentication supports PLAIN, SCRAM-SHA-256/512, and signed OAUTHBEARER JWTs with RSA, EC, and Ed25519 keys plus approved claim-to-role mapping. I still need opaque-token introspection, automatic OIDC discovery, and revocation integration.
 - I split each configured principal rate and burst conservatively across the current quorum, which bounds aggregate traffic without a central hot-path service. I still need long authenticated multi-tenant qualification and reclaiming unused shares without exceeding the cluster limit.
 - The built-in operations listener is HTTP, so I still require an external TLS/mTLS boundary for non-loopback deployments. Online snapshots now stop admitted writes, force every local partition, and pass exact restore tests. A full cluster backup still needs coordinated per-host artifacts, scheduled retention, encrypted off-host transfer, and repeated restore drills.
-- I support classic groups and `ConsumerGroupHeartbeat` v0 with broker-side assignment; later protocol versions and the administrative group APIs remain.
+- I support classic groups, `ConsumerGroupHeartbeat` v0 with broker-side assignment, and [acknowledged list/describe/delete administration](docs/group-administration.md). Later heartbeat versions, `ConsumerGroupDescribe`, and offset administration APIs remain.
 - The automated client matrix covers one pinned release each of Java, JavaScript, Python, Go, and .NET, and the 1.0.0-to-1.1.0 broker matrix passes; broader client versions and every future adjacent broker-version pair remain.
 - The performance figures are single-node, shared-JVM development-machine measurements; replicated-cluster capacity has not been benchmarked.
 - The forced-kill suite validates process loss and torn tails, and the two-phase physical probe records every acknowledged offset on an independent witness device. The probe is implemented, but I will not claim power/device-loss qualification until I cut real host/device power and the post-restart verifier passes on the target hardware.
@@ -701,6 +707,7 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 - [Rolling upgrade and downgrade runbook](docs/rolling-upgrades.md)
 - [Coordinator scaling and qualification](docs/coordinator-scaling.md)
 - [Acknowledged coordinator read isolation](docs/coordinator-read-isolation.md)
+- [Consumer group administration](docs/group-administration.md)
 - [Delivery semantics](docs/delivery-semantics.md)
 - [TLS key and trust rotation runbook](docs/tls-rotation.md)
 - [OAuth and OIDC authentication runbook](docs/oauth-oidc.md)
