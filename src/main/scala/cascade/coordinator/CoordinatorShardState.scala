@@ -25,6 +25,9 @@ object CoordinatorShardState:
       installed.shardVersion(id) >= current.shardVersion(id)
     }
 
+  def readyForShard(installed: CoordinatorMetadata, current: CoordinatorMetadata, shard: Int): Boolean =
+    CoordinatorShard.valid(shard) && installed.shardVersion(shard) >= current.shardVersion(shard)
+
   def payloads(groupState: Vector[Byte], deliveryState: Vector[Byte]): Vector[Vector[Byte]] =
     GroupShardCodec.split(groupState) ++ DeliveryShardCodec.split(deliveryState)
 

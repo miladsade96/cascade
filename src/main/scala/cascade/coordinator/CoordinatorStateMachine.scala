@@ -31,7 +31,8 @@ final class CoordinatorStateMachine(
     () =>
       try
         groups.expireOwned(System.currentTimeMillis(),
-          key => cluster.isAssignedCoordinator(key) && !cluster.isBrokerFenced, cluster.ownsCoordinator)
+          key => cluster.isAssignedCoordinator(CoordinatorKey.group(key)) && !cluster.isBrokerFenced,
+          key => cluster.ownsCoordinator(CoordinatorKey.group(key)))
         if cluster.isActiveController then
           delivery.expireNow()
       catch case error: Throwable => System.err.println(s"Cascade coordinator expiration failed: ${error.getMessage}"),

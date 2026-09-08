@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorPublicationSnapshot, CoordinatorShardState}
+import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorShardState}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -158,6 +158,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   /** Rendezvous hashing keeps unrelated coordinator keys distributed and minimizes movement as voters change. */
   def coordinatorNode(key: String): Option[ClusterNode] =
+    coordinatorNode(CoordinatorKey.group(key))
+
+  def coordinatorNode(key: CoordinatorKey): Option[ClusterNode] =
     if !enabled then Some(localNode)
     else if
       current.featureLevels.getOrElse(ClusterFeature.CoordinatorSharding, 0.toShort) < 1 ||
@@ -165,19 +168,22 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     then controllerNode
     else
       val available = effectiveMembership.currentVoters.map(_.node).filterNot(node => current.unavailableBrokerIds.contains(node.id))
-      CoordinatorRouting.owner(key, available).orElse(controllerNode)
+      CoordinatorRouting.owner(key.routingKey, available).orElse(controllerNode)
 
   def supportsFeature(name: String, minimumLevel: Short = 1): Boolean =
     !enabled || current.featureLevels.getOrElse(name, 0.toShort) >= minimumLevel
 
   def ownsCoordinator(key: String): Boolean =
+    ownsCoordinator(CoordinatorKey.group(key))
+
+  def ownsCoordinator(key: CoordinatorKey): Boolean =
     isAssignedCoordinator(key) && !isBrokerFenced &&
       installedCoordinatorVersion >= 0L &&
       (if supportsFeature(ClusterFeature.CoordinatorDeltas) then
-        CoordinatorShardState.readyForKey(installedCoordinatorState, current.coordinator, key)
+        CoordinatorShardState.readyForShard(installedCoordinatorState, current.coordinator, key.shard)
       else installedCoordinatorVersion >= current.coordinator.version)
 
-  private[cascade] def isAssignedCoordinator(key: String): Boolean = coordinatorNode(key).exists(_.id == config.nodeId)
+  private[cascade] def isAssignedCoordinator(key: CoordinatorKey): Boolean = coordinatorNode(key).exists(_.id == config.nodeId)
 
   def controllerId: Int = electedControllerId
 

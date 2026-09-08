@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.cluster.*
+import cascade.coordinator.CoordinatorKey
 import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
@@ -39,7 +40,7 @@ final class RequestHandler(
   private val peerAuthenticator = PeerAuthenticator(config.security.peer)
   private val audit = config.security.audit.path.map(path => AuditLog.open(path, config.security.audit.forceEachEvent))
   private val offsetBatcher = Option.when(clusterManager.isEnabled) {
-    OffsetCommitBatcher(config.offsetBatch, groupCoordinator.commitOffsetBatch, isCoordinatorFor)
+    OffsetCommitBatcher(config.offsetBatch, groupCoordinator.commitOffsetBatch, isGroupCoordinatorFor)
   }
 
   def auditTransport(session: ConnectionSession): Unit =
@@ -316,8 +317,9 @@ final class RequestHandler(
         case 0 => isAuthorized(session, AclOperation.Describe, ResourceType.Group, coordinatorKey)
         case 1 => isAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, coordinatorKey)
         case _ => true
+    val typedKey = if coordinatorType == 1.toByte then CoordinatorKey.transaction(coordinatorKey) else CoordinatorKey.group(coordinatorKey)
     val coordinator =
-      if clusterManager.isEnabled then clusterManager.coordinatorNode(coordinatorKey)
+      if clusterManager.isEnabled then clusterManager.coordinatorNode(typedKey)
       else Some(ClusterNode(config.nodeId, config.advertisedHost, advertisedPort))
     val available = supported && authorized && coordinator.nonEmpty
     val error =
@@ -349,7 +351,7 @@ final class RequestHandler(
     val protocolType = cursor.readString()
     val protocols = cursor.readArray(GroupProtocol(cursor.readString(), cursor.readByteArray()))
     cursor.ensureFullyRead()
-    if !isCoordinatorFor(groupId) then
+    if !isGroupCoordinatorFor(groupId) then
       return Some(
         ByteWriter()
           .writeInt(0)
@@ -393,14 +395,14 @@ final class RequestHandler(
     val memberId = cursor.readString()
     val groupInstanceId = cursor.readNullableString()
     cursor.ensureFullyRead()
-    val error = if isCoordinatorFor(groupId) then groupCoordinator.heartbeat(groupId, generationId, memberId, groupInstanceId) else Errors.NotCoordinator
+    val error = if isGroupCoordinatorFor(groupId) then groupCoordinator.heartbeat(groupId, generationId, memberId, groupInstanceId) else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def leaveGroup(cursor: ByteCursor): Option[Array[Byte]] =
     val groupId = cursor.readString()
     val memberId = cursor.readString()
     cursor.ensureFullyRead()
-    val error = if isCoordinatorFor(groupId) then groupCoordinator.leave(groupId, memberId) else Errors.NotCoordinator
+    val error = if isGroupCoordinatorFor(groupId) then groupCoordinator.leave(groupId, memberId) else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
   private def syncGroup(cursor: ByteCursor): Option[Array[Byte]] =
@@ -411,7 +413,7 @@ final class RequestHandler(
     val assignments = cursor.readArray((cursor.readString(), cursor.readByteArray()))
     cursor.ensureFullyRead()
     val result =
-      if isCoordinatorFor(groupId) then groupCoordinator.sync(groupId, generationId, memberId, groupInstanceId, assignments)
+      if isGroupCoordinatorFor(groupId) then groupCoordinator.sync(groupId, generationId, memberId, groupInstanceId, assignments)
       else SyncGroupResult(Errors.NotCoordinator, Array.emptyByteArray)
     Some(ByteWriter().writeInt(0).writeShort(result.errorCode).writeByteArray(result.assignment).result())
 
@@ -420,7 +422,7 @@ final class RequestHandler(
     if version >= 3 then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val groups = groupCoordinator.listGroups(states).filter(group =>
-      isCoordinatorFor(group.groupId) && isAuthorized(session, AclOperation.Describe, ResourceType.Group, group.groupId)
+      isGroupCoordinatorFor(group.groupId) && isAuthorized(session, AclOperation.Describe, ResourceType.Group, group.groupId)
     )
     val writer = ByteWriter()
     if version >= 1 then writer.writeInt(0)
@@ -446,7 +448,7 @@ final class RequestHandler(
     if version >= 1 then writer.writeInt(0)
     writer.writeArray(groupIds) { groupId =>
       val (error, description) =
-        if !isCoordinatorFor(groupId) then Errors.NotCoordinator -> None
+        if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator -> None
         else if !isAuthorized(session, AclOperation.Describe, ResourceType.Group, groupId) then
           Errors.GroupAuthorizationFailed -> None
         else groupCoordinator.describeGroup(groupId).fold(Errors.GroupIdNotFound -> None)(Errors.None -> Some(_))
@@ -482,7 +484,7 @@ final class RequestHandler(
     val results = groupIds.map { groupId =>
       val error =
         if !isAuthorized(session, AclOperation.Delete, ResourceType.Group, groupId) then Errors.GroupAuthorizationFailed
-        else groupCoordinator.deleteGroup(groupId, () => if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
+        else groupCoordinator.deleteGroup(groupId, () => if isGroupCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
       groupId -> error
     }
     val writer = ByteWriter().writeInt(0)
@@ -511,7 +513,7 @@ final class RequestHandler(
     val result =
       if !clusterManager.supportsFeature(ClusterFeature.ConsumerProtocol) then
         ConsumerHeartbeatResult(Errors.UnsupportedVersion, Some("consumer protocol is not active on every broker"), None, memberEpoch, 5000, None)
-      else if isCoordinatorFor(groupId) then
+      else if isGroupCoordinatorFor(groupId) then
         groupCoordinator.consumerHeartbeat(
           ConsumerHeartbeatCommand(
             groupId,
@@ -570,7 +572,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val validValues = requests.flatMap(_._2).filter(_.exists).map(_.value)
     val groupError =
-      if !isCoordinatorFor(groupId) then Errors.NotCoordinator
+      if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator
       else offsetBatcher match
         case Some(batcher) => batcher.commit(OffsetCommitCommand(groupId, generationId, memberId, groupInstanceId, validValues))
         case None => groupCoordinator.commitOffsets(groupId, generationId, memberId, groupInstanceId, validValues)
@@ -593,7 +595,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val (groupError, fetched) = groupCoordinator.readOffsets(groupId,
       requested.map(_.flatMap { case (topic, partitions) => partitions.map(GroupOffsetKey(groupId, topic, _)) }),
-      () => if isCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
+      () => if isGroupCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
     val byKey = fetched.toMap
     val offsets = requested match
       case Some(topics) => topics.map { case (topic, partitions) =>
@@ -1484,7 +1486,7 @@ final class RequestHandler(
     val timeoutMillis = cursor.readInt()
     cursor.ensureFullyRead()
     val initialized =
-      if transactionalId.fold(!clusterManager.isBrokerFenced)(isCoordinatorFor) then
+      if transactionalId.fold(!clusterManager.isBrokerFenced)(isTransactionCoordinatorFor) then
         deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
       else InitProducerIdResult(Errors.NotCoordinator, -1L, -1)
     // Anonymous IDs use the quorum allocator, not a transaction coordinator. A retry must not
@@ -1515,7 +1517,7 @@ final class RequestHandler(
       partitions.filter(partitionExists(topic, _)).map(index => cascade.storage.TopicPartition(topic, index))
     }
     val transactionError =
-      if isCoordinatorFor(transactionalId) then deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
+      if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
       else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requested) { case (topic, partitions) =>
@@ -1534,7 +1536,7 @@ final class RequestHandler(
     val groupId = cursor.readString()
     cursor.ensureFullyRead()
     val error =
-      if isCoordinatorFor(transactionalId) then deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
+      if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
       else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
@@ -1545,7 +1547,7 @@ final class RequestHandler(
     val committed = cursor.readBoolean()
     cursor.ensureFullyRead()
     val error =
-      if isCoordinatorFor(transactionalId) then deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
+      if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
       else Errors.NotCoordinator
     Some(ByteWriter().writeInt(0).writeShort(error).result())
 
@@ -1573,7 +1575,7 @@ final class RequestHandler(
     cursor.ensureFullyRead()
     val values = requested.flatMap(_._2).filter(_.exists).map(_.value)
     val transactionError =
-      if isCoordinatorFor(groupId) then deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
+      if isGroupCoordinatorFor(groupId) then deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
       else Errors.NotCoordinator
     val writer = ByteWriter().writeInt(0)
     writer.writeArray(requested) { case (topic, offsets) =>
@@ -1702,4 +1704,8 @@ final class RequestHandler(
     case cascade.storage.CleanupPolicy.Compact       => "compact"
     case cascade.storage.CleanupPolicy.CompactDelete => "compact,delete"
 
-  private def isCoordinatorFor(key: String): Boolean = !clusterManager.isEnabled || clusterManager.ownsCoordinator(key)
+  private def isGroupCoordinatorFor(key: String): Boolean =
+    !clusterManager.isEnabled || clusterManager.ownsCoordinator(CoordinatorKey.group(key))
+
+  private def isTransactionCoordinatorFor(key: String): Boolean =
+    !clusterManager.isEnabled || clusterManager.ownsCoordinator(CoordinatorKey.transaction(key))
