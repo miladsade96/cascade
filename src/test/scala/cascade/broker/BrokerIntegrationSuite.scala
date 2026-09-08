@@ -242,6 +242,46 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("deletes empty groups and their offsets with Kafka DeleteGroups v1") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("delete-events", correlationId = 67))
+        request(output, input, offsetCommitV5Request("delete-readers", "delete-events", 13L, correlationId = 68))
+
+        val delete = requestHeader(ApiKey.DeleteGroups, 1, 69)
+        delete.writeArray(Vector("delete-readers", "missing"))(delete.writeString)
+        val deleted = request(output, input, delete.result())
+        assertEquals(deleted.readInt(), 69)
+        assertEquals(deleted.readInt(), 0)
+        assertEquals(
+          deleted.readArray((deleted.readString(), deleted.readShort())),
+          Vector("delete-readers" -> Errors.None, "missing" -> Errors.GroupIdNotFound)
+        )
+        deleted.ensureFullyRead()
+
+        val list = requestHeader(ApiKey.ListGroups, 4, 70, flexible = true)
+        list.writeCompactArray(Vector("Empty"))(list.writeCompactString).writeEmptyTaggedFields()
+        val listed = request(output, input, list.result())
+        assertEquals(listed.readInt(), 70)
+        listed.skipTaggedFields()
+        assertEquals(listed.readInt(), 0)
+        assertEquals(listed.readShort(), Errors.None)
+        assertEquals(listed.readCompactArray {
+          val groupId = listed.readCompactString()
+          listed.readCompactString()
+          listed.readCompactString()
+          listed.skipTaggedFields()
+          groupId
+        }, Vector.empty)
+        listed.skipTaggedFields()
+        listed.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("idempotent producer retries return the original offset and reject sequence gaps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
