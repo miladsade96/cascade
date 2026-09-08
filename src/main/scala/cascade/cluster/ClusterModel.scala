@@ -259,5 +259,9 @@ object InternalApi:
   val PeerFeatures: Short = -119
   val CoordinatorDeltaCommit: Short = -120
   val MetadataDeltaCommit: Short = -121
+  val CoordinatorShardPrepare: Short = -122
+  val CoordinatorShardDecide: Short = -123
+  val CoordinatorShardFinalize: Short = -124
+  val CoordinatorShardAbort: Short = -125
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= MetadataDeltaCommit
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorShardAbort
