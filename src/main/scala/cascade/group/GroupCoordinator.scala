@@ -72,6 +72,7 @@ final class GroupCoordinator(
   private val offsets = OffsetStore(offsetPath)
   private var stateVersion = 0L
   private var checkpoint: CoordinatorCheckpoint = CoordinatorCheckpoint.Local
+  @volatile private var acknowledgedAdmin = GroupAdminReadView.from(snapshotImage())
   private val expirationExecutor: Option[ScheduledExecutorService] = Option.when(scheduleExpiration) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-group-expirer").factory())
   }
@@ -85,6 +86,8 @@ final class GroupCoordinator(
 
   /** Immutable, detached view captured under the same lock as checkpoint publication. */
   private[cascade] def image: GroupImage = stateLock.synchronized(snapshotImage())
+
+  private[cascade] def adminView: GroupAdminReadView = acknowledgedAdmin
 
   def installSnapshot(bytes: Vector[Byte]): Unit = stateLock.synchronized {
     installImage(if bytes.isEmpty then GroupImage.Empty else GroupCodec.decode(bytes.toArray), renewSessions = true)
@@ -577,7 +580,9 @@ final class GroupCoordinator(
   private def checkpointState(): Boolean =
     stateVersion = Math.addExact(stateVersion, 1L)
     val committed = checkpoint.commit()
-    if committed then offsets.publishAcknowledged()
+    if committed then
+      offsets.publishAcknowledged()
+      acknowledgedAdmin = GroupAdminReadView.from(snapshotImage())
     committed
 
   private def snapshotImage(): GroupImage =
@@ -711,6 +716,7 @@ final class GroupCoordinator(
       consumerGroups.update(stored.groupId, group)
     }
     stateVersion = image.version
+    acknowledgedAdmin = GroupAdminReadView.from(image)
     stateLock.notifyAll()
 
   private def rebalanceConsumerGroup(group: ManagedConsumerGroup, partitionCount: String => Int): Unit =
