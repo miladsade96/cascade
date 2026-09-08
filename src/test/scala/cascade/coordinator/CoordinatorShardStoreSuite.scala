@@ -88,6 +88,33 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     finally store.close()
   }
 
+  test("resumes a prepare interrupted between shard journal forces") {
+    val directory = Files.createTempDirectory("cascade-coordinator-partial-prepare")
+    val (_, groupChange) = groupDelta("partial", 211L, 13L)
+    val allocator = CoordinatorShardUpdate(
+      CoordinatorShard.Allocator,
+      baseline.shardVersion(CoordinatorShard.Allocator),
+      ByteWriter().writeLong(2L).result().toVector
+    )
+    val delta = groupChange.copy(updates = groupChange.updates :+ allocator)
+    val transaction = CoordinatorTransactionId(5L, 5L)
+    val firstShard = delta.updates.map(_.id).min
+    val partial = CoordinatorShardJournal(CoordinatorShardJournal.path(directory, firstShard), firstShard)
+    try partial.append(CoordinatorQuorumRecord.prepare(transaction, delta))
+    finally partial.close()
+
+    val recovered = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(recovered.snapshot.pending, 1)
+      assertEquals(recovered.prepare(transaction, delta, 13L), Errors.None)
+      assertEquals(recovered.decide(transaction), Errors.None)
+      val committed = recovered.finalizeTransaction(transaction).toOption.get
+      assertEquals(committed.groupImage.offsets.head.value.offset, 211L)
+      assertEquals(committed.deliveryImage.nextProducerId, 2L)
+      assertEquals(Files.list(directory).count(), 2L)
+    finally recovered.close()
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): (String, CoordinatorDelta) =
     val group = Iterator.from(0).map(index => s"$seed-$index").find(value => CoordinatorShard.group(value) != 0).get
     val shard = CoordinatorShard.group(group)
