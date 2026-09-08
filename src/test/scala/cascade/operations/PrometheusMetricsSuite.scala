@@ -21,7 +21,7 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 121)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 127)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
@@ -83,13 +83,25 @@ final class PrometheusMetricsSuite extends FunSuite:
       offsetSnapshots = 10L,
       offsetKeys = 25L,
       stableOffsetSnapshots = 12L,
-      transactionVisibilitySnapshots = 40L
+      transactionVisibilitySnapshots = 40L,
+      groupListSnapshots = 5L,
+      groupListEntries = 21L,
+      groupDescribeSnapshots = 8L,
+      groupDescribeHits = 7L,
+      groupDeleteAttempts = 3L,
+      groupDeleteFailures = 1L
     )
     val output = PrometheusMetrics.encode(snapshot.copy(coordinatorReads = measured))
     assert(output.contains("cascade_coordinator_offset_read_snapshots_total{node_id=\"7\"} 10.0\n"))
     assert(output.contains("cascade_coordinator_offset_read_keys_total{node_id=\"7\"} 25.0\n"))
     assert(output.contains("cascade_coordinator_stable_offset_snapshots_total{node_id=\"7\"} 12.0\n"))
     assert(output.contains("cascade_coordinator_transaction_visibility_snapshots_total{node_id=\"7\"} 40.0\n"))
+    assert(output.contains("cascade_coordinator_group_list_snapshots_total{node_id=\"7\"} 5.0\n"))
+    assert(output.contains("cascade_coordinator_group_list_entries_total{node_id=\"7\"} 21.0\n"))
+    assert(output.contains("cascade_coordinator_group_describe_snapshots_total{node_id=\"7\"} 8.0\n"))
+    assert(output.contains("cascade_coordinator_group_describe_hits_total{node_id=\"7\"} 7.0\n"))
+    assert(output.contains("cascade_coordinator_group_delete_attempts_total{node_id=\"7\"} 3.0\n"))
+    assert(output.contains("cascade_coordinator_group_delete_failures_total{node_id=\"7\"} 1.0\n"))
     assert(!output.contains("group_id="))
     assert(!output.contains("transactional_id="))
   }
