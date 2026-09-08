@@ -12,6 +12,8 @@ object ApiKey:
   val Heartbeat: Short = 12
   val LeaveGroup: Short = 13
   val SyncGroup: Short = 14
+  val DescribeGroups: Short = 15
+  val ListGroups: Short = 16
   val SaslHandshake: Short = 17
   val ApiVersions: Short = 18
   val CreateTopics: Short = 19
@@ -25,6 +27,7 @@ object ApiKey:
   val DeleteAcls: Short = 31
   val DescribeConfigs: Short = 32
   val IncrementalAlterConfigs: Short = 44
+  val DeleteGroups: Short = 42
   val SaslAuthenticate: Short = 36
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
@@ -78,6 +81,8 @@ object Errors:
   val SaslAuthenticationFailed: Short = 58
   val MemberIdRequired: Short = 79
   val FencedInstanceId: Short = 82
+  val NonEmptyGroup: Short = 68
+  val GroupIdNotFound: Short = 69
   val FencedLeaderEpoch: Short = 74
   val ProducerFenced: Short = 90
   val InvalidReplicaAssignment: Short = 39
