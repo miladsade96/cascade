@@ -141,6 +141,46 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("Admin-deleted groups and offsets stay absent after broker restart") {
+    val directory = Files.createTempDirectory("cascade-group-delete-restart-e2e")
+    val groupId = "deleted-before-restart"
+    val partition = TopicPartition("deleted-group-events", 0)
+    try
+      val firstBroker = testBroker(directory)
+      try
+        firstBroker.start()
+        val admin = Admin.create(adminProperties(firstBroker.bootstrapServers))
+        try
+          admin.createTopics(java.util.List.of(NewTopic(partition.topic(), 1, 1.toShort))).all().get()
+          val consumer = KafkaConsumer[Array[Byte], Array[Byte]](
+            groupConsumerProperties(firstBroker.bootstrapServers, groupId)
+          )
+          try
+            consumer.assign(java.util.List.of(partition))
+            consumer.commitSync(Map(partition -> OffsetAndMetadata(17L)).asJava)
+          finally consumer.close()
+          admin.deleteConsumerGroups(java.util.List.of(groupId)).all().get(10, TimeUnit.SECONDS)
+        finally admin.close(Duration.ofSeconds(5))
+      finally firstBroker.close()
+
+      val secondBroker = testBroker(directory)
+      try
+        secondBroker.start()
+        val admin = Admin.create(adminProperties(secondBroker.bootstrapServers))
+        try
+          val listings = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
+          assert(!listings.exists(_.groupId() == groupId))
+        finally admin.close(Duration.ofSeconds(5))
+
+        val verifier = KafkaConsumer[Array[Byte], Array[Byte]](
+          groupConsumerProperties(secondBroker.bootstrapServers, groupId)
+        )
+        try assertEquals(verifier.committed(java.util.Set.of(partition)).get(partition), null)
+        finally verifier.close()
+      finally secondBroker.close()
+    finally deleteTree(directory)
+  }
+
   test("Apache Kafka 4.3 consumer protocol receives a server-side assignment") {
     val directory = Files.createTempDirectory("cascade-modern-consumer-e2e")
     val broker = testBroker(directory)
