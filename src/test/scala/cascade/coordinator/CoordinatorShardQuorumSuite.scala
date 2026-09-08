@@ -78,6 +78,30 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
       fixture.closeRemotes()
   }
 
+  test("a follower installs only a finalized quorum transaction") {
+    val store = CoordinatorShardStore(Files.createTempDirectory("cascade-quorum-follower"), CoordinatorMetadata.Empty)
+    val installed = AtomicReference(CoordinatorMetadata.Empty)
+    val follower = CoordinatorShardQuorum(
+      2,
+      store,
+      CoordinatorQuorumConfig(),
+      () => membership,
+      () => 10L,
+      (_, _) => Map.empty,
+      installed.set
+    )
+    val delta = groupDelta("follower", 91L, 10L)
+    val transaction = CoordinatorTransactionId(90L, 91L)
+    try
+      assertEquals(follower.receive(CoordinatorQuorumRecord.prepare(transaction, delta), 10L), Errors.None)
+      assertEquals(follower.receive(CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Decide), 10L), Errors.None)
+      assertEquals(installed.get(), CoordinatorMetadata.Empty)
+      assertEquals(follower.receive(CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Finalize), 10L), Errors.None)
+      assertEquals(installed.get().groupImage.offsets.head.value.offset, 91L)
+      assertEquals(follower.receive(CoordinatorQuorumRecord.prepare(transaction, delta), 9L), Errors.CoordinatorLoadInProgress)
+    finally follower.close()
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): CoordinatorDelta =
     val group = s"$seed-group"
     val shard = CoordinatorShard.group(group)

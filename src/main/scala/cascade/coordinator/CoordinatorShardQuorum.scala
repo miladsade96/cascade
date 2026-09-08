@@ -85,7 +85,10 @@ final class CoordinatorShardQuorum(
 
   def receive(record: CoordinatorQuorumRecord, expectedTerm: Long): Short =
     if closed.get() || expectedTerm != controllerTerm() then Errors.CoordinatorLoadInProgress
-    else applyLocal(record, expectedTerm)._1
+    else
+      val (code, metadata) = applyLocal(record, expectedTerm)
+      metadata.foreach(install)
+      code
 
   def snapshot: CoordinatorQuorumSnapshot = metricsLock.synchronized {
     CoordinatorQuorumSnapshot(
