@@ -420,7 +420,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       ByteWriter().writeShort(error).result()
     case InternalApi.CoordinatorDeltaCommit =>
       val delta = CoordinatorDeltaCodec.decode(cursor)
-      val error = coordinatorPublisher.map(_.submit(delta)).getOrElse(Errors.UnsupportedVersion)
+      val error =
+        if supportsFeature(ClusterFeature.IndependentCoordinator) then
+          if isActiveController then Errors.CoordinatorLoadInProgress else Errors.NotController
+        else coordinatorPublisher.map(_.submit(delta)).getOrElse(Errors.UnsupportedVersion)
       ByteWriter().writeShort(error).result()
     case api @ (InternalApi.CoordinatorShardPrepare | InternalApi.CoordinatorShardDecide |
         InternalApi.CoordinatorShardFinalize | InternalApi.CoordinatorShardAbort) =>

@@ -71,7 +71,17 @@ final class CoordinatorShardQuorum(
           return complete(success = false)
 
         val finalizeRecord = CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Finalize)
-        val finalized = runPhase(quorum.voters.map(_.node).filter(node => decided(node.id)), finalizeRecord, term)
+        // The owner remains readable at its last acknowledged image while followers force the
+        // terminal record. Publishing locally first would make readiness race ahead of installation.
+        val remoteFinalized = runPhase(
+          quorum.voters.map(_.node).filter(node => node.id != localNodeId && decided(node.id)),
+          finalizeRecord,
+          term
+        )
+        val finalized =
+          if decided(localNodeId) && quorum.hasQuorum(remoteFinalized + localNodeId) then
+            remoteFinalized ++ runPhase(quorum.voters.map(_.node).filter(_.id == localNodeId), finalizeRecord, term)
+          else remoteFinalized
         complete(quorum.hasQuorum(finalized) && finalized(localNodeId))
       catch
         case _: InterruptedException =>

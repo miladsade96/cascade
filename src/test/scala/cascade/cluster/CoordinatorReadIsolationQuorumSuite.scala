@@ -1,6 +1,6 @@
 package cascade.cluster
 
-import cascade.coordinator.CoordinatorProbe
+import cascade.coordinator.{CoordinatorKey, CoordinatorProbe}
 import cascade.fault.{FaultCluster, FaultSelector, PeerPause}
 import cascade.group.OffsetBatchConfig
 import java.util.Properties
@@ -32,8 +32,9 @@ final class CoordinatorReadIsolationQuorumSuite extends FunSuite:
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       val group = Iterator.from(0).map(index => s"read-isolation-$index")
-        .find(value => CoordinatorRouting.owner(value, cluster.nodes).exists(_.id != controller.id)).get
-      val owner = CoordinatorRouting.owner(group, cluster.nodes).get
+        .find(value => CoordinatorRouting.owner(CoordinatorKey.group(value).routingKey, cluster.nodes).exists(_.id != controller.id)).get
+      val owner = CoordinatorRouting.owner(CoordinatorKey.group(group).routingKey, cluster.nodes).get
+      val follower = cluster.nodes.find(_.id != owner.id).get
       createTopic(cluster.bootstrapServers, partition.topic())
       writer = consumer(cluster.bootstrapServers, group)
       reader = consumer(cluster.bootstrapServers, group)
@@ -44,13 +45,13 @@ final class CoordinatorReadIsolationQuorumSuite extends FunSuite:
 
       val entered = CountDownLatch(1)
       val release = CountDownLatch(1)
-      val selector = FaultSelector(owner.id, controller.id, Some(InternalApi.CoordinatorDeltaCommit))
+      val selector = FaultSelector(owner.id, follower.id, Some(InternalApi.CoordinatorShardFinalize))
       cluster.faults.pause(PeerPause(selector, entered, release, 5000L))
       val before = cluster.broker(owner.id).metricsSnapshot.coordinatorReads.offsetSnapshots
       val write = executor.submit[Unit](() =>
         writer.nn.commitSync(Map(partition -> OffsetAndMetadata(20L)).asJava)
       )
-      assert(entered.await(5L, TimeUnit.SECONDS), "owner did not reach the paused controller publication")
+      assert(entered.await(5L, TimeUnit.SECONDS), "owner did not reach the paused shard finalization")
 
       val started = System.nanoTime()
       assertEquals(readOffset(reader.nn, partition), 10L)
