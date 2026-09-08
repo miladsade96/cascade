@@ -44,3 +44,18 @@ final class CoordinatorFormatSuite extends FunSuite:
     assert(!mixed.supports(ClusterFeature.IncrementalCoordinator))
     assert(mixed.supports(ClusterFeature.CoordinatorDeltas))
   }
+
+  test("independent coordinator activation requires format twelve and unanimous support") {
+    val active = ClusterMetadata.Empty.copy(featureLevels = Map(ClusterFeature.IndependentCoordinator -> 1.toShort))
+    assertEquals(MetadataCodec.minimumRequiredFormat(active), 12.toShort)
+    assertEquals(MetadataCodec.decode(MetadataCodec.encode(active)), active)
+    intercept[ProtocolException](MetadataCodec.encode(active, 11))
+
+    val previous = PeerCapabilities.Current.copy(
+      maxMetadataFormat = 11,
+      featureLevels = PeerCapabilities.Current.featureLevels - ClusterFeature.IndependentCoordinator
+    )
+    val mixed = NegotiatedCapabilities.across(Vector(previous, PeerCapabilities.Current)).toOption.get
+    assertEquals(mixed.metadataFormat, 11.toShort)
+    assert(!mixed.supports(ClusterFeature.IndependentCoordinator))
+  }

@@ -187,7 +187,8 @@ object PeerCapabilities:
       ClusterFeature.ConsumerProtocol -> 1,
       ClusterFeature.OnlineSnapshot -> 1,
       ClusterFeature.AdvancedCompaction -> 1,
-      ClusterFeature.DistributedQuotas -> 1
+      ClusterFeature.DistributedQuotas -> 1,
+      ClusterFeature.IndependentCoordinator -> 1
     )
   )
 
@@ -201,6 +202,7 @@ object ClusterFeature:
   val OnlineSnapshot = "online-snapshot"
   val AdvancedCompaction = "advanced-compaction"
   val DistributedQuotas = "distributed-quotas"
+  val IndependentCoordinator = "independent-coordinator"
 
 final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
   def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
