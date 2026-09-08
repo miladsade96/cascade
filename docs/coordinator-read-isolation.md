@@ -1,6 +1,6 @@
 # Acknowledged coordinator read isolation
 
-I use immutable acknowledged views to keep coordinator reads available while a write is waiting for quorum publication. This removes the shared group/delivery publication monitor from `OffsetFetch` and `read_committed` visibility decisions. It does not remove the write-side mutation lock or create independent shard consensus.
+I use immutable acknowledged views to keep coordinator reads available while a write is waiting for quorum publication. This removes the shared group/delivery publication monitor from `OffsetFetch`, `ListGroups`, `DescribeGroups`, and `read_committed` visibility decisions. It does not remove the write-side mutation lock or create independent shard consensus.
 
 ## Offset view
 
@@ -14,6 +14,12 @@ I derive `DeliveryReadView` from the last acknowledged delivery image. It indexe
 
 The Fetch handler captures one delivery view for the whole response. Last-stable-offset calculation and every transactional batch decision use that same object, even if a transaction completes while the response is being built. Transaction expiry remains scheduled on the write side; a late expiry can conservatively withhold data, but it cannot expose an uncommitted batch.
 
+## Group administration view
+
+I derive one sorted, detached `GroupAdminReadView` from the acknowledged group image. It covers classic groups, consumer-protocol groups, and groups that only retain offsets. List state filters and every requested description use this published view; a blocked or rejected checkpoint cannot expose a tentative member, assignment, state, or deletion.
+
+A successful empty-group deletion removes the group and its offsets in the same checkpoint. The old view remains readable until acknowledgement, then both disappear together. The full wire behavior, ACL contract, and deletion safeguards are in [consumer group administration](group-administration.md).
+
 ## Failure contract
 
 - A write waiting for quorum is never visible through the acknowledged view.
@@ -24,19 +30,21 @@ The Fetch handler captures one delivery view for the whole response. Last-stable
 
 ## Verification
 
-The deterministic unit tests pause a checkpoint after staging and prove that direct offset, full-group offset, last-stable-offset, and transaction visibility reads finish before the checkpoint is released. They cover both accepted and rejected publications, old-view immutability, producer-epoch fencing, newest-outcome precedence, pending transactional offsets, index removal, duplicate replacement, and concurrent counters.
+The deterministic unit tests pause a checkpoint after staging and prove that direct offset, full-group offset, group administration, last-stable-offset, and transaction visibility reads finish before the checkpoint is released. They cover both accepted and rejected publications, old-view immutability, producer-epoch fencing, newest-outcome precedence, pending transactional offsets, index removal, duplicate replacement, and concurrent counters.
 
 The three-broker wire test selects a group owned by a non-controller broker, pauses only that owner's `CoordinatorDeltaCommit` request to the controller, and issues a real Kafka `OffsetFetch`. The read returns the last acknowledged offset within a fixed deadline. After the pause is released and the checkpoint commits, the next read returns the new offset.
 
-The scale runner records four node-only counters:
+The scale runner and broker expose node-only counters for offset and delivery reads:
 
 - `cascade_coordinator_offset_read_snapshots_total`
 - `cascade_coordinator_offset_read_keys_total`
 - `cascade_coordinator_stable_offset_snapshots_total`
 - `cascade_coordinator_transaction_visibility_snapshots_total`
 
+Group administration adds six more node-only counters for list snapshots/entries, describe snapshots/hits, and delete attempts/failures. I keep their exact names and interpretation in the [group administration runbook](group-administration.md).
+
 I do not add group, topic, partition, transactional ID, or producer labels. The release gate requires the real paused-RPC test, and the 1,000-group campaign requires acknowledged offset views before and after controller failover.
 
 ## Remaining boundary
 
-This milestone narrows read/write contention for committed offsets and transaction visibility. Group joins, heartbeats, rebalances, transaction mutation, checkpoint preparation, installation, and metadata quorum publication still use shared write-side coordination. Independent per-shard journals/consensus, membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.
+This milestone narrows read/write contention for committed offsets, group administration, and transaction visibility. Group joins, heartbeats, rebalances, deletion mutation, transaction mutation, checkpoint preparation, installation, and metadata quorum publication still use shared write-side coordination. Independent per-shard journals/consensus, membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.
