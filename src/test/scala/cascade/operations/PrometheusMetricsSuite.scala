@@ -21,7 +21,7 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 127)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 144)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
@@ -76,6 +76,35 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_coordinator_publication_queue_seconds_total{node_id=\"7\"} 1.5\n"))
     assert(!output.contains("shard_id="))
     assert(!output.contains("group_id="))
+  }
+
+  test("independent coordinator metrics expose quorum and journal pressure without shard labels") {
+    val store = cascade.coordinator.CoordinatorShardStoreSnapshot(
+      finalized = 8L,
+      pending = 2,
+      journalRecords = 31L,
+      journalBytes = 4096L,
+      forceNanos = 1_500_000_000L,
+      truncatedBytes = 7L
+    )
+    val measured = cascade.coordinator.CoordinatorQuorumSnapshot(
+      inflight = 3,
+      peakInflight = 9,
+      attempts = 12L,
+      committed = 8L,
+      failed = 4L,
+      prepareMessages = 30L,
+      phaseNanos = 2_000_000_000L,
+      recordBytes = 8192L,
+      store = store
+    )
+    val output = PrometheusMetrics.encode(snapshot.copy(coordinatorQuorum = measured))
+    assert(output.contains("cascade_coordinator_quorum_inflight{node_id=\"7\"} 3.0\n"))
+    assert(output.contains("cascade_coordinator_quorum_committed_total{node_id=\"7\"} 8.0\n"))
+    assert(output.contains("cascade_coordinator_quorum_phase_seconds_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_shard_journal_bytes{node_id=\"7\"} 4096.0\n"))
+    assert(output.contains("cascade_coordinator_shard_journal_force_seconds_total{node_id=\"7\"} 1.5\n"))
+    assert(!output.contains("shard_id="))
   }
 
   test("acknowledged coordinator read metrics remain node-scoped") {

@@ -284,7 +284,8 @@ final class KafkaBroker(
       shardObjects = cluster.map(_.shardObjectSnapshot).getOrElse(cascade.cluster.ShardObjectSnapshot()),
       offsetBatch = Option(handler).map(_.offsetBatchSnapshot).getOrElse(cascade.group.OffsetBatchSnapshot()),
       metadataTransfers = cluster.map(_.metadataTransferSnapshot).getOrElse(cascade.cluster.MetadataTransferSnapshot.Empty),
-      coordinatorReads = coordinatorReadMetrics.snapshot
+      coordinatorReads = coordinatorReadMetrics.snapshot,
+      coordinatorQuorum = cluster.map(_.coordinatorQuorumSnapshot).getOrElse(cascade.coordinator.CoordinatorQuorumSnapshot())
     )
 
   def healthSnapshot: BrokerHealth =

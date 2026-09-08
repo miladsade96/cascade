@@ -1,7 +1,7 @@
 package cascade.operations
 
 import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
-import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot, CoordinatorReadSnapshot}
+import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot, CoordinatorQuorumSnapshot, CoordinatorReadSnapshot}
 import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot, ShardObjectSnapshot}
 import java.util.concurrent.atomic.AtomicLong
 
@@ -99,7 +99,8 @@ final case class BrokerMetricsSnapshot(
     metadataTransfers: MetadataTransferSnapshot = MetadataTransferSnapshot.Empty,
     shardObjects: ShardObjectSnapshot = ShardObjectSnapshot(),
     offsetBatch: cascade.group.OffsetBatchSnapshot = cascade.group.OffsetBatchSnapshot(),
-    coordinatorReads: CoordinatorReadSnapshot = CoordinatorReadSnapshot()
+    coordinatorReads: CoordinatorReadSnapshot = CoordinatorReadSnapshot(),
+    coordinatorQuorum: CoordinatorQuorumSnapshot = CoordinatorQuorumSnapshot()
 )
 
 object PrometheusMetrics:
@@ -137,6 +138,23 @@ object PrometheusMetrics:
     counter(builder, "cascade_coordinator_publication_committed_requests_total", "Shard proposals acknowledged by committed controller batches.", snapshot.coordinatorPublication.committedRequests.toDouble, labels)
     counter(builder, "cascade_coordinator_publication_conflicts_total", "Shard proposals rejected because their term, version, or payload conflicted.", snapshot.coordinatorPublication.conflictedRequests.toDouble, labels)
     counter(builder, "cascade_coordinator_publication_queue_seconds_total", "Cumulative wait before controller publication dispatch.", snapshot.coordinatorPublication.queueNanos / 1_000_000_000d, labels)
+    gauge(builder, "cascade_coordinator_quorum_inflight", "Independent shard transactions currently in flight.", snapshot.coordinatorQuorum.inflight.toDouble, labels)
+    gauge(builder, "cascade_coordinator_quorum_peak_inflight", "Peak concurrent independent shard transactions since startup.", snapshot.coordinatorQuorum.peakInflight.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_attempts_total", "Independent shard transaction attempts.", snapshot.coordinatorQuorum.attempts.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_committed_total", "Independent shard transactions finalized by a voter majority.", snapshot.coordinatorQuorum.committed.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_failed_total", "Independent shard transactions that did not finalize by a voter majority.", snapshot.coordinatorQuorum.failed.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_rejected_total", "Independent shard transactions rejected by bounded admission.", snapshot.coordinatorQuorum.rejected.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_prepare_messages_total", "Local and remote durable shard prepare operations.", snapshot.coordinatorQuorum.prepareMessages.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_decision_messages_total", "Local and remote durable shard decision operations.", snapshot.coordinatorQuorum.decisionMessages.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_finalize_messages_total", "Local and remote durable shard finalize operations.", snapshot.coordinatorQuorum.finalizeMessages.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_abort_messages_total", "Local and remote durable shard abort operations.", snapshot.coordinatorQuorum.abortMessages.toDouble, labels)
+    counter(builder, "cascade_coordinator_quorum_phase_seconds_total", "Cumulative local and remote shard quorum phase time.", snapshot.coordinatorQuorum.phaseNanos / 1_000_000_000d, labels)
+    counter(builder, "cascade_coordinator_quorum_record_bytes_total", "Encoded quorum record bytes attempted across participants.", snapshot.coordinatorQuorum.recordBytes.toDouble, labels)
+    gauge(builder, "cascade_coordinator_shard_transactions_pending", "Locally prepared shard transactions awaiting a terminal marker.", snapshot.coordinatorQuorum.store.pending.toDouble, labels)
+    counter(builder, "cascade_coordinator_shard_journal_records_total", "Forced records across local coordinator shard journals.", snapshot.coordinatorQuorum.store.journalRecords.toDouble, labels)
+    gauge(builder, "cascade_coordinator_shard_journal_bytes", "Bytes retained across local coordinator shard journals.", snapshot.coordinatorQuorum.store.journalBytes.toDouble, labels)
+    counter(builder, "cascade_coordinator_shard_journal_force_seconds_total", "Cumulative local coordinator shard journal force time.", snapshot.coordinatorQuorum.store.forceNanos / 1_000_000_000d, labels)
+    counter(builder, "cascade_coordinator_shard_journal_truncated_bytes_total", "Incomplete coordinator shard journal tail bytes removed during recovery.", snapshot.coordinatorQuorum.store.truncatedBytes.toDouble, labels)
     counter(builder, "cascade_coordinator_offset_read_snapshots_total", "Offset reads served from one immutable acknowledged view.", snapshot.coordinatorReads.offsetSnapshots.toDouble, labels)
     counter(builder, "cascade_coordinator_offset_read_keys_total", "Acknowledged offset keys returned by immutable views.", snapshot.coordinatorReads.offsetKeys.toDouble, labels)
     counter(builder, "cascade_coordinator_stable_offset_snapshots_total", "Last-stable-offset decisions served from acknowledged transaction views.", snapshot.coordinatorReads.stableOffsetSnapshots.toDouble, labels)
