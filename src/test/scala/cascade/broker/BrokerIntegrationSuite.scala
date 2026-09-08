@@ -172,6 +172,38 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("lists acknowledged offset groups with Kafka ListGroups v4 state filters") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("admin-events", correlationId = 60))
+        request(output, input, offsetCommitV5Request("admin-readers", "admin-events", 9L, correlationId = 61))
+
+        def listed(states: Vector[String], correlationId: Int): Vector[(String, String, String)] =
+          val writer = requestHeader(ApiKey.ListGroups, 4, correlationId, flexible = true)
+          writer.writeCompactArray(states)(writer.writeCompactString).writeEmptyTaggedFields()
+          val response = request(output, input, writer.result())
+          assertEquals(response.readInt(), correlationId)
+          response.skipTaggedFields()
+          assertEquals(response.readInt(), 0)
+          assertEquals(response.readShort(), Errors.None)
+          val groups = response.readCompactArray {
+            val group = (response.readCompactString(), response.readCompactString(), response.readCompactString())
+            response.skipTaggedFields()
+            group
+          }
+          response.skipTaggedFields()
+          response.ensureFullyRead()
+          groups
+
+        assertEquals(listed(Vector("Empty"), 62), Vector(("admin-readers", "", "Empty")))
+        assertEquals(listed(Vector("Stable"), 63), Vector.empty)
+      finally socket.close()
+    }
+  }
+
   test("idempotent producer retries return the original offset and reject sequence gaps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
