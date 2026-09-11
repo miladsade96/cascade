@@ -1,6 +1,6 @@
 # Acknowledged coordinator read isolation
 
-I use immutable acknowledged views to keep coordinator reads available while a write is waiting for quorum publication. This removes the shared group/delivery publication monitor from `OffsetFetch`, `ListGroups`, `DescribeGroups`, and `read_committed` visibility decisions. It does not remove the write-side mutation lock or create independent shard consensus.
+I use immutable acknowledged views to keep coordinator reads available while a write is waiting for quorum publication. This removes the shared group/delivery publication monitor from `OffsetFetch`, `ListGroups`, `DescribeGroups`, and `read_committed` visibility decisions. Format 12 now provides the [independent shard quorum](coordinator-architecture.md), but it does not remove the broker-local write-side mutation lock.
 
 ## Offset view
 
@@ -32,7 +32,7 @@ A successful empty-group deletion removes the group and its offsets in the same 
 
 The deterministic unit tests pause a checkpoint after staging and prove that direct offset, full-group offset, group administration, last-stable-offset, and transaction visibility reads finish before the checkpoint is released. They cover both accepted and rejected publications, old-view immutability, producer-epoch fencing, newest-outcome precedence, pending transactional offsets, index removal, duplicate replacement, and concurrent counters.
 
-The three-broker wire test selects a group owned by a non-controller broker, pauses only that owner's `CoordinatorDeltaCommit` request to the controller, and issues a real Kafka `OffsetFetch`. The read returns the last acknowledged offset within a fixed deadline. After the pause is released and the checkpoint commits, the next read returns the new offset.
+The three-broker wire test selects a group owned by a non-controller broker, pauses that owner's shard-finalize request to one follower, and issues a real Kafka `OffsetFetch`. The read returns the last acknowledged offset within a fixed deadline. After the pause is released and finalization commits, the next read returns the new offset.
 
 The scale runner and broker expose node-only counters for offset and delivery reads:
 
@@ -47,4 +47,4 @@ I do not add group, topic, partition, transactional ID, or producer labels. The 
 
 ## Remaining boundary
 
-This milestone narrows read/write contention for committed offsets, group administration, and transaction visibility. Group joins, heartbeats, rebalances, deletion mutation, transaction mutation, checkpoint preparation, installation, and metadata quorum publication still use shared write-side coordination. Independent per-shard journals/consensus, membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.
+This milestone narrows read/write contention for committed offsets, group administration, and transaction visibility. Format 12 now uses forced per-shard quorum journals instead of metadata-quorum publication for steady-state coordinator writes. Group joins, heartbeats, rebalances, deletion mutation, transaction mutation, checkpoint preparation, and installation still share broker-local write-side coordination. Distributed resolution of decided transactions, journal checkpoint compaction, membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.

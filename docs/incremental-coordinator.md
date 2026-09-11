@@ -2,7 +2,7 @@
 
 This runbook describes the format-10 inline path qualified at 1.2.0. Release 1.3.0 adds the separately gated [format-11 shard-object storage path](shard-storage.md), while retaining this peer delta protocol and the existing atomic quorum. Its [development qualification report](performance/2026-09-02-shard-storage.md) includes warmed persistent clients and actual object I/O; it does not claim independent consensus or removal of shared locks.
 
-I am removing complete coordinator images from the steady-state journal and peer commit paths. This is the next coordinator-capacity step, not independent per-shard consensus: publication, in-memory images, and service locks remain shared.
+This document describes the format-10 incremental metadata path. The later [format-12 coordinator architecture](coordinator-architecture.md) removes steady-state coordinator writes from the metadata quorum and stores prepare/decision/finalize records in per-shard journals. In-memory service mutation remains shared and is still a capacity boundary.
 
 ## Safety and acceptance contract
 
@@ -14,7 +14,7 @@ I am removing complete coordinator images from the steady-state journal and peer
 - A new committed feature and storage-format floor gate activation. Mixed-version clusters retain their previous encoding until every voter supports the new format.
 - I require codec/validation tests, torn-tail and checkpoint recovery, wire-level fault tests, Kafka offset/transaction recovery, the complete suite, and measured journal/replication bytes before claiming the optimization works.
 
-Physical power loss, independent shard consensus, fine-grained service locks, multi-day load, and dedicated-host capacity remain separate release gates.
+The later format-12 path implements independent shard quorum journals. Physical power loss, distributed resolution after coordinator loss, shard-journal compaction, fine-grained service locks, multi-day load, and dedicated-host capacity remain separate release gates.
 
 ## Encoding and recovery
 

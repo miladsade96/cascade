@@ -10,7 +10,7 @@ I run the deterministic blocked-publication and real three-broker pause tests be
 .\sbt.bat "testOnly cascade.group.OffsetReadViewSuite cascade.group.OffsetCommitIsolationSuite cascade.delivery.DeliveryReadViewSuite cascade.delivery.DeliveryCoordinatorSuite cascade.coordinator.CoordinatorReadMetricsSuite cascade.fault.NetworkFaultControllerSuite cascade.cluster.CoordinatorReadIsolationQuorumSuite"
 ```
 
-The real-cluster test pauses one specific owner-to-controller coordinator commit. It fails if `OffsetFetch` waits for that paused write, returns the tentative value, or fails to return the new value after publication resumes. The fault controller has bounded waits and fails closed if the expected RPC never arrives.
+The real-cluster test pauses one specific owner-to-follower shard-finalize call. It fails if `OffsetFetch` waits for that paused write, returns the tentative value, or fails to return the new value after finalization resumes. The fault controller has bounded waits and fails closed if the expected RPC never arrives.
 
 I then run the cardinality/recovery campaign with explicit batching and publication settings:
 
@@ -20,7 +20,7 @@ I then run the cardinality/recovery campaign with explicit batching and publicat
 
 I require `status=passed`, 1,000/1,000 verified groups, 3,000 timed writes, controller failover, full restart recovery, all three owners, no connection/batch/publication admission rejection, and at least 2,000 acknowledged offset snapshots and keys. I archive the raw JSON, source revision, Java version, processor count, and command. This workload does not exercise transactional Fetch, so zero stable-offset or transaction-visibility counters are expected here; their blocked-checkpoint and Kafka-client suites remain mandatory.
 
-The current development-host result is recorded in the [2026-09-07 report](performance/2026-09-07-coordinator-read-isolation.md). I do not compare throughput across different batching/publication settings or use it as dedicated-host capacity evidence.
+The original acknowledged-read result is recorded in the [2026-09-07 report](performance/2026-09-07-coordinator-read-isolation.md). The current format-12 command and result are in the [coordinator architecture runbook](coordinator-architecture.md). I do not compare throughput across different architectures as a controlled benchmark or use development-host output as dedicated-host capacity evidence.
 
 ## Multi-day soak
 

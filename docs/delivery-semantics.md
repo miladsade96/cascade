@@ -34,4 +34,4 @@ The release gate also runs the full Kafka 4.3.1 end-to-end suite and the three-b
 
 ## Remaining production gates
 
-The transaction coordinator still uses the shared metadata quorum and write-side delivery lock. I still need independent shard consensus/execution, high-cardinality concurrent transaction churn on dedicated RF=3 hosts, broader producer/client version matrices, multi-day authenticated soak evidence, arbitrary packet impairment, and real power/device-loss results before calling Cascade a production Kafka replacement.
+At metadata format 12 the transaction coordinator uses forced per-shard quorum journals instead of the metadata-controller log. The write-side delivery lock remains shared, and a new owner cannot yet resolve a transaction whose previous owner died after majority decision but before terminal finalization. I still need journal checkpoint compaction, high-cardinality concurrent transaction churn on dedicated RF=3 hosts, broader producer/client version matrices, multi-day authenticated soak evidence, arbitrary packet impairment, and real power/device-loss results before calling Cascade a production Kafka replacement.

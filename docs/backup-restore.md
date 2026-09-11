@@ -4,7 +4,7 @@ I use Cascade's maintenance commands for offline, file-exact disaster-recovery c
 
 ## What the backup contains
 
-The tool copies every regular file under `--data-dir`, including topic segments, indexes, high-watermark checkpoints, coordinator journals, cluster metadata, and the clean-shutdown marker. It does not follow symbolic links and refuses an unsupported file type.
+The tool copies every regular file under `--data-dir`, including topic segments, indexes, high-watermark checkpoints, legacy coordinator journals, `.cascade/coordinator-quorum/shard-NNN.log` files, cluster metadata, and the clean-shutdown marker. It does not follow symbolic links and refuses an unsupported file type. Restoring only cluster metadata after format 12 activation loses independently committed coordinator state, so I always preserve and restore the whole broker data directory.
 
 My broker command-line configuration, TLS key stores, credential/ACL files, operations token, audit log, and structured event log are included only if I deliberately placed them under the data directory. I normally keep those secrets and configuration in a separate encrypted configuration backup. I record the matching node ID, listener addresses, cluster bootstrap settings, software revision, and JDK alongside each backup.
 

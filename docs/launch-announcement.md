@@ -10,7 +10,7 @@ The release and launch posts below are historical.
 
 I've packaged Cascade's latest coordinator improvements as `miladsade96/cascade:1.3.0` for Linux/amd64: immutable shard-object storage, bounded offset batching, cached coordinator snapshots, and fixes for consumer session expiry and snapshot installation. Existing Kafka clients can connect without a custom SDK.
 
-I keep the exact image qualification and publication status in [the release notes](releases/1.3.0.md). This is an open-source release, not a production-readiness claim: shared-quorum capacity, long soaks, physical failure testing, and broader compatibility are still on my checklist.
+I keep the exact image qualification and publication status in [the release notes](releases/1.3.0.md). This is an open-source release, not a production-readiness claim. The post-release source tree now has a format-12 per-shard coordinator quorum, while distributed decision recovery, journal compaction, service-lock capacity, long soaks, physical failure testing, and broader compatibility remain on my checklist.
 
 The original launch copy below is historical; its test counts, container size, and benchmarks are not measurements of the 1.3.0 image.
 

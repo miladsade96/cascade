@@ -35,9 +35,9 @@ I export attempts, commits, failures, admission rejection, current and peak in-f
 
 ## Qualification result
 
-On 2026-09-08 I ran 1,000 simultaneously resident Kafka consumers with concurrency 32 and two measured rounds. The run completed 3,000 acknowledged offset writes, verified 1,000/1,000 final offsets, used all three owners, survived controller loss, and recovered after a full restart.
+On 2026-09-11 I ran 1,000 simultaneously resident Kafka consumers with concurrency 32 and two measured rounds. The run completed 3,000 acknowledged offset writes, verified 1,000/1,000 final offsets, used all three owners, survived controller loss, and recovered after a full restart.
 
-The measured write phase took 10.993 seconds: 272.890 writes/s, 102.145 ms p50, 225.710 ms p95, and 413.343 ms p99. All 666 admitted quorum transactions committed; none failed or were rejected. The three brokers forced 28,998 shard-journal records totaling 63,770,586 bytes, with zero torn-tail truncation. This local Windows result is a correctness and regression measurement, not a production SLO or a dedicated-host capacity limit.
+The measured write phase took 8.136 seconds: 368.719 writes/s, 81.623 ms p50, 114.494 ms p95, and 256.974 ms p99. All 672 admitted quorum transactions committed; none failed or were rejected. The three brokers forced 28,908 shard-journal records totaling 63,881,354 bytes, with zero torn-tail truncation. The complete suite passed 525/525, and the focused coordinator matrix passed 81/81. This local Windows result is a correctness and regression measurement, not a production SLO or a dedicated-host capacity limit. The [dated report](performance/2026-09-11-independent-coordinator.md) retains the complete evidence and limitations.
 
 ## What I still do not claim
 
@@ -56,4 +56,4 @@ Until those gates close, I present this as the independent coordinator foundatio
 & 'C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot\bin\java.exe' -jar .tools\sbt-launch-1.12.6.jar "Test / runMain cascade.qualification.CoordinatorScaleQualification --groups 1000 --concurrency 32 --rounds 2 --client-lifecycle persistent --batch-max-requests 64 --batch-linger-ms 2 --publication-max-requests 64 --publication-linger-ms 2 --report artifacts/coordinator-independent.json"
 ```
 
-The report is written only after exact verification succeeds. The `artifacts` directory is intentionally ignored because qualification output belongs to the machine and revision that produced it.
+The report is written only after exact verification succeeds. The `artifacts` directory is intentionally ignored because qualification output belongs to the machine and revision that produced it; I copy the accepted result into a dated tracked report.

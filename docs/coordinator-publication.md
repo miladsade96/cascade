@@ -1,6 +1,6 @@
 # Coordinator publication batching
 
-I use this milestone to reduce one measured coordinator bottleneck without pretending that Cascade now has independent coordinator Raft groups.
+This document describes the controller-publication path retained for metadata formats 9–11. The later [format-12 coordinator architecture](coordinator-architecture.md) moves steady-state coordinator mutations to forced per-shard quorum journals.
 
 ## Contract
 
@@ -48,4 +48,4 @@ I gate this contract with a three-broker fault test that pauses one owner's comm
 
 ## Remaining boundary
 
-This removes redundant quorum rounds when compatible proposals arrive together, and acknowledged read views keep covered reads off the publication monitor. It does not remove the controller's metadata mutation lock, shared metadata quorum, full coordinator image held by every broker, group/delivery mutation lock, or per-proposal snapshot capture. Workloads that touch the allocator or the same hash bucket still conflict by design. Independent per-shard consensus and execution, finer-grained mutation locking, controlled dedicated-host RF=3 capacity, membership rebalance churn, and high-cardinality transaction churn remain release gates.
+For formats 9–11 this removes redundant quorum rounds when compatible proposals arrive together, and acknowledged read views keep covered reads off the publication monitor. Format 12 bypasses this queue and the metadata quorum for steady-state coordinator mutations. Every broker still holds a complete coordinator image, group/delivery mutation remains locally shared, and workloads touching the allocator or the same hash bucket conflict by design. Distributed decided-transaction resolution, shard-journal compaction, finer-grained mutation locking, controlled dedicated-host RF=3 capacity, membership rebalance churn, and high-cardinality transaction churn remain release gates.

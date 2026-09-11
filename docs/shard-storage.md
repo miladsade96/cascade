@@ -1,6 +1,6 @@
 # Shard-isolated coordinator storage
 
-I store changed coordinator shard payloads separately from the ordered metadata commit journal. This is a staged capacity change: immutable, independently checksummed shard objects and small atomic commit references first; independent shard consensus and service locks remain separate work.
+This document describes the format-11 storage milestone: changed coordinator shard payloads live separately from the ordered metadata commit journal as immutable, independently checksummed objects with small atomic commit references. The later [format-12 architecture](coordinator-architecture.md) adds forced per-shard quorum journals. Broker-local service locking remains separate work.
 
 The feature is included in `1.3.0`, following qualification during 1.3.0-SNAPSHOT development. It is not part of the older 1.2.0 image. I keep image status and upgrade limitations in the [release notes](releases/1.3.0.md).
 
@@ -19,7 +19,7 @@ The feature is included in `1.3.0`, following qualification during 1.3.0-SNAPSHO
 
 I require object/record codec and size-bound tests, concurrent preparation, multi-shard atomicity, torn markers, orphan preparation, missing/corrupt object rejection, checkpoint/reclamation restart tests, feature negotiation, cluster failover, exact backup/restore, and the complete regression suite. The long-lived Kafka-client runner separates connection churn from coordinator work, reports latency and actual disk/wire counters, and verifies offsets through failover and restart. The existing churn benchmark remains a regression workload. I archive the [measured qualification](performance/2026-09-02-shard-storage.md), including failed attempts and remaining limits.
 
-This work does not qualify multi-day soak, physical power/device loss, independent per-shard consensus, or dedicated-host production capacity. The force/rename contract must still be qualified on the target filesystem and devices.
+This format-11 work does not qualify multi-day soak, physical power/device loss, or dedicated-host production capacity. Format 12 adds per-shard quorum journals but still needs distributed decision resolution, journal compaction, and the same external qualification. The force/rename contract must still be qualified on the target filesystem and devices.
 
 ## Layout and recovery
 
