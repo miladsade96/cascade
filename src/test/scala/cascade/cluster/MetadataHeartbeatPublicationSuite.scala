@@ -9,7 +9,8 @@ import scala.jdk.CollectionConverters.*
 
 final class MetadataHeartbeatPublicationSuite extends FunSuite:
   test("heartbeat reconciliation waits for a follower-first metadata publication to settle") {
-    val cluster = FaultCluster(3, peerTimeoutMillis = 3000, heartbeatMillis = 100, electionTimeoutMillis = 10000)
+    val cluster = FaultCluster(3, peerTimeoutMillis = 3000, heartbeatMillis = 100, electionTimeoutMillis = 10000,
+      advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     val publisher = Executors.newSingleThreadExecutor()
     val persisted = CountDownLatch(2)
     val release = CountDownLatch(1)

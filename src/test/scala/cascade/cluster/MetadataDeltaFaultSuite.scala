@@ -7,7 +7,7 @@ import munit.FunSuite
 
 final class MetadataDeltaFaultSuite extends FunSuite:
   test("a lagging follower rejects the delta base and triggers full snapshot recovery") {
-    val cluster = FaultCluster(3)
+    val cluster = FaultCluster(3, advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
@@ -35,7 +35,7 @@ final class MetadataDeltaFaultSuite extends FunSuite:
   }
 
   test("missing both delta commit acknowledgements never reports a successful quorum write") {
-    val cluster = FaultCluster(3)
+    val cluster = FaultCluster(3, advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)

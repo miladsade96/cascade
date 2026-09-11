@@ -17,7 +17,8 @@ final class MetadataDeltaReplicationSuite extends FunSuite:
     finally peer.close()
 
   test("a live quorum replicates compact deltas and idempotently acknowledges retransmission") {
-    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000)
+    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000,
+      advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
@@ -49,7 +50,8 @@ final class MetadataDeltaReplicationSuite extends FunSuite:
   }
 
   test("all brokers recover exact incremental coordinator state after a full restart") {
-    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000)
+    val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250, electionTimeoutMillis = 5000,
+      advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)

@@ -6,7 +6,8 @@ import cascade.protocol.ByteCursor
 final class FaultInjectingPeerTransport(
     localNodeId: Int,
     faults: NetworkFaultController,
-    delegate: PeerTransport
+    delegate: PeerTransport,
+    advertisedCapabilities: Option[PeerCapabilities] = None
 ) extends PeerTransport:
   override def call(node: ClusterNode, apiKey: Short, payload: Array[Byte], timeoutMillis: Int): ByteCursor =
     val call = PeerCall(localNodeId, node.id, apiKey, payload.toVector)
@@ -17,4 +18,5 @@ final class FaultInjectingPeerTransport(
 
   override def capabilities(node: ClusterNode, timeoutMillis: Int): PeerCapabilities =
     faults.beforeCall(PeerCall(localNodeId, node.id, InternalApi.PeerFeatures, Vector.empty))
-    delegate.capabilities(node, timeoutMillis)
+    val actual = delegate.capabilities(node, timeoutMillis)
+    advertisedCapabilities.getOrElse(actual)

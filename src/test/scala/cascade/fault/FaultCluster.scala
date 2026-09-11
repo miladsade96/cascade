@@ -1,7 +1,7 @@
 package cascade.fault
 
 import cascade.broker.{BrokerConfig, KafkaBroker}
-import cascade.cluster.{ClusterNode, PeerClient}
+import cascade.cluster.{ClusterFeature, ClusterNode, PeerCapabilities, PeerClient}
 import cascade.storage.FlushPolicy
 import java.net.ServerSocket
 import java.nio.file.Files
@@ -21,7 +21,8 @@ final class FaultCluster(
     journalCompactionBytes: Long = 128L * 1024 * 1024,
     maxConnectionsPerIp: Int = 1000,
     offsetBatch: cascade.group.OffsetBatchConfig = cascade.group.OffsetBatchConfig(),
-    coordinatorPublication: cascade.coordinator.CoordinatorPublicationConfig = cascade.coordinator.CoordinatorPublicationConfig()
+    coordinatorPublication: cascade.coordinator.CoordinatorPublicationConfig = cascade.coordinator.CoordinatorPublicationConfig(),
+    advertisedCapabilities: Option[PeerCapabilities] = None
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
   private val voterCount = if initialVoters < 0 then size else initialVoters
@@ -66,7 +67,7 @@ final class FaultCluster(
     require(!running.contains(nodeId), s"broker $nodeId is already running")
     val broker = KafkaBroker(
       configs(nodeId - 1),
-      local => FaultInjectingPeerTransport(local.id, faults, PeerClient())
+      local => FaultInjectingPeerTransport(local.id, faults, PeerClient(), advertisedCapabilities)
     )
     broker.start()
     running.update(nodeId, broker)
@@ -94,3 +95,10 @@ final class FaultCluster(
       val paths = Files.walk(root)
       try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
       finally paths.close()
+
+object FaultCluster:
+  /** Keeps legacy metadata-publication tests on the format-11 path they are designed to exercise. */
+  val Format11Capabilities: PeerCapabilities = PeerCapabilities.Current.copy(
+    maxMetadataFormat = 11,
+    featureLevels = PeerCapabilities.Current.featureLevels - ClusterFeature.IndependentCoordinator
+  )

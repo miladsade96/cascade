@@ -9,7 +9,8 @@ import munit.FunSuite
 final class MetadataFailureFencingSuite extends FunSuite:
   test("a real broker fences coordinator service after checkpoint publication fails") {
     val cluster = FaultCluster(3, peerTimeoutMillis = 1500, heartbeatMillis = 250,
-      electionTimeoutMillis = 5000, journalCompactionBytes = 1024L)
+      electionTimeoutMillis = 5000, journalCompactionBytes = 1024L,
+      advertisedCapabilities = Some(FaultCluster.Format11Capabilities))
     try
       cluster.startAll()
       CoordinatorProbe.activate(cluster.bootstrapServers)
