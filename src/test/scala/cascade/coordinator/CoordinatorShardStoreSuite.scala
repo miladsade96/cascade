@@ -162,6 +162,35 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     finally store.close()
   }
 
+  test("journal checkpoints bound churn and recover the latest shard image") {
+    val directory = Files.createTempDirectory("cascade-coordinator-checkpoint")
+    val group = "checkpoint-group"
+    val shard = CoordinatorShard.group(group)
+    val store = CoordinatorShardStore(directory, baseline, compactionBytes = 1024L)
+    try
+      (1L to 40L).foreach { offset =>
+        val value = OffsetCommitValue(GroupOffsetKey(group, "events", 0), CommittedOffset(offset, -1, None, offset))
+        val payload = GroupShardCodec.split(GroupCodec.encode(GroupImage(offset, Vector.empty, Vector(value))).toVector)(shard)
+        val delta = CoordinatorDelta(21L, Vector(CoordinatorShardUpdate(shard, store.metadata.shardVersion(shard), payload)))
+        val transaction = CoordinatorTransactionId(1000L, offset)
+        assertEquals(store.prepare(transaction, delta, 21L), Errors.None)
+        certify(store, transaction)
+        assert(store.finalizeTransaction(transaction).isRight)
+      }
+      assertEquals(store.metadata.groupImage.offsets.head.value.offset, 40L)
+      assert(store.snapshot.compactions > 0L)
+      assert(store.snapshot.reclaimedBytes > 0L)
+      assert(store.snapshot.journalBytes < 1024L)
+    finally store.close()
+
+    val recovered = CoordinatorShardStore(directory, baseline, compactionBytes = 1024L)
+    try
+      assertEquals(recovered.metadata.groupImage.offsets.head.value.offset, 40L)
+      assertEquals(recovered.metadata.shardVersion(shard), 40L)
+      assertEquals(recovered.snapshot.pending, 0)
+    finally recovered.close()
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): (String, CoordinatorDelta) =
     val group = Iterator.from(0).map(index => s"$seed-$index").find(value => CoordinatorShard.group(value) != 0).get
     val shard = CoordinatorShard.group(group)

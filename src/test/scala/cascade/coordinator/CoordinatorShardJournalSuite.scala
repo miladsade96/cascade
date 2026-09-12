@@ -53,3 +53,33 @@ final class CoordinatorShardJournalSuite extends FunSuite:
     try intercept[IllegalArgumentException](journal.append(CoordinatorQuorumRecord.prepare(transaction, foreign)))
     finally journal.close()
   }
+
+  test("atomically replaces history with a forced shard checkpoint") {
+    val directory = Files.createTempDirectory("cascade-shard-checkpoint")
+    val path = CoordinatorShardJournal.path(directory, shard)
+    val journal = CoordinatorShardJournal(path, shard)
+    try
+      (0 until 12).foreach { index =>
+        journal.append(CoordinatorQuorumRecord.prepare(
+          CoordinatorTransactionId(index.toLong + 1L, index.toLong + 2L),
+          delta
+        ))
+      }
+      val before = journal.snapshot.bytes
+      val checkpoint = CoordinatorQuorumRecord.checkpoint(
+        CoordinatorShardCheckpoint(shard, 7L, 9L, 3L, Vector(4, 5, 6).map(_.toByte))
+      )
+      journal.replace(Vector(checkpoint))
+      assertEquals(journal.entries, Vector(checkpoint))
+      assert(journal.snapshot.bytes < before)
+      assertEquals(journal.snapshot.compactions, 1L)
+      assert(journal.snapshot.reclaimedBytes > 0L)
+      val paths = Files.list(directory)
+      try assertEquals(paths.filter(_.getFileName.toString.endsWith(".checkpoint")).count(), 0L)
+      finally paths.close()
+    finally journal.close()
+
+    val recovered = CoordinatorShardJournal(path, shard)
+    try assertEquals(recovered.entries.head.checkpoint.map(_.shardVersion), Some(7L))
+    finally recovered.close()
+  }
