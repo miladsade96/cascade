@@ -6,6 +6,8 @@ final case class CoordinatorTransactionId(high: Long, low: Long):
   def uuid: UUID = UUID(high, low)
 
 object CoordinatorTransactionId:
+  val Checkpoint: CoordinatorTransactionId = CoordinatorTransactionId(0L, 0L)
+
   def random(): CoordinatorTransactionId =
     val value = UUID.randomUUID()
     CoordinatorTransactionId(value.getMostSignificantBits, value.getLeastSignificantBits)
@@ -17,16 +19,28 @@ enum CoordinatorQuorumPhase(val id: Byte):
   case Abort extends CoordinatorQuorumPhase(3)
   case Commit extends CoordinatorQuorumPhase(4)
   case Recover extends CoordinatorQuorumPhase(5)
+  case Checkpoint extends CoordinatorQuorumPhase(6)
 
 object CoordinatorQuorumPhase:
   def fromId(id: Byte): CoordinatorQuorumPhase = values.find(_.id == id)
     .getOrElse(throw IllegalArgumentException(s"unknown coordinator quorum phase: $id"))
 
+final case class CoordinatorShardCheckpoint(
+    shard: Int,
+    shardVersion: Long,
+    imageVersion: Long,
+    ownerTerm: Long,
+    payload: Vector[Byte]
+):
+  require(CoordinatorShard.valid(shard), "invalid checkpoint shard ID")
+  require(shardVersion >= 0L && imageVersion >= 0L && ownerTerm >= 0L, "negative coordinator checkpoint version")
+
 final case class CoordinatorQuorumRecord(
     transactionId: CoordinatorTransactionId,
     phase: CoordinatorQuorumPhase,
     delta: Option[CoordinatorDelta],
-    certificate: Option[CoordinatorDecisionCertificate] = None
+    certificate: Option[CoordinatorDecisionCertificate] = None,
+    checkpoint: Option[CoordinatorShardCheckpoint] = None
 ):
   require(
     Set(CoordinatorQuorumPhase.Prepare, CoordinatorQuorumPhase.Recover).contains(phase) == delta.nonEmpty,
@@ -36,8 +50,9 @@ final case class CoordinatorQuorumRecord(
     Set(CoordinatorQuorumPhase.Commit, CoordinatorQuorumPhase.Recover).contains(phase) == certificate.nonEmpty,
     "only commit and recovery records carry a decision certificate"
   )
+  require((phase == CoordinatorQuorumPhase.Checkpoint) == checkpoint.nonEmpty, "only checkpoint records carry a shard image")
 
-  def shards: Vector[Int] = delta.toVector.flatMap(_.updates.map(_.id)).distinct.sorted
+  def shards: Vector[Int] = (delta.toVector.flatMap(_.updates.map(_.id)) ++ checkpoint.map(_.shard)).distinct.sorted
 
 object CoordinatorQuorumRecord:
   def prepare(transactionId: CoordinatorTransactionId, delta: CoordinatorDelta): CoordinatorQuorumRecord =
@@ -62,3 +77,6 @@ object CoordinatorQuorumRecord:
       certificate: CoordinatorDecisionCertificate
   ): CoordinatorQuorumRecord =
     CoordinatorQuorumRecord(transactionId, CoordinatorQuorumPhase.Recover, Some(delta), Some(certificate))
+
+  def checkpoint(value: CoordinatorShardCheckpoint): CoordinatorQuorumRecord =
+    CoordinatorQuorumRecord(CoordinatorTransactionId.Checkpoint, CoordinatorQuorumPhase.Checkpoint, None, None, Some(value))

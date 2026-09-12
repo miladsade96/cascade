@@ -1288,6 +1288,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case CoordinatorQuorumPhase.Abort    => InternalApi.CoordinatorShardAbort
       case CoordinatorQuorumPhase.Commit   => InternalApi.CoordinatorShardCommit
       case CoordinatorQuorumPhase.Recover  => InternalApi.CoordinatorShardRecover
+      case CoordinatorQuorumPhase.Checkpoint => throw IllegalArgumentException("coordinator checkpoints are local records")
     val request = CoordinatorQuorumRequest(currentTerm, record)
     val payload = CoordinatorQuorumRequestCodec.encode(request)
     callPeers(targets, config.peerTimeoutMillis) { node =>

@@ -273,6 +273,7 @@ final class CoordinatorShardQuorum(
         case CoordinatorQuorumPhase.Abort    => abortMessages += nodes.size.toLong
         case CoordinatorQuorumPhase.Commit   => certificateMessages += nodes.size.toLong
         case CoordinatorQuorumPhase.Recover  => recoveryMessages += nodes.size.toLong
+        case CoordinatorQuorumPhase.Checkpoint => ()
       recordBytes += bytes * nodes.size.toLong
       phaseNanos += math.max(0L, System.nanoTime() - started)
     }
@@ -290,6 +291,7 @@ final class CoordinatorShardQuorum(
           store.commitDecision(record.transactionId, record.certificate.get) -> None
         case CoordinatorQuorumPhase.Recover =>
           store.recoverCertified(record.transactionId, record.delta.get, record.certificate.get) -> None
+        case CoordinatorQuorumPhase.Checkpoint => Errors.InvalidRequest -> None
         case CoordinatorQuorumPhase.Finalize =>
           store.finalizeTransaction(record.transactionId) match
             case Right(metadata) => Errors.None -> Some(metadata)
