@@ -13,4 +13,7 @@ final class CoordinatorQuorumConfigSuite extends FunSuite:
     intercept[IllegalArgumentException](CoordinatorQuorumConfig(maxInflightTransactions = 65537))
     intercept[IllegalArgumentException](CoordinatorQuorumConfig(admissionTimeoutMillis = 0L))
     intercept[IllegalArgumentException](CoordinatorQuorumConfig(admissionTimeoutMillis = 60001L))
+    intercept[IllegalArgumentException](CoordinatorQuorumConfig(resolutionIntervalMillis = 99L))
+    intercept[IllegalArgumentException](CoordinatorQuorumConfig(resolutionIntervalMillis = 2000L, resolutionDelayMillis = 1000L))
+    intercept[IllegalArgumentException](CoordinatorQuorumConfig(journalCompactionBytes = 1000L))
   }

@@ -127,6 +127,12 @@ object BrokerConfig:
         loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(maxInflightTransactions = value.toInt)))
       case "--coordinator-quorum-admission-timeout-ms" :: value :: tail =>
         loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(admissionTimeoutMillis = value.toLong)))
+      case "--coordinator-resolution-interval-ms" :: value :: tail =>
+        loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(resolutionIntervalMillis = value.toLong)))
+      case "--coordinator-resolution-delay-ms" :: value :: tail =>
+        loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(resolutionDelayMillis = value.toLong)))
+      case "--coordinator-journal-compaction-bytes" :: value :: tail =>
+        loop(tail, config.copy(coordinatorQuorum = config.coordinatorQuorum.copy(journalCompactionBytes = value.toLong)))
       case "--cleanup-policy" :: value :: tail =>
         loop(tail, config.copy(storageLifecycle = config.storageLifecycle.copy(cleanupPolicy = CleanupPolicy.parse(value))))
       case "--retention-ms" :: value :: tail =>

@@ -36,10 +36,16 @@ final class BrokerConfigSuite extends FunSuite:
   test("parses independent coordinator quorum admission settings") {
     val config = BrokerConfig.parse(Array(
       "--coordinator-quorum-max-inflight", "512",
-      "--coordinator-quorum-admission-timeout-ms", "8000"
+      "--coordinator-quorum-admission-timeout-ms", "8000",
+      "--coordinator-resolution-interval-ms", "2000",
+      "--coordinator-resolution-delay-ms", "12000",
+      "--coordinator-journal-compaction-bytes", "2097152"
     ))
     assertEquals(config.coordinatorQuorum.maxInflightTransactions, 512)
     assertEquals(config.coordinatorQuorum.admissionTimeoutMillis, 8000L)
+    assertEquals(config.coordinatorQuorum.resolutionIntervalMillis, 2000L)
+    assertEquals(config.coordinatorQuorum.resolutionDelayMillis, 12000L)
+    assertEquals(config.coordinatorQuorum.journalCompactionBytes, 2097152L)
     intercept[IllegalArgumentException](BrokerConfig.parse(Array("--coordinator-quorum-max-inflight", "0")))
   }
 
