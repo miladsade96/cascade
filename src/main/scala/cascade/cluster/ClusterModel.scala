@@ -263,5 +263,8 @@ object InternalApi:
   val CoordinatorShardDecide: Short = -123
   val CoordinatorShardFinalize: Short = -124
   val CoordinatorShardAbort: Short = -125
+  val CoordinatorShardCommit: Short = -126
+  val CoordinatorShardRecover: Short = -127
+  val CoordinatorDecisionQuery: Short = -128
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorShardAbort
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorDecisionQuery

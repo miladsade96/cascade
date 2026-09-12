@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore}
+import cascade.coordinator.{CoordinatorDecisionQueryCodec, CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore, CoordinatorTransactionStatus}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -426,18 +426,30 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         else coordinatorPublisher.map(_.submit(delta)).getOrElse(Errors.UnsupportedVersion)
       ByteWriter().writeShort(error).result()
     case api @ (InternalApi.CoordinatorShardPrepare | InternalApi.CoordinatorShardDecide |
-        InternalApi.CoordinatorShardFinalize | InternalApi.CoordinatorShardAbort) =>
+        InternalApi.CoordinatorShardFinalize | InternalApi.CoordinatorShardAbort |
+        InternalApi.CoordinatorShardCommit | InternalApi.CoordinatorShardRecover) =>
       val request = CoordinatorQuorumRequestCodec.decode(cursor)
       val expectedPhase = api match
         case InternalApi.CoordinatorShardPrepare  => CoordinatorQuorumPhase.Prepare
         case InternalApi.CoordinatorShardDecide   => CoordinatorQuorumPhase.Decide
         case InternalApi.CoordinatorShardFinalize => CoordinatorQuorumPhase.Finalize
-        case _                                    => CoordinatorQuorumPhase.Abort
+        case InternalApi.CoordinatorShardAbort    => CoordinatorQuorumPhase.Abort
+        case InternalApi.CoordinatorShardCommit   => CoordinatorQuorumPhase.Commit
+        case _                                    => CoordinatorQuorumPhase.Recover
       val error =
         if request.record.phase != expectedPhase then Errors.InvalidRequest
         else if !supportsFeature(ClusterFeature.IndependentCoordinator) then Errors.UnsupportedVersion
         else coordinatorShardQuorum.map(_.receive(request.record, request.controllerTerm)).getOrElse(Errors.CoordinatorNotAvailable)
       ByteWriter().writeShort(error).result()
+    case InternalApi.CoordinatorDecisionQuery =>
+      val query = CoordinatorDecisionQueryCodec.decode(cursor)
+      val result =
+        if !supportsFeature(ClusterFeature.IndependentCoordinator) then
+          cascade.coordinator.CoordinatorDecisionQueryResult(Errors.UnsupportedVersion, CoordinatorTransactionStatus.Unknown, None)
+        else coordinatorShardStore.map(_.transactionStatus(query.transactionId)).getOrElse(
+          cascade.coordinator.CoordinatorDecisionQueryResult(Errors.CoordinatorNotAvailable, CoordinatorTransactionStatus.Unknown, None)
+        )
+      CoordinatorDecisionQueryCodec.encodeResult(result)
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataDeltaCommit => metadataDeltaCommit(cursor)
@@ -1272,6 +1284,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       case CoordinatorQuorumPhase.Decide   => InternalApi.CoordinatorShardDecide
       case CoordinatorQuorumPhase.Finalize => InternalApi.CoordinatorShardFinalize
       case CoordinatorQuorumPhase.Abort    => InternalApi.CoordinatorShardAbort
+      case CoordinatorQuorumPhase.Commit   => InternalApi.CoordinatorShardCommit
+      case CoordinatorQuorumPhase.Recover  => InternalApi.CoordinatorShardRecover
     val request = CoordinatorQuorumRequest(currentTerm, record)
     val payload = CoordinatorQuorumRequestCodec.encode(request)
     callPeers(targets, config.peerTimeoutMillis) { node =>
