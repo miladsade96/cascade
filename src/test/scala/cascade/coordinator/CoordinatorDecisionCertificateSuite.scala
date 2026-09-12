@@ -44,7 +44,5 @@ final class CoordinatorDecisionCertificateSuite extends FunSuite:
     // The final array contains two acknowledgements; advertise only one while retaining trailing bytes.
     val acknowledgementCountOffset = bytes.length - (Integer.BYTES * 3)
     val malformed = bytes.updated(acknowledgementCountOffset + 3, 1.toByte)
-    val cursor = ByteCursor(malformed)
-    CoordinatorDecisionCertificateCodec.read(cursor)
-    intercept[ProtocolException](cursor.ensureFullyRead())
+    intercept[ProtocolException](CoordinatorDecisionCertificateCodec.read(ByteCursor(malformed)))
   }
