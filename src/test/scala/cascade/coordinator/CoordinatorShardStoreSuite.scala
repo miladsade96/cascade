@@ -1,6 +1,6 @@
 package cascade.coordinator
 
-import cascade.cluster.CoordinatorMetadata
+import cascade.cluster.{ClusterNode, CoordinatorMetadata, QuorumMembership}
 import cascade.group.{CommittedOffset, GroupCodec, GroupImage, GroupOffsetKey, GroupShardCodec, OffsetCommitValue}
 import cascade.protocol.{ByteWriter, Errors}
 import java.nio.file.Files
@@ -8,6 +8,14 @@ import munit.FunSuite
 
 final class CoordinatorShardStoreSuite extends FunSuite:
   private val baseline = CoordinatorMetadata.Empty
+  private val certificate = CoordinatorDecisionCertificate.from(
+    QuorumMembership.bootstrap(Vector(ClusterNode(1, "one", 1), ClusterNode(2, "two", 2), ClusterNode(3, "three", 3))),
+    Set(1, 2)
+  )
+
+  private def certify(store: CoordinatorShardStore, transaction: CoordinatorTransactionId): Unit =
+    assertEquals(store.decide(transaction), Errors.None)
+    assertEquals(store.commitDecision(transaction, certificate), Errors.None)
 
   test("finalizes one shard without rewriting unrelated shard journals") {
     val directory = Files.createTempDirectory("cascade-coordinator-store")
@@ -16,7 +24,7 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     val store = CoordinatorShardStore(directory, baseline)
     try
       assertEquals(store.prepare(transaction, delta, 7L), Errors.None)
-      assertEquals(store.decide(transaction), Errors.None)
+      certify(store, transaction)
       val committed = store.finalizeTransaction(transaction).toOption.get
       assertEquals(committed.shardVersion(CoordinatorShard.group(group)), 1L)
       assertEquals(committed.groupImage.offsets.map(_.value.offset), Vector(41L))
@@ -33,13 +41,13 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     val first = CoordinatorShardStore(directory, baseline)
     try
       assertEquals(first.prepare(transaction, delta, 9L), Errors.None)
-      assertEquals(first.decide(transaction), Errors.None)
+      certify(first, transaction)
     finally first.close()
 
     val recovered = CoordinatorShardStore(directory, baseline)
     try
       assertEquals(recovered.snapshot.pending, 1)
-      assertEquals(recovered.decide(transaction), Errors.None)
+      assertEquals(recovered.transactionStatus(transaction).status, CoordinatorTransactionStatus.Committed)
       assertEquals(recovered.finalizeTransaction(transaction).toOption.get.groupImage.offsets.head.value.offset, 82L)
     finally recovered.close()
   }
@@ -57,7 +65,7 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     val store = CoordinatorShardStore(directory, baseline)
     try
       assertEquals(store.prepare(transaction, delta, 11L), Errors.None)
-      assertEquals(store.decide(transaction), Errors.None)
+      certify(store, transaction)
       val committed = store.finalizeTransaction(transaction).toOption.get
       assertEquals(committed.groupImage.offsets.head.value.offset, 123L)
       assertEquals(committed.deliveryImage.nextProducerId, 2L)
@@ -107,7 +115,7 @@ final class CoordinatorShardStoreSuite extends FunSuite:
     try
       assertEquals(recovered.snapshot.pending, 1)
       assertEquals(recovered.prepare(transaction, delta, 13L), Errors.None)
-      assertEquals(recovered.decide(transaction), Errors.None)
+      certify(recovered, transaction)
       val committed = recovered.finalizeTransaction(transaction).toOption.get
       assertEquals(committed.groupImage.offsets.head.value.offset, 211L)
       assertEquals(committed.deliveryImage.nextProducerId, 2L)
@@ -126,6 +134,31 @@ final class CoordinatorShardStoreSuite extends FunSuite:
       assertEquals(store.metadata.version, 2L)
       val crossing = versions.updated(0, 1L).updated(1, 3L)
       intercept[IllegalArgumentException](store.installBaseline(baseline.copy(version = 3L, shardVersions = crossing)))
+    finally store.close()
+  }
+
+  test("does not finalize an uncertified decision vote") {
+    val directory = Files.createTempDirectory("cascade-coordinator-uncertified")
+    val (_, delta) = groupDelta("uncertified", 301L, 15L)
+    val transaction = CoordinatorTransactionId(6L, 6L)
+    val store = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(store.prepare(transaction, delta, 15L), Errors.None)
+      assertEquals(store.decide(transaction), Errors.None)
+      assertEquals(store.finalizeTransaction(transaction), Left(Errors.InvalidRequest))
+      assertEquals(store.transactionStatus(transaction).status, CoordinatorTransactionStatus.Voted)
+    finally store.close()
+  }
+
+  test("a certified recovery can fill a missing participant under a later controller term") {
+    val directory = Files.createTempDirectory("cascade-coordinator-certified-recovery")
+    val (_, delta) = groupDelta("recover", 401L, 17L)
+    val transaction = CoordinatorTransactionId(7L, 7L)
+    val store = CoordinatorShardStore(directory, baseline)
+    try
+      assertEquals(store.recoverCertified(transaction, delta, certificate), Errors.None)
+      assertEquals(store.transactionStatus(transaction).status, CoordinatorTransactionStatus.Committed)
+      assertEquals(store.finalizeTransaction(transaction).toOption.get.groupImage.offsets.head.value.offset, 401L)
     finally store.close()
   }
 
