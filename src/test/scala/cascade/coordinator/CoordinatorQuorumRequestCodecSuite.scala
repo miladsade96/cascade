@@ -14,7 +14,10 @@ final class CoordinatorQuorumRequestCodecSuite extends FunSuite:
     assert(InternalApi.contains(InternalApi.CoordinatorShardDecide))
     assert(InternalApi.contains(InternalApi.CoordinatorShardFinalize))
     assert(InternalApi.contains(InternalApi.CoordinatorShardAbort))
-    assert(!InternalApi.contains((InternalApi.CoordinatorShardAbort - 1).toShort))
+    assert(InternalApi.contains(InternalApi.CoordinatorShardCommit))
+    assert(InternalApi.contains(InternalApi.CoordinatorShardRecover))
+    assert(InternalApi.contains(InternalApi.CoordinatorDecisionQuery))
+    assert(!InternalApi.contains((InternalApi.CoordinatorDecisionQuery - 1).toShort))
   }
 
   test("rejects trailing and negative-term requests") {

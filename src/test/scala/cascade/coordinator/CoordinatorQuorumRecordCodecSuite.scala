@@ -1,5 +1,6 @@
 package cascade.coordinator
 
+import cascade.cluster.{ClusterNode, QuorumMembership}
 import cascade.protocol.ProtocolException
 import munit.FunSuite
 
@@ -9,11 +10,17 @@ final class CoordinatorQuorumRecordCodecSuite extends FunSuite:
     CoordinatorShardUpdate(0, 4L, Vector(0, 1, -1).map(_.toByte)),
     CoordinatorShardUpdate(CoordinatorShard.Allocator, 8L, Vector.fill(16)(9.toByte))
   ))
+  private val certificate = CoordinatorDecisionCertificate.from(
+    QuorumMembership.bootstrap(Vector(ClusterNode(1, "one", 1), ClusterNode(2, "two", 2), ClusterNode(3, "three", 3))),
+    Set(1, 3)
+  )
 
   test("round trips prepare and marker records") {
     val records = Vector(
       CoordinatorQuorumRecord.prepare(transaction, delta),
       CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Decide),
+      CoordinatorQuorumRecord.commit(transaction, certificate),
+      CoordinatorQuorumRecord.recover(transaction, delta, certificate),
       CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Finalize),
       CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Abort)
     )
