@@ -40,6 +40,7 @@ final class DeliveryCoordinator(
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-transaction-expirer").factory())
   }
   @volatile private var current = store.image
+  @volatile private var acknowledgedImage = current
   @volatile private var acknowledged = DeliveryReadView.from(current)
 
   recoverActiveRanges()
@@ -47,6 +48,14 @@ final class DeliveryCoordinator(
   expirationExecutor.foreach(_.scheduleWithFixedDelay(() => expireNow(), 1L, 1L, TimeUnit.SECONDS): Unit)
 
   def image: DeliveryImage = current
+
+  /** The staged and last-acknowledged images for isolating one in-flight delivery mutation. */
+  private[cascade] def stagedImages: (DeliveryImage, DeliveryImage) = current -> acknowledgedImage
+
+  /** Resolve the newest distributed image only after this service's mutation lock is held. */
+  private[cascade] def installLatestImage(resolve: () => DeliveryImage): Unit = stateLock.synchronized {
+    installCommittedImage(resolve())
+  }
 
   def snapshotBytes: Array[Byte] = stateLock.synchronized(DeliveryCodec.encode(current))
 
@@ -58,6 +67,7 @@ final class DeliveryCoordinator(
   private[cascade] def installCommittedImage(image: DeliveryImage): Unit = stateLock.synchronized {
     store.install(image)
     current = image
+    acknowledgedImage = image
     acknowledged = DeliveryReadView.from(image)
     stateLock.notifyAll()
   }
@@ -215,7 +225,9 @@ final class DeliveryCoordinator(
             completedTransactions = current.completedTransactions :+ completed
           )
         )
-        if !transitionCommitted then return Errors.CoordinatorNotAvailable
+        if !transitionCommitted then
+          if useAtomicSnapshot then groups.rollbackUnacknowledged()
+          return Errors.CoordinatorNotAvailable
         if useAtomicSnapshot then groups.publishAcknowledgedOffsets()
         if committed && completed.pendingOffsets.nonEmpty && !useAtomicSnapshot then
           applyOffsets(completed.pendingOffsets)
@@ -428,7 +440,10 @@ final class DeliveryCoordinator(
   private def commitTransactionalAppend(): Boolean = stateLock.synchronized {
     current = current.copy(version = Math.addExact(current.version, 1L))
     val committed = checkpoint.commit()
-    if committed then acknowledged = DeliveryReadView.from(current)
+    if committed then
+      acknowledgedImage = current
+      acknowledged = DeliveryReadView.from(current)
+    else installCommittedImage(acknowledgedImage)
     committed
   }
 
@@ -500,7 +515,10 @@ final class DeliveryCoordinator(
     store.commit(next, durableLocal)
     current = next
     val committed = checkpoint.commit()
-    if committed then acknowledged = DeliveryReadView.from(current)
+    if committed then
+      acknowledgedImage = current
+      acknowledged = DeliveryReadView.from(current)
+    else installCommittedImage(acknowledgedImage)
     committed
 
   private def fromReplication(result: ReplicatedAppendResult): DeliveryAppendResult =

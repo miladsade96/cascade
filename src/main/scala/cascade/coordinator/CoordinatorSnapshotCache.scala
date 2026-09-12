@@ -3,7 +3,7 @@ package cascade.coordinator
 import cascade.group.{GroupImage, GroupSnapshotCache}
 import cascade.delivery.{DeliveryImage, DeliverySnapshotCache}
 
-/** Called under the combined service lock so group offsets and transaction outcomes stay atomic. */
+/** Encodes immutable service images without holding either service mutation lock. */
 private[cascade] final class CoordinatorSnapshotCache:
   private val groups = GroupSnapshotCache()
   private val delivery = DeliverySnapshotCache()

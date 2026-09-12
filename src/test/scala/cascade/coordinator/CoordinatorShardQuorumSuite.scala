@@ -218,6 +218,7 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
       case CoordinatorQuorumPhase.Decide  => store.decide(record.transactionId)
       case CoordinatorQuorumPhase.Commit  => store.commitDecision(record.transactionId, record.certificate.get)
       case CoordinatorQuorumPhase.Recover => store.recoverCertified(record.transactionId, record.delta.get, record.certificate.get)
+      case CoordinatorQuorumPhase.Checkpoint => Errors.InvalidRequest
       case CoordinatorQuorumPhase.Finalize => store.finalizeTransaction(record.transactionId).fold(identity, _ => Errors.None)
       case CoordinatorQuorumPhase.Abort =>
         store.abort(record.transactionId)

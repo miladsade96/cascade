@@ -72,7 +72,9 @@ final class GroupCoordinator(
   private val offsets = OffsetStore(offsetPath)
   private var stateVersion = 0L
   private var checkpoint: CoordinatorCheckpoint = CoordinatorCheckpoint.Local
-  @volatile private var acknowledgedAdmin = GroupAdminReadView.from(snapshotImage())
+  @volatile private var checkpointImage = snapshotImage()
+  @volatile private var acknowledgedImage = checkpointImage
+  @volatile private var acknowledgedAdmin = GroupAdminReadView.from(checkpointImage)
   private val expirationExecutor: Option[ScheduledExecutorService] = Option.when(scheduleExpiration) {
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-group-expirer").factory())
   }
@@ -84,8 +86,20 @@ final class GroupCoordinator(
 
   def snapshotBytes: Array[Byte] = stateLock.synchronized(GroupCodec.encode(snapshotImage()))
 
-  /** Immutable, detached view captured under the same lock as checkpoint publication. */
+  /** Detached current image for tests, administration, and explicit state transfer. */
   private[cascade] def image: GroupImage = stateLock.synchronized(snapshotImage())
+
+  /** Lock-free immutable image captured immediately before the current checkpoint. */
+  private[cascade] def stagedImage: GroupImage = checkpointImage
+
+  /** The staged and last-acknowledged images for isolating one in-flight group mutation. */
+  private[cascade] def stagedImages: (GroupImage, GroupImage) = checkpointImage -> acknowledgedImage
+
+  /** Resolve the newest distributed image only after this service's mutation lock is held. */
+  private[cascade] def installLatestImage(resolve: () => (GroupImage, Boolean)): Unit = stateLock.synchronized {
+    val (image, renewSessions) = resolve()
+    installImage(image, renewSessions)
+  }
 
   private[cascade] def adminView: GroupAdminReadView = acknowledgedAdmin
 
@@ -469,10 +483,19 @@ final class GroupCoordinator(
   private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
     offsets.commit(values, durableLocal, publish = false)
     stateVersion = Math.addExact(stateVersion, 1L)
+    checkpointImage = snapshotImage()
   }
 
   /** Publishes transaction-staged offsets after their combined checkpoint succeeds. */
-  private[cascade] def publishAcknowledgedOffsets(): Unit = offsets.publishAcknowledged()
+  private[cascade] def publishAcknowledgedOffsets(): Unit = stateLock.synchronized {
+    offsets.publishAcknowledged()
+    acknowledgedImage = checkpointImage
+    acknowledgedAdmin = GroupAdminReadView.from(checkpointImage)
+  }
+
+  private[cascade] def rollbackUnacknowledged(): Unit = stateLock.synchronized {
+    installImage(acknowledgedImage, renewSessions = false)
+  }
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
@@ -611,10 +634,13 @@ final class GroupCoordinator(
 
   private def checkpointState(): Boolean =
     stateVersion = Math.addExact(stateVersion, 1L)
+    checkpointImage = snapshotImage()
     val committed = checkpoint.commit()
     if committed then
       offsets.publishAcknowledged()
-      acknowledgedAdmin = GroupAdminReadView.from(snapshotImage())
+      acknowledgedImage = checkpointImage
+      acknowledgedAdmin = GroupAdminReadView.from(checkpointImage)
+    else installImage(acknowledgedImage, renewSessions = false)
     committed
 
   private def snapshotImage(): GroupImage =
@@ -748,6 +774,8 @@ final class GroupCoordinator(
       consumerGroups.update(stored.groupId, group)
     }
     stateVersion = image.version
+    checkpointImage = image
+    acknowledgedImage = image
     acknowledgedAdmin = GroupAdminReadView.from(image)
     stateLock.notifyAll()
 

@@ -99,12 +99,13 @@ final class KafkaBroker(
     config.storageLifecycle,
     (event, error) => eventLog.error(event, error, brokerFields)
   )
-  private val coordinatorLock = Object()
+  private val groupStateLock = Object()
+  private val deliveryStateLock = Object()
   private val coordinatorReadMetrics = CoordinatorReadMetrics()
   private val clustered = config.clusterNodes.nonEmpty
   private val groupCoordinator = GroupCoordinator(
     config.dataDirectory.resolve(".cascade").resolve("consumer-offsets.log"),
-    coordinatorLock,
+    groupStateLock,
     durableLocal = !clustered,
     scheduleExpiration = !clustered,
     offsetRetentionMillis = config.storageLifecycle.offsetRetentionMillis,
@@ -138,13 +139,13 @@ final class KafkaBroker(
       config.dataDirectory.resolve(".cascade").resolve("delivery-state.log"),
       registry,
       groupCoordinator,
-      coordinatorLock,
+      deliveryStateLock,
       durableLocal = !clustered,
       scheduleExpiration = !clustered,
       journalCompactionBytes = config.storageLifecycle.journalCompactionBytes,
       readMetrics = coordinatorReadMetrics
     )
-    val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery, coordinatorLock))
+    val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery))
     peerClient = peers
     clusterManager = cluster
     replicationManager = replication

@@ -22,7 +22,8 @@ final class CoordinatorShardQuorum(
     controllerTerm: () => Long,
     replicate: (Vector[ClusterNode], CoordinatorQuorumRecord) => Map[Int, Short],
     install: CoordinatorMetadata => Unit,
-    query: (Vector[ClusterNode], CoordinatorTransactionId) => Map[Int, CoordinatorDecisionQueryResult] = (_, _) => Map.empty
+    query: (Vector[ClusterNode], CoordinatorTransactionId) => Map[Int, CoordinatorDecisionQueryResult] = (_, _) => Map.empty,
+    queryState: Vector[ClusterNode] => Map[Int, CoordinatorMetadata] = _ => Map.empty
 ) extends AutoCloseable:
   private val closed = AtomicBoolean(false)
   private val admission = Semaphore(config.maxInflightTransactions, true)
@@ -76,12 +77,14 @@ final class CoordinatorShardQuorum(
         }
         val quorum = membership()
         val term = controllerTerm()
-        if delta.controllerTerm != term || !quorum.contains(localNodeId) then return complete(success = false)
+        if delta.controllerTerm != term || !quorum.contains(localNodeId) then
+          return complete(success = false)
         val transactionId = CoordinatorTransactionId.random()
         val prepare = CoordinatorQuorumRecord.prepare(transactionId, delta)
         val prepared = runPhase(quorum.voters.map(_.node), prepare, term)
         if !quorum.hasQuorum(prepared) then
           abort(quorum, prepared, transactionId, term)
+          reconcileBaseline(quorum)
           return complete(success = false)
 
         val decision = CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Decide)
@@ -98,7 +101,8 @@ final class CoordinatorShardQuorum(
         )
         // A partial certificate is still a durable commit proof. Recovery must finish it;
         // aborting here could contradict a certificate already forced on another voter.
-        if !quorum.hasQuorum(certified) then return complete(success = false)
+        if !quorum.hasQuorum(certified) then
+          return complete(success = false)
 
         val finalizeRecord = CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Finalize)
         // The owner remains readable at its last acknowledged image while followers force the
@@ -112,7 +116,8 @@ final class CoordinatorShardQuorum(
           if certified(localNodeId) && quorum.hasQuorum(remoteFinalized + localNodeId) then
             remoteFinalized ++ runPhase(quorum.voters.map(_.node).filter(_.id == localNodeId), finalizeRecord, term)
           else remoteFinalized
-        complete(quorum.hasQuorum(finalized) && finalized(localNodeId))
+        val success = quorum.hasQuorum(finalized) && finalized(localNodeId)
+        complete(success)
       catch
         case _: InterruptedException =>
           Thread.currentThread().interrupt()
@@ -193,6 +198,18 @@ final class CoordinatorShardQuorum(
       case _: InterruptedException =>
         Thread.currentThread().interrupt()
         false
+
+  /** A higher voter shard is already durable. Install its monotonic join and let the client retry on that base. */
+  private def reconcileBaseline(quorum: QuorumMembership): Unit =
+    val peers = queryState(quorum.voters.map(_.node).filterNot(_.id == localNodeId)).values
+    val merged = peers.foldLeft[Either[String, CoordinatorMetadata]](Right(store.metadata)) { (result, peer) =>
+      result.flatMap(current => CoordinatorShardState.mergeMonotonic(current, peer))
+    }
+    merged.foreach { metadata =>
+      if metadata != store.metadata then
+        store.installBaseline(metadata)
+        install(metadata)
+    }
 
   private def resolve(candidate: CoordinatorRecoveryCandidate): CoordinatorResolutionResult =
     if !admission.tryAcquire() then CoordinatorResolutionResult.Pending

@@ -2,7 +2,8 @@ package cascade.coordinator
 
 import cascade.cluster.{ClusterFeature, ClusterManager, CoordinatorMetadata}
 import cascade.delivery.DeliveryCoordinator
-import cascade.group.GroupCoordinator
+import cascade.delivery.DeliveryCodec
+import cascade.group.{GroupCodec, GroupCoordinator}
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -10,14 +11,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 final class CoordinatorStateMachine(
     cluster: ClusterManager,
     groups: GroupCoordinator,
-    delivery: DeliveryCoordinator,
-    stateLock: Object
+    delivery: DeliveryCoordinator
 ) extends CoordinatorCheckpoint,
       AutoCloseable:
   private val closed = AtomicBoolean(false)
+  private val stateLock = Object()
   private var installedVersion = -1L
   private var installed = CoordinatorMetadata.Empty
   private var baseline = Vector.empty[Vector[Byte]]
+  private var installedGroupOwnerTerm = -1L
   private val snapshots = CoordinatorSnapshotCache()
   private val metrics = CoordinatorMetrics()
   def metricsSnapshot: CoordinatorMetricsSnapshot = metrics.snapshot
@@ -25,8 +27,8 @@ final class CoordinatorStateMachine(
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-coordinator-expirer").factory())
 
   cluster.attachCoordinatorInstaller(install)
-  groups.attachCheckpoint(this)
-  delivery.attachCheckpoint(this)
+  groups.attachCheckpoint(() => commitDomain(CoordinatorDomain.Group))
+  delivery.attachCheckpoint(() => commitDomain(CoordinatorDomain.Transaction))
   expirationExecutor.scheduleWithFixedDelay(
     () =>
       try
@@ -41,31 +43,47 @@ final class CoordinatorStateMachine(
     TimeUnit.SECONDS
   ): Unit
 
-  override def commit(): Boolean = stateLock.synchronized {
+  override def commit(): Boolean = commitDomain(CoordinatorDomain.Group)
+
+  private def commitDomain(domain: CoordinatorDomain): Boolean = {
     val started = System.nanoTime()
+    val (groupImage, acknowledgedGroup) = groups.stagedImages
+    val (deliveryImage, acknowledgedDelivery) = delivery.stagedImages
+    val candidate = snapshots.capture(groupImage, deliveryImage)
+    val acknowledged = snapshots.capture(acknowledgedGroup, acknowledgedDelivery)
+    val (base, before, after, intendedShards) = stateLock.synchronized {
+      val eligible = domain match
+        case CoordinatorDomain.Group       => 0 until CoordinatorShard.Buckets
+        case CoordinatorDomain.Transaction => CoordinatorShard.Buckets until CoordinatorShard.Count
+      val intended = eligible.filter(shard => candidate.payloads(shard) != acknowledged.payloads(shard)).toVector
+      val proposed = baseline.zipWithIndex.map { case (payload, shard) =>
+        if intended.contains(shard) then candidate.payloads(shard) else payload
+      }
+      (installed, baseline, proposed, intended)
+    }
     var deltaSize = 0L
     var changedShards = 0
-    var fullSize = 0L
+    val fullSize = candidate.fullImageBytes
     val committed =
       try
         if cluster.supportsFeature(ClusterFeature.CoordinatorDeltas) then
-          val candidate = snapshots.capture(groups.image, delivery.image)
           metrics.recordPreparation(candidate, System.nanoTime() - started)
-          fullSize = candidate.fullImageBytes
-          CoordinatorShardState.changes(installed, baseline, candidate.payloads, cluster.controllerTerm) match
+          CoordinatorShardState.changes(base, before, after, cluster.controllerTerm) match
             case Some(delta) =>
               deltaSize = CoordinatorDeltaCodec.encode(delta).length.toLong
               changedShards = delta.updates.size
               cluster.commitCoordinatorDelta(delta)
             case None => !cluster.isBrokerFenced
         else
-          val groupState = groups.snapshotBytes.toVector
-          val deliveryState = delivery.snapshotBytes.toVector
-          fullSize = groupState.size.toLong + deliveryState.size
-          cluster.commitCoordinatorState(installed.version, groupState, deliveryState)
+          stateLock.synchronized {
+            cluster.commitCoordinatorState(
+              installed.version,
+              GroupCodec.encode(groupImage).toVector,
+              DeliveryCodec.encode(deliveryImage).toVector
+            )
+          }
       catch case _: Throwable => false
-    // A rejected remote proposal may have synchronized a newer image. Never roll that state back.
-    installLatest(cluster.coordinatorMetadata, force = true)
+    if committed then recordLatest(cluster.coordinatorMetadata, intendedShards)
     metrics.record(committed, deltaSize, fullSize, changedShards, System.nanoTime() - started)
     committed
   }
@@ -75,21 +93,40 @@ final class CoordinatorStateMachine(
       expirationExecutor.shutdownNow(): Unit
       expirationExecutor.awaitTermination(5L, TimeUnit.SECONDS): Unit
 
-  private def install(metadata: CoordinatorMetadata): Unit = installLatest(metadata, force = false)
+  private def install(metadata: CoordinatorMetadata): Unit =
+    val selected = stateLock.synchronized(selectLatest(metadata).nonEmpty)
+    if selected then
+      groups.installLatestImage(() => stateLock.synchronized {
+        val candidate = installed
+        val renewSessions = installedGroupOwnerTerm < 0L || candidate.ownerTerm != installedGroupOwnerTerm
+        installedGroupOwnerTerm = candidate.ownerTerm
+        candidate.groupImage -> renewSessions
+      })
+      delivery.installLatestImage(() => stateLock.synchronized(installed.deliveryImage))
+      cluster.coordinatorStateInstalled(metadata)
 
-  private def installLatest(metadata: CoordinatorMetadata, force: Boolean): Unit = stateLock.synchronized {
+  private def recordLatest(metadata: CoordinatorMetadata, shards: Vector[Int]): Unit = stateLock.synchronized {
+    val candidate = if installedVersion < 0L then metadata
+    else CoordinatorShardState.mergeMonotonic(installed, metadata).getOrElse(installed)
+    installedVersion = candidate.version
+    installed = candidate
+    baseline = candidate.shardPayloads
+    // The calling service already staged these shards. Publish only their readiness;
+    // the independent service may still be applying a coalesced image callback.
+    cluster.coordinatorShardsInstalled(candidate, shards)
+  }
+
+  private def selectLatest(metadata: CoordinatorMetadata): Option[(CoordinatorMetadata, Boolean)] = {
     val candidate =
       if installedVersion < 0L then metadata
       else CoordinatorShardState.mergeMonotonic(installed, metadata).getOrElse(installed)
     val advancesShard = installedVersion < 0L || Vector.tabulate(CoordinatorShard.Count)(identity)
       .exists(shard => candidate.shardVersion(shard) > installed.shardVersion(shard))
-    if advancesShard || force || candidate.ownerTerm > installed.ownerTerm then
-      // Recovery/controller-term changes grant a fresh session window. Ordinary
-      // checkpoints are not heartbeats and must not keep abandoned members alive.
-      groups.installCommittedImage(candidate.groupImage, renewSessions = installedVersion < 0L || candidate.ownerTerm != installed.ownerTerm)
-      delivery.installCommittedImage(candidate.deliveryImage)
+    if advancesShard || candidate.ownerTerm > installed.ownerTerm then
+      val renewSessions = installedVersion < 0L || candidate.ownerTerm != installed.ownerTerm
       installedVersion = candidate.version
       installed = candidate
       baseline = candidate.shardPayloads
-      cluster.coordinatorStateInstalled(candidate)
+      Some(candidate -> renewSessions)
+    else None
   }

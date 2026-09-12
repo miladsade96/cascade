@@ -1,7 +1,7 @@
 package cascade.cluster
 
 import cascade.broker.BrokerConfig
-import cascade.coordinator.{CoordinatorDecisionQueryCodec, CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore, CoordinatorTransactionStatus}
+import cascade.coordinator.{CoordinatorDecisionQueryCodec, CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShard, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore, CoordinatorTransactionStatus}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
@@ -90,7 +90,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       () => currentTerm,
       replicateCoordinatorQuorum,
       installIndependentCoordinator,
-      queryCoordinatorDecisions
+      queryCoordinatorDecisions,
+      queryCoordinatorStates
     )
   }
 
@@ -124,7 +125,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var replicationManager: ReplicationManager | Null = null
   @volatile private var coordinatorInstaller: CoordinatorImageInstaller | Null = null
   @volatile private var installedCoordinatorVersion = -1L
-  @volatile private var installedCoordinatorState = CoordinatorMetadata.Empty
+  @volatile private var installedCoordinatorShardVersions = Vector.fill(CoordinatorShard.Count)(-1L)
 
   private val missedHeartbeats = mutable.HashMap.empty[Int, Int]
   private val pendingRecoveryReleases = mutable.HashMap.empty[ReplicaRecoveryTarget, Boolean]
@@ -203,7 +204,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     isAssignedCoordinator(key) && !isBrokerFenced &&
       installedCoordinatorVersion >= 0L &&
       (if supportsFeature(ClusterFeature.CoordinatorDeltas) then
-        CoordinatorShardState.readyForShard(installedCoordinatorState, current.coordinator, key.shard)
+        installedCoordinatorShardVersions(key.shard) >= current.coordinator.shardVersion(key.shard)
       else installedCoordinatorVersion >= current.coordinator.version)
 
   private[cascade] def isAssignedCoordinator(key: CoordinatorKey): Boolean = coordinatorNode(key).exists(_.id == config.nodeId)
@@ -453,6 +454,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
           cascade.coordinator.CoordinatorDecisionQueryResult(Errors.CoordinatorNotAvailable, CoordinatorTransactionStatus.Unknown, None)
         )
       CoordinatorDecisionQueryCodec.encodeResult(result)
+    case InternalApi.CoordinatorStateQuery =>
+      cursor.ensureFullyRead()
+      val error = if supportsFeature(ClusterFeature.IndependentCoordinator) then Errors.None else Errors.UnsupportedVersion
+      val metadata = coordinatorShardStore.map(_.metadata).getOrElse(CoordinatorMetadata.Empty)
+      ByteWriter().writeShort(error)
+        .writeByteArray(MetadataCodec.encode(ClusterMetadata.Empty.copy(coordinator = metadata)))
+        .result()
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataDeltaCommit => metadataDeltaCommit(cursor)
@@ -1310,10 +1318,28 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       )
     }.map((node, result) => node.id -> result).toMap
 
+  private def queryCoordinatorStates(targets: Vector[ClusterNode]): Map[Int, CoordinatorMetadata] =
+    callPeers(targets, config.peerTimeoutMillis) { node =>
+      val response = peerClient.call(node, InternalApi.CoordinatorStateQuery, Array.emptyByteArray, config.peerTimeoutMillis)
+      val error = response.readShort()
+      val metadata = MetadataCodec.decode(response.readByteArray()).coordinator
+      response.ensureFullyRead()
+      if error == Errors.None then metadata else throw IllegalStateException(s"coordinator state query failed: $error")
+    }.map((node, metadata) => node.id -> metadata).toMap
+
   private[cascade] def coordinatorStateInstalled(metadata: CoordinatorMetadata): Unit = synchronized {
-    if metadata.version >= installedCoordinatorVersion then
-      installedCoordinatorState = metadata
-      installedCoordinatorVersion = metadata.version
+    coordinatorShardsInstalled(metadata, Vector.tabulate(CoordinatorShard.Count)(identity))
+  }
+
+  private[cascade] def coordinatorShardsInstalled(metadata: CoordinatorMetadata, shards: Iterable[Int]): Unit = synchronized {
+    shards.foreach { shard =>
+      if CoordinatorShard.valid(shard) then
+        installedCoordinatorShardVersions = installedCoordinatorShardVersions.updated(
+          shard,
+          math.max(installedCoordinatorShardVersions(shard), metadata.shardVersion(shard))
+        )
+    }
+    installedCoordinatorVersion = math.max(installedCoordinatorVersion, metadata.version)
   }
 
   private def commitCoordinatorOnController(
