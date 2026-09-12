@@ -158,6 +158,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def start(): Unit =
     if enabled && replicationManager == null then throw IllegalStateException("replication manager is not attached")
+    if supportsFeature(ClusterFeature.IndependentCoordinator) then coordinatorShardQuorum.foreach(_ => ())
     monitor.foreach { executor =>
       val interval = math.max(50L, config.controllerHeartbeatMillis.toLong / 2L)
       executor.scheduleWithFixedDelay(

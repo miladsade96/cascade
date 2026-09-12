@@ -2,7 +2,7 @@ package cascade.coordinator
 
 import cascade.cluster.{ClusterNode, CoordinatorMetadata, QuorumMembership}
 import cascade.protocol.Errors
-import java.util.concurrent.{Semaphore, TimeUnit}
+import java.util.concurrent.{Executors, ScheduledExecutorService, Semaphore, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import scala.util.control.NonFatal
@@ -24,6 +24,8 @@ final class CoordinatorShardQuorum(
   private val closed = AtomicBoolean(false)
   private val admission = Semaphore(config.maxInflightTransactions, true)
   private val shardLocks = Vector.fill(CoordinatorShard.Count)(ReentrantLock(true))
+  private val resolver: ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-coordinator-resolver").factory())
   private val metricsLock = Object()
   private var inflight = 0
   private var peakInflight = 0
@@ -39,6 +41,14 @@ final class CoordinatorShardQuorum(
   private var recoveryMessages = 0L
   private var phaseNanos = 0L
   private var recordBytes = 0L
+  resolver.scheduleWithFixedDelay(
+    () =>
+      try resolvePending(): Unit
+      catch case NonFatal(error) => System.err.println(s"Cascade coordinator resolution failed: ${error.getMessage}"),
+    config.resolutionIntervalMillis,
+    config.resolutionIntervalMillis,
+    TimeUnit.MILLISECONDS
+  ): Unit
 
   def commit(delta: CoordinatorDelta): Boolean =
     if closed.get() || !acquireAdmission() then
@@ -153,7 +163,10 @@ final class CoordinatorShardQuorum(
       }
 
   override def close(): Unit =
-    if closed.compareAndSet(false, true) then store.close()
+    if closed.compareAndSet(false, true) then
+      resolver.shutdownNow(): Unit
+      resolver.awaitTermination(5L, TimeUnit.SECONDS): Unit
+      store.close()
 
   private def acquireAdmission(): Boolean =
     try admission.tryAcquire(config.admissionTimeoutMillis, TimeUnit.MILLISECONDS)
