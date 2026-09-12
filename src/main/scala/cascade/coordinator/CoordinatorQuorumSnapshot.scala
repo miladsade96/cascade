@@ -13,6 +13,10 @@ final case class CoordinatorQuorumSnapshot(
     abortMessages: Long = 0L,
     certificateMessages: Long = 0L,
     recoveryMessages: Long = 0L,
+    resolverRuns: Long = 0L,
+    recoveredTransactions: Long = 0L,
+    recoveryAborts: Long = 0L,
+    unresolvedTransactions: Long = 0L,
     phaseNanos: Long = 0L,
     recordBytes: Long = 0L,
     store: CoordinatorShardStoreSnapshot = CoordinatorShardStoreSnapshot()

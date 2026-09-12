@@ -7,6 +7,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import scala.util.control.NonFatal
 
+private enum CoordinatorResolutionResult:
+  case Recovered, Aborted, Pending
+
 /**
  * Coordinates durable prepare/decision/finalize rounds without entering the metadata controller log.
  * Sorted shard locks serialize overlapping transactions while allowing disjoint shard sets to make progress independently.
@@ -39,6 +42,10 @@ final class CoordinatorShardQuorum(
   private var abortMessages = 0L
   private var certificateMessages = 0L
   private var recoveryMessages = 0L
+  private var resolverRuns = 0L
+  private var recoveredTransactions = 0L
+  private var recoveryAborts = 0L
+  private var unresolvedTransactions = 0L
   private var phaseNanos = 0L
   private var recordBytes = 0L
   resolver.scheduleWithFixedDelay(
@@ -137,6 +144,10 @@ final class CoordinatorShardQuorum(
       abortMessages,
       certificateMessages,
       recoveryMessages,
+      resolverRuns,
+      recoveredTransactions,
+      recoveryAborts,
+      unresolvedTransactions,
       phaseNanos,
       recordBytes,
       store.snapshot
@@ -158,9 +169,17 @@ final class CoordinatorShardQuorum(
   private[cascade] def resolvePending(nowMillis: Long = System.currentTimeMillis()): Int =
     if closed.get() then 0
     else
-      store.recoveryCandidates.count { candidate =>
-        nowMillis - candidate.observedAtMillis >= config.resolutionDelayMillis && resolve(candidate)
+      val candidates = store.recoveryCandidates.filter(candidate =>
+        nowMillis - candidate.observedAtMillis >= config.resolutionDelayMillis
+      )
+      val results = candidates.map(resolve)
+      metricsLock.synchronized {
+        resolverRuns += 1L
+        recoveredTransactions += results.count(_ == CoordinatorResolutionResult.Recovered).toLong
+        recoveryAborts += results.count(_ == CoordinatorResolutionResult.Aborted).toLong
+        unresolvedTransactions += results.count(_ == CoordinatorResolutionResult.Pending).toLong
       }
+      results.count(_ != CoordinatorResolutionResult.Pending)
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
@@ -175,37 +194,39 @@ final class CoordinatorShardQuorum(
         Thread.currentThread().interrupt()
         false
 
-  private def resolve(candidate: CoordinatorRecoveryCandidate): Boolean =
-    if !admission.tryAcquire() then false
+  private def resolve(candidate: CoordinatorRecoveryCandidate): CoordinatorResolutionResult =
+    if !admission.tryAcquire() then CoordinatorResolutionResult.Pending
     else
       val locks = candidate.delta.updates.map(_.id).distinct.sorted.map(shardLocks)
       var acquired = 0
       try
         while acquired < locks.size && locks(acquired).tryLock() do acquired += 1
-        if acquired != locks.size then false
+        if acquired != locks.size then CoordinatorResolutionResult.Pending
         else
           val quorum = membership()
           val term = controllerTerm()
-          if !quorum.contains(localNodeId) then false
+          if !quorum.contains(localNodeId) then CoordinatorResolutionResult.Pending
           else
             val states = decisionStates(candidate.transactionId, quorum)
               .filter(_._2.errorCode == Errors.None)
             val certificate = candidate.certificate.orElse(states.valuesIterator.flatMap(_.certificate).nextOption())
             certificate match
-              case Some(proof) => finishCertified(candidate, proof, quorum, term)
+              case Some(proof) =>
+                if finishCertified(candidate, proof, quorum, term) then CoordinatorResolutionResult.Recovered
+                else CoordinatorResolutionResult.Pending
               case None if quorum.hasQuorum(states.keySet) =>
                 val participants = states.collect {
                   case (nodeId, result) if result.status == CoordinatorTransactionStatus.Prepared ||
                       result.status == CoordinatorTransactionStatus.Voted => nodeId
                 }.toSet
                 abort(quorum, participants, candidate.transactionId, term)
-                true
-              case None => false
+                CoordinatorResolutionResult.Aborted
+              case None => CoordinatorResolutionResult.Pending
       catch
         case _: InterruptedException =>
           Thread.currentThread().interrupt()
-          false
-        case NonFatal(_) => false
+          CoordinatorResolutionResult.Pending
+        case NonFatal(_) => CoordinatorResolutionResult.Pending
       finally
         locks.take(acquired).reverse.foreach(_.unlock())
         admission.release()
