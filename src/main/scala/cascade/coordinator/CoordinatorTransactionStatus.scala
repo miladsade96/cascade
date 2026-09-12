@@ -17,9 +17,9 @@ final case class CoordinatorRecoveryCandidate(
     transactionId: CoordinatorTransactionId,
     status: CoordinatorTransactionStatus,
     delta: CoordinatorDelta,
-    decisionVoters: Vector[Int],
+    certificate: Option[CoordinatorDecisionCertificate],
     observedAtMillis: Long
 ):
   require(status != CoordinatorTransactionStatus.Unknown, "a recovery candidate must be durable")
   require(delta.updates.nonEmpty, "a recovery candidate must touch a shard")
-  require(decisionVoters.distinct == decisionVoters.sorted, "decision voters must be sorted and unique")
+  require(status == CoordinatorTransactionStatus.Committed == certificate.nonEmpty, "only committed candidates carry a certificate")
