@@ -7,9 +7,12 @@ final case class CoordinatorDecisionQuery(transactionId: CoordinatorTransactionI
 final case class CoordinatorDecisionQueryResult(
     errorCode: Short,
     status: CoordinatorTransactionStatus,
-    decisionVoters: Vector[Int]
+    certificate: Option[CoordinatorDecisionCertificate]
 ):
-  require(decisionVoters.distinct == decisionVoters.sorted, "decision voters must be sorted and unique")
+  require(
+    (status == CoordinatorTransactionStatus.Committed || status == CoordinatorTransactionStatus.Finalized) || certificate.isEmpty,
+    "only committed coordinator states carry a certificate"
+  )
 
 object CoordinatorDecisionQueryCodec:
   def encode(query: CoordinatorDecisionQuery): Array[Byte] =
@@ -21,8 +24,8 @@ object CoordinatorDecisionQueryCodec:
     query
 
   def encodeResult(result: CoordinatorDecisionQueryResult): Array[Byte] =
-    val writer = ByteWriter().writeShort(result.errorCode).writeByte(result.status.id)
-    writer.writeArray(result.decisionVoters)(voter => writer.writeInt(voter): Unit)
+    val writer = ByteWriter().writeShort(result.errorCode).writeByte(result.status.id).writeBoolean(result.certificate.nonEmpty)
+    result.certificate.foreach(value => CoordinatorDecisionCertificateCodec.write(writer, value))
     writer.result()
 
   def decodeResult(cursor: ByteCursor): CoordinatorDecisionQueryResult =
@@ -30,6 +33,6 @@ object CoordinatorDecisionQueryCodec:
     val status =
       try CoordinatorTransactionStatus.fromId(cursor.readByte())
       catch case exception: IllegalArgumentException => throw ProtocolException(exception.getMessage)
-    val voters = cursor.readArray(cursor.readInt()).sorted
+    val certificate = Option.when(cursor.readBoolean())(CoordinatorDecisionCertificateCodec.read(cursor))
     cursor.ensureFullyRead()
-    CoordinatorDecisionQueryResult(error, status, voters)
+    CoordinatorDecisionQueryResult(error, status, certificate)

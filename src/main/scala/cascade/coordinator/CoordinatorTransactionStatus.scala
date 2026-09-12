@@ -22,4 +22,7 @@ final case class CoordinatorRecoveryCandidate(
 ):
   require(status != CoordinatorTransactionStatus.Unknown, "a recovery candidate must be durable")
   require(delta.updates.nonEmpty, "a recovery candidate must touch a shard")
-  require(status == CoordinatorTransactionStatus.Committed == certificate.nonEmpty, "only committed candidates carry a certificate")
+  require(
+    (status == CoordinatorTransactionStatus.Committed) == certificate.nonEmpty,
+    "only committed candidates carry a certificate"
+  )
