@@ -144,6 +144,14 @@ final class CoordinatorShardQuorum(
     val local = Option.when(quorum.contains(localNodeId))(localNodeId -> store.transactionStatus(transactionId)).toMap
     local ++ query(quorum.voters.map(_.node).filterNot(_.id == localNodeId), transactionId)
 
+  /** Resolves durable in-doubt transactions after their original owner stopped making progress. */
+  private[cascade] def resolvePending(nowMillis: Long = System.currentTimeMillis()): Int =
+    if closed.get() then 0
+    else
+      store.recoveryCandidates.count { candidate =>
+        nowMillis - candidate.observedAtMillis >= config.resolutionDelayMillis && resolve(candidate)
+      }
+
   override def close(): Unit =
     if closed.compareAndSet(false, true) then store.close()
 
@@ -153,6 +161,65 @@ final class CoordinatorShardQuorum(
       case _: InterruptedException =>
         Thread.currentThread().interrupt()
         false
+
+  private def resolve(candidate: CoordinatorRecoveryCandidate): Boolean =
+    if !admission.tryAcquire() then false
+    else
+      val locks = candidate.delta.updates.map(_.id).distinct.sorted.map(shardLocks)
+      var acquired = 0
+      try
+        while acquired < locks.size && locks(acquired).tryLock() do acquired += 1
+        if acquired != locks.size then false
+        else
+          val quorum = membership()
+          val term = controllerTerm()
+          if !quorum.contains(localNodeId) then false
+          else
+            val states = decisionStates(candidate.transactionId, quorum)
+              .filter(_._2.errorCode == Errors.None)
+            val certificate = candidate.certificate.orElse(states.valuesIterator.flatMap(_.certificate).nextOption())
+            certificate match
+              case Some(proof) => finishCertified(candidate, proof, quorum, term)
+              case None if quorum.hasQuorum(states.keySet) =>
+                val participants = states.collect {
+                  case (nodeId, result) if result.status == CoordinatorTransactionStatus.Prepared ||
+                      result.status == CoordinatorTransactionStatus.Voted => nodeId
+                }.toSet
+                abort(quorum, participants, candidate.transactionId, term)
+                true
+              case None => false
+      catch
+        case _: InterruptedException =>
+          Thread.currentThread().interrupt()
+          false
+        case NonFatal(_) => false
+      finally
+        locks.take(acquired).reverse.foreach(_.unlock())
+        admission.release()
+
+  private def finishCertified(
+      candidate: CoordinatorRecoveryCandidate,
+      certificate: CoordinatorDecisionCertificate,
+      quorum: QuorumMembership,
+      term: Long
+  ): Boolean =
+    val recovered = runPhase(
+      quorum.voters.map(_.node),
+      CoordinatorQuorumRecord.recover(candidate.transactionId, candidate.delta, certificate),
+      term
+    )
+    if !quorum.hasQuorum(recovered) then false
+    else
+      val finalizeRecord = CoordinatorQuorumRecord.marker(candidate.transactionId, CoordinatorQuorumPhase.Finalize)
+      val remote = runPhase(
+        quorum.voters.map(_.node).filter(node => node.id != localNodeId && recovered(node.id)),
+        finalizeRecord,
+        term
+      )
+      if recovered(localNodeId) && quorum.hasQuorum(remote + localNodeId) then
+        val local = runPhase(quorum.voters.map(_.node).filter(_.id == localNodeId), finalizeRecord, term)
+        quorum.hasQuorum(remote ++ local) && local(localNodeId)
+      else false
 
   private def runPhase(nodes: Vector[ClusterNode], record: CoordinatorQuorumRecord, term: Long): Set[Int] =
     val started = System.nanoTime()
