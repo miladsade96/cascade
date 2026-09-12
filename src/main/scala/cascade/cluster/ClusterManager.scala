@@ -88,7 +88,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       () => effectiveMembership,
       () => currentTerm,
       replicateCoordinatorQuorum,
-      installIndependentCoordinator
+      installIndependentCoordinator,
+      queryCoordinatorDecisions
     )
   }
 
@@ -1294,6 +1295,17 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       response.ensureFullyRead()
       error
     }.map((node, code) => node.id -> code).toMap
+
+  private def queryCoordinatorDecisions(
+      targets: Vector[ClusterNode],
+      transactionId: cascade.coordinator.CoordinatorTransactionId
+  ): Map[Int, cascade.coordinator.CoordinatorDecisionQueryResult] =
+    val payload = CoordinatorDecisionQueryCodec.encode(cascade.coordinator.CoordinatorDecisionQuery(transactionId))
+    callPeers(targets, config.peerTimeoutMillis) { node =>
+      CoordinatorDecisionQueryCodec.decodeResult(
+        peerClient.call(node, InternalApi.CoordinatorDecisionQuery, payload, config.peerTimeoutMillis)
+      )
+    }.map((node, result) => node.id -> result).toMap
 
   private[cascade] def coordinatorStateInstalled(metadata: CoordinatorMetadata): Unit = synchronized {
     if metadata.version >= installedCoordinatorVersion then

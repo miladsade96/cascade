@@ -18,7 +18,8 @@ final class CoordinatorShardQuorum(
     membership: () => QuorumMembership,
     controllerTerm: () => Long,
     replicate: (Vector[ClusterNode], CoordinatorQuorumRecord) => Map[Int, Short],
-    install: CoordinatorMetadata => Unit
+    install: CoordinatorMetadata => Unit,
+    query: (Vector[ClusterNode], CoordinatorTransactionId) => Map[Int, CoordinatorDecisionQueryResult] = (_, _) => Map.empty
 ) extends AutoCloseable:
   private val closed = AtomicBoolean(false)
   private val admission = Semaphore(config.maxInflightTransactions, true)
@@ -135,6 +136,13 @@ final class CoordinatorShardQuorum(
   def metadata: CoordinatorMetadata = store.metadata
 
   def installBaseline(metadata: CoordinatorMetadata): Unit = store.installBaseline(metadata)
+
+  private[cascade] def decisionStates(
+      transactionId: CoordinatorTransactionId,
+      quorum: QuorumMembership
+  ): Map[Int, CoordinatorDecisionQueryResult] =
+    val local = Option.when(quorum.contains(localNodeId))(localNodeId -> store.transactionStatus(transactionId)).toMap
+    local ++ query(quorum.voters.map(_.node).filterNot(_.id == localNodeId), transactionId)
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then store.close()
