@@ -85,7 +85,11 @@ final class PrometheusMetricsSuite extends FunSuite:
       journalRecords = 31L,
       journalBytes = 4096L,
       forceNanos = 1_500_000_000L,
-      truncatedBytes = 7L
+      truncatedBytes = 7L,
+      compactions = 2L,
+      checkpointBytes = 1024L,
+      reclaimedBytes = 8192L,
+      directoryForceSupported = true
     )
     val measured = cascade.coordinator.CoordinatorQuorumSnapshot(
       inflight = 3,
@@ -94,6 +98,7 @@ final class PrometheusMetricsSuite extends FunSuite:
       committed = 8L,
       failed = 4L,
       prepareMessages = 30L,
+      recoveredTransactions = 2L,
       phaseNanos = 2_000_000_000L,
       recordBytes = 8192L,
       store = store
@@ -104,6 +109,10 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_coordinator_quorum_phase_seconds_total{node_id=\"7\"} 2.0\n"))
     assert(output.contains("cascade_coordinator_shard_journal_bytes{node_id=\"7\"} 4096.0\n"))
     assert(output.contains("cascade_coordinator_shard_journal_force_seconds_total{node_id=\"7\"} 1.5\n"))
+    assert(output.contains("cascade_coordinator_transactions_recovered_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_shard_journal_compactions_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_coordinator_shard_journal_reclaimed_bytes_total{node_id=\"7\"} 8192.0\n"))
+    assert(output.contains("cascade_coordinator_shard_directory_force_supported{node_id=\"7\"} 1.0\n"))
     assert(!output.contains("shard_id="))
   }
 

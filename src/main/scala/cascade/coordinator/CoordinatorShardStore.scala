@@ -16,7 +16,11 @@ final case class CoordinatorShardStoreSnapshot(
     journalRecords: Long = 0L,
     journalBytes: Long = 0L,
     forceNanos: Long = 0L,
-    truncatedBytes: Long = 0L
+    truncatedBytes: Long = 0L,
+    compactions: Long = 0L,
+    checkpointBytes: Long = 0L,
+    reclaimedBytes: Long = 0L,
+    directoryForceSupported: Boolean = false
 )
 
 /** Atomic local participant backed by one durable journal per touched shard. */
@@ -225,7 +229,11 @@ final class CoordinatorShardStore(
       journal.map(_.records).sum,
       journal.map(_.bytes).sum,
       journal.map(_.forceNanos).sum,
-      journal.map(_.truncatedBytes).sum
+      journal.map(_.truncatedBytes).sum,
+      journal.map(_.compactions).sum,
+      journal.map(_.checkpointBytes).sum,
+      journal.map(_.reclaimedBytes).sum,
+      journal.exists(_.directoryForceSupported)
     )
   }
 
