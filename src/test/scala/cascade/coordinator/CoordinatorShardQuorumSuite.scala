@@ -27,6 +27,7 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
         assertEquals(quorum.snapshot.committed, 1L)
         assertEquals(quorum.snapshot.prepareMessages, 3L)
         assertEquals(quorum.snapshot.decisionMessages, 3L)
+        assertEquals(quorum.snapshot.certificateMessages, 3L)
         assertEquals(quorum.snapshot.finalizeMessages, 3L)
         assertEquals(quorum.snapshot.store.pending, 0)
       finally quorum.close()
@@ -95,6 +96,8 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
     try
       assertEquals(follower.receive(CoordinatorQuorumRecord.prepare(transaction, delta), 10L), Errors.None)
       assertEquals(follower.receive(CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Decide), 10L), Errors.None)
+      val certificate = CoordinatorDecisionCertificate.from(membership, Set(1, 2))
+      assertEquals(follower.receive(CoordinatorQuorumRecord.commit(transaction, certificate), 10L), Errors.None)
       assertEquals(installed.get(), CoordinatorMetadata.Empty)
       assertEquals(follower.receive(CoordinatorQuorumRecord.marker(transaction, CoordinatorQuorumPhase.Finalize), 10L), Errors.None)
       assertEquals(installed.get().groupImage.offsets.head.value.offset, 91L)
@@ -122,6 +125,44 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
       fixture.closeRemotes()
   }
 
+  test("a surviving voter resolves a certified transaction after owner loss") {
+    val fixture = QuorumFixture(nodes)
+    val transaction = CoordinatorTransactionId(500L, 600L)
+    val delta = groupDelta("owner-loss", 111L, 10L)
+    val certificate = CoordinatorDecisionCertificate.from(membership, Set(1, 2))
+    try
+      fixture.stores.take(2).foreach { store =>
+        assertEquals(store.prepare(transaction, delta, 10L), Errors.None)
+        assertEquals(store.decide(transaction), Errors.None)
+        assertEquals(store.commitDecision(transaction, certificate), Errors.None)
+      }
+      assertEquals(fixture.stores(2).prepare(transaction, delta, 10L), Errors.None)
+      val survivor = fixture.quorum(localNodeId = 2)
+      try
+        assertEquals(survivor.resolvePending(Long.MaxValue), 1)
+        assertEquals(fixture.stores.map(_.metadata.groupImage.offsets.head.value.offset), Vector(111L, 111L, 111L))
+        assertEquals(survivor.snapshot.recoveredTransactions, 1L)
+      finally survivor.close()
+    finally
+      fixture.stores.zipWithIndex.filter(_._2 != 1).foreach { case (store, _) => store.close() }
+  }
+
+  test("a stale prepared transaction aborts only after a query quorum") {
+    val fixture = QuorumFixture(nodes)
+    val transaction = CoordinatorTransactionId(700L, 800L)
+    val delta = groupDelta("stale-prepare", 121L, 10L)
+    try
+      fixture.stores.take(2).foreach(store => assertEquals(store.prepare(transaction, delta, 10L), Errors.None))
+      val survivor = fixture.quorum(localNodeId = 2)
+      try
+        assertEquals(survivor.resolvePending(Long.MaxValue), 1)
+        assertEquals(fixture.stores.take(2).map(_.transactionStatus(transaction).status), Vector.fill(2)(CoordinatorTransactionStatus.Aborted))
+        assertEquals(survivor.snapshot.recoveryAborts, 1L)
+      finally survivor.close()
+    finally
+      fixture.stores.zipWithIndex.filter(_._2 != 1).foreach { case (store, _) => store.close() }
+  }
+
   private def groupDelta(seed: String, offset: Long, term: Long): CoordinatorDelta =
     val group = s"$seed-group"
     val shard = CoordinatorShard.group(group)
@@ -140,10 +181,15 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
     )
     private val installed = AtomicReference(CoordinatorMetadata.Empty)
 
-    def quorum(): CoordinatorShardQuorum = CoordinatorShardQuorum(
-      1,
-      stores.head,
-      CoordinatorQuorumConfig(maxInflightTransactions = 8, admissionTimeoutMillis = 1000L),
+    def quorum(localNodeId: Int = 1): CoordinatorShardQuorum = CoordinatorShardQuorum(
+      localNodeId,
+      stores(localNodeId - 1),
+      CoordinatorQuorumConfig(
+        maxInflightTransactions = 8,
+        admissionTimeoutMillis = 1000L,
+        resolutionIntervalMillis = 60000L,
+        resolutionDelayMillis = 300000L
+      ),
       () => membership,
       () => 10L,
       (targets, record) =>
@@ -161,7 +207,8 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
           val code = if failedNodes(node.id) then Errors.RequestTimedOut else apply(stores(node.id - 1), record)
           node.id -> code
         }.toMap,
-      installed.set
+      installed.set,
+      (targets, transactionId) => targets.map(node => node.id -> stores(node.id - 1).transactionStatus(transactionId)).toMap
     )
 
     def closeRemotes(): Unit = stores.drop(1).foreach(_.close())
@@ -169,6 +216,8 @@ final class CoordinatorShardQuorumSuite extends FunSuite:
     private def apply(store: CoordinatorShardStore, record: CoordinatorQuorumRecord): Short = record.phase match
       case CoordinatorQuorumPhase.Prepare => store.prepare(record.transactionId, record.delta.get, 10L)
       case CoordinatorQuorumPhase.Decide  => store.decide(record.transactionId)
+      case CoordinatorQuorumPhase.Commit  => store.commitDecision(record.transactionId, record.certificate.get)
+      case CoordinatorQuorumPhase.Recover => store.recoverCertified(record.transactionId, record.delta.get, record.certificate.get)
       case CoordinatorQuorumPhase.Finalize => store.finalizeTransaction(record.transactionId).fold(identity, _ => Errors.None)
       case CoordinatorQuorumPhase.Abort =>
         store.abort(record.transactionId)
