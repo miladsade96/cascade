@@ -20,7 +20,12 @@ final case class CoordinatorShardStoreSnapshot(
 )
 
 /** Atomic local participant backed by one durable journal per touched shard. */
-final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata) extends AutoCloseable:
+final class CoordinatorShardStore(
+    directory: Path,
+    baseline: CoordinatorMetadata,
+    compactionBytes: Long = Long.MaxValue
+) extends AutoCloseable:
+  require(compactionBytes >= 1024L, "coordinator shard compaction threshold must be at least 1 KiB")
   private val root = directory.toAbsolutePath.normalize()
   Files.createDirectories(root)
   private val journals = mutable.HashMap.empty[Int, CoordinatorShardJournal]
@@ -162,6 +167,7 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
             finalizedParts.remove(transactionId): Unit
             terminal.update(transactionId, CoordinatorTransactionStatus.Finalized)
             finalizedCount += 1L
+            compact(delta.updates.map(_.id).toSet)
             Right(next)
   }
 
@@ -177,6 +183,7 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
       finalizedParts.remove(transactionId): Unit
       terminal.update(transactionId, CoordinatorTransactionStatus.Aborted)
       abortedCount += 1L
+      compact(delta.updates.map(_.id).toSet)
     }
   }
 
@@ -255,6 +262,31 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
     val ids = left.updates.iterator.map(_.id).toSet
     right.updates.exists(update => ids(update.id))
 
+  private def compact(shards: Set[Int]): Unit =
+    shards.toVector.sorted.foreach { shard =>
+      journals.get(shard).filter(_.snapshot.bytes >= compactionBytes).foreach { journal =>
+        val checkpoint = CoordinatorShardCheckpoint(
+          shard,
+          state.shardVersion(shard),
+          state.version,
+          state.ownerTerm,
+          state.shardPayloads(shard)
+        )
+        val unresolved = pending.toVector.sortBy(entry => (entry._1.high, entry._1.low)).flatMap { case (transactionId, delta) =>
+          Option.when(delta.updates.exists(_.id == shard)) {
+            certificates.get(transactionId) match
+              case Some(certificate) => Vector(CoordinatorQuorumRecord.recover(transactionId, delta, certificate))
+              case None if votes(transactionId) => Vector(
+                CoordinatorQuorumRecord.prepare(transactionId, delta),
+                CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Decide)
+              )
+              case None => Vector(CoordinatorQuorumRecord.prepare(transactionId, delta))
+          }
+        }.flatten
+        journal.replace(CoordinatorQuorumRecord.checkpoint(checkpoint) +: unresolved)
+      }
+    }
+
   private def recover(): Unit = synchronized {
     val stream = Files.list(root)
     val paths = try stream.iterator().asScala.filter { path =>
@@ -268,6 +300,14 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
       journals.update(shard, CoordinatorShardJournal(path, shard))
     }
 
+    journals.toVector.sortBy(_._1).foreach { case (_, journal) =>
+      journal.entries.flatMap(_.checkpoint).foreach { checkpoint =>
+        CoordinatorShardState.installCheckpoint(state, checkpoint) match
+          case Right(next) => state = next
+          case Left(message) => throw IllegalStateException(message)
+      }
+    }
+
     final case class Recovered(
         var delta: Option[CoordinatorDelta] = None,
         preparedShards: mutable.Set[Int] = mutable.HashSet.empty,
@@ -279,7 +319,7 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
     )
     val transactions = mutable.LinkedHashMap.empty[CoordinatorTransactionId, Recovered]
     journals.toVector.sortBy(_._1).foreach { case (shard, journal) =>
-      journal.entries.foreach { record =>
+      journal.entries.filterNot(_.phase == CoordinatorQuorumPhase.Checkpoint).foreach { record =>
         val recovered = transactions.getOrElseUpdate(record.transactionId, Recovered())
         record.phase match
           case CoordinatorQuorumPhase.Prepare =>
@@ -309,6 +349,7 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
             recovered.certifiedShards += shard
           case CoordinatorQuorumPhase.Finalize => recovered.finalizedShards += shard
           case CoordinatorQuorumPhase.Abort    => recovered.abortedShards += shard
+          case CoordinatorQuorumPhase.Checkpoint => ()
       }
     }
     val remaining = mutable.LinkedHashMap.from(transactions)
@@ -318,7 +359,10 @@ final class CoordinatorShardStore(directory: Path, baseline: CoordinatorMetadata
       remaining.toVector.foreach { case (transactionId, recovered) =>
         recovered.delta.foreach { delta =>
           val shards = delta.updates.map(_.id).toSet
-          if recovered.abortedShards.nonEmpty then
+          if CoordinatorShardState.includes(state, delta) then
+            remaining.remove(transactionId): Unit
+            progressed = true
+          else if recovered.abortedShards.nonEmpty then
             remaining.remove(transactionId): Unit
             progressed = true
           else if shards.subsetOf(recovered.finalizedShards) then

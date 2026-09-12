@@ -84,6 +84,29 @@ object CoordinatorShardState:
       ))
     catch case NonFatal(error) => Left(error.getMessage)
 
+  /** Installs one independently forced journal checkpoint without regressing any other shard. */
+  def installCheckpoint(current: CoordinatorMetadata, checkpoint: CoordinatorShardCheckpoint): Either[String, CoordinatorMetadata] =
+    try
+      val existingVersion = current.shardVersion(checkpoint.shard)
+      val payloads = current.shardPayloads
+      if checkpoint.shardVersion < existingVersion then Right(current)
+      else if checkpoint.shardVersion == existingVersion then
+        if payloads(checkpoint.shard) == checkpoint.payload then Right(current)
+        else Left(s"coordinator shard ${checkpoint.shard} checkpoint diverged at equal version")
+      else
+        val nextPayloads = payloads.updated(checkpoint.shard, checkpoint.payload)
+        val versions = Vector.tabulate(CoordinatorShard.Count)(current.shardVersion)
+          .updated(checkpoint.shard, checkpoint.shardVersion)
+        val imageVersion = math.max(current.version, checkpoint.imageVersion)
+        Right(CoordinatorMetadata(
+          imageVersion,
+          math.max(current.ownerTerm, checkpoint.ownerTerm),
+          GroupShardCodec.merge(nextPayloads.take(CoordinatorShard.Buckets), imageVersion),
+          DeliveryShardCodec.merge(nextPayloads.drop(CoordinatorShard.Buckets), imageVersion),
+          versions
+        ))
+    catch case NonFatal(error) => Left(s"invalid coordinator shard checkpoint: ${error.getMessage}")
+
   private def mergeOne(current: CoordinatorMetadata, delta: CoordinatorDelta, controllerTerm: Long): Either[String, CoordinatorMetadata] =
     if delta.controllerTerm != controllerTerm then Left("stale controller term")
     else if delta.updates.exists(update => current.shardVersion(update.id) != update.expectedVersion) then Left("stale coordinator shard")

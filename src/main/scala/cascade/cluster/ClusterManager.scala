@@ -76,7 +76,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   private val metadataTransfers = MetadataTransferMetrics()
   private val coordinatorShardStore = Option.when(enabled)(CoordinatorShardStore(
     config.dataDirectory.resolve(".cascade").resolve("coordinator-quorum"),
-    current.coordinator
+    current.coordinator,
+    config.coordinatorQuorum.journalCompactionBytes
   ))
   if current.featureLevels.getOrElse(ClusterFeature.IndependentCoordinator, 0.toShort) >= 1 then
     coordinatorShardStore.foreach(store => current = current.copy(coordinator = store.metadata))
