@@ -34,6 +34,8 @@ final class CoordinatorShardQuorum(
   private var decisionMessages = 0L
   private var finalizeMessages = 0L
   private var abortMessages = 0L
+  private var certificateMessages = 0L
+  private var recoveryMessages = 0L
   private var phaseNanos = 0L
   private var recordBytes = 0L
 
@@ -70,16 +72,26 @@ final class CoordinatorShardQuorum(
           abort(quorum, prepared, transactionId, term)
           return complete(success = false)
 
+        val certificate = CoordinatorDecisionCertificate.from(quorum, decided)
+        val certified = runPhase(
+          quorum.voters.map(_.node).filter(node => decided(node.id)),
+          CoordinatorQuorumRecord.commit(transactionId, certificate),
+          term
+        )
+        // A partial certificate is still a durable commit proof. Recovery must finish it;
+        // aborting here could contradict a certificate already forced on another voter.
+        if !quorum.hasQuorum(certified) then return complete(success = false)
+
         val finalizeRecord = CoordinatorQuorumRecord.marker(transactionId, CoordinatorQuorumPhase.Finalize)
         // The owner remains readable at its last acknowledged image while followers force the
         // terminal record. Publishing locally first would make readiness race ahead of installation.
         val remoteFinalized = runPhase(
-          quorum.voters.map(_.node).filter(node => node.id != localNodeId && decided(node.id)),
+          quorum.voters.map(_.node).filter(node => node.id != localNodeId && certified(node.id)),
           finalizeRecord,
           term
         )
         val finalized =
-          if decided(localNodeId) && quorum.hasQuorum(remoteFinalized + localNodeId) then
+          if certified(localNodeId) && quorum.hasQuorum(remoteFinalized + localNodeId) then
             remoteFinalized ++ runPhase(quorum.voters.map(_.node).filter(_.id == localNodeId), finalizeRecord, term)
           else remoteFinalized
         complete(quorum.hasQuorum(finalized) && finalized(localNodeId))
@@ -112,6 +124,8 @@ final class CoordinatorShardQuorum(
       decisionMessages,
       finalizeMessages,
       abortMessages,
+      certificateMessages,
+      recoveryMessages,
       phaseNanos,
       recordBytes,
       store.snapshot
@@ -148,6 +162,8 @@ final class CoordinatorShardQuorum(
         case CoordinatorQuorumPhase.Decide   => decisionMessages += nodes.size.toLong
         case CoordinatorQuorumPhase.Finalize => finalizeMessages += nodes.size.toLong
         case CoordinatorQuorumPhase.Abort    => abortMessages += nodes.size.toLong
+        case CoordinatorQuorumPhase.Commit   => certificateMessages += nodes.size.toLong
+        case CoordinatorQuorumPhase.Recover  => recoveryMessages += nodes.size.toLong
       recordBytes += bytes * nodes.size.toLong
       phaseNanos += math.max(0L, System.nanoTime() - started)
     }
@@ -161,6 +177,10 @@ final class CoordinatorShardQuorum(
       record.phase match
         case CoordinatorQuorumPhase.Prepare => store.prepare(record.transactionId, record.delta.get, term) -> None
         case CoordinatorQuorumPhase.Decide  => store.decide(record.transactionId) -> None
+        case CoordinatorQuorumPhase.Commit =>
+          store.commitDecision(record.transactionId, record.certificate.get) -> None
+        case CoordinatorQuorumPhase.Recover =>
+          store.recoverCertified(record.transactionId, record.delta.get, record.certificate.get) -> None
         case CoordinatorQuorumPhase.Finalize =>
           store.finalizeTransaction(record.transactionId) match
             case Right(metadata) => Errors.None -> Some(metadata)
