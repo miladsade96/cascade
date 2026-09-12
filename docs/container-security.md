@@ -14,7 +14,7 @@ Scanning the image's existing attestation avoids downloading a second Java packa
 
 ```bash
 node --test scripts/qualify-image-security.test.mjs
-node scripts/qualify-image-security.mjs miladsade96/cascade:1.3.1 1.3.1 artifacts/security-unique-run
+node scripts/qualify-image-security.mjs miladsade96/cascade:1.4.0 1.4.0 artifacts/security-unique-run
 ```
 
 The evidence directory must not already exist. `result.json` is written only after a successful scan and records the image/index digest, runtime manifest, release version, scanner version, scan time, and zero findings. The directory also preserves the image archive, SPDX inventory, full SARIF report, and scanner log. A failed attempt cannot reuse a previous passing report.

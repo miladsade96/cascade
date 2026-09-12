@@ -28,7 +28,11 @@ final class CoordinatorStateMachine(
 
   cluster.attachCoordinatorInstaller(install)
   groups.attachCheckpoint(() => commitDomain(CoordinatorDomain.Group))
-  delivery.attachCheckpoint(() => commitDomain(CoordinatorDomain.Transaction))
+  delivery.attachCheckpoint(new CoordinatorCheckpoint:
+    override def commit(): Boolean = commitDomain(CoordinatorDomain.Transaction)
+    override def commitCombined(): Boolean =
+      commitDomains(Set(CoordinatorDomain.Group, CoordinatorDomain.Transaction))
+  )
   expirationExecutor.scheduleWithFixedDelay(
     () =>
       try
@@ -43,18 +47,24 @@ final class CoordinatorStateMachine(
     TimeUnit.SECONDS
   ): Unit
 
-  override def commit(): Boolean = commitDomain(CoordinatorDomain.Group)
+  override def commit(): Boolean = commitDomains(Set(CoordinatorDomain.Group))
 
-  private def commitDomain(domain: CoordinatorDomain): Boolean = {
+  override def commitCombined(): Boolean =
+    commitDomains(Set(CoordinatorDomain.Group, CoordinatorDomain.Transaction))
+
+  private def commitDomain(domain: CoordinatorDomain): Boolean = commitDomains(Set(domain))
+
+  private def commitDomains(domains: Set[CoordinatorDomain]): Boolean = {
     val started = System.nanoTime()
     val (groupImage, acknowledgedGroup) = groups.stagedImages
     val (deliveryImage, acknowledgedDelivery) = delivery.stagedImages
     val candidate = snapshots.capture(groupImage, deliveryImage)
     val acknowledged = snapshots.capture(acknowledgedGroup, acknowledgedDelivery)
     val (base, before, after, intendedShards) = stateLock.synchronized {
-      val eligible = domain match
+      val eligible = Vector(CoordinatorDomain.Group, CoordinatorDomain.Transaction).filter(domains).flatMap {
         case CoordinatorDomain.Group       => 0 until CoordinatorShard.Buckets
         case CoordinatorDomain.Transaction => CoordinatorShard.Buckets until CoordinatorShard.Count
+      }
       val intended = eligible.filter(shard => candidate.payloads(shard) != acknowledged.payloads(shard)).toVector
       val proposed = baseline.zipWithIndex.map { case (payload, shard) =>
         if intended.contains(shard) then candidate.payloads(shard) else payload

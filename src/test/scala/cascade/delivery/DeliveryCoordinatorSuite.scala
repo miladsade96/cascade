@@ -361,9 +361,16 @@ final class DeliveryCoordinatorSuite extends FunSuite:
       scheduleExpiration = false
     )
     var checkpoints = 0
-    val checkpoint: CoordinatorCheckpoint = () =>
-      checkpoints += 1
-      true
+    var combinedCheckpoints = 0
+    val checkpoint = new CoordinatorCheckpoint:
+      override def commit(): Boolean =
+        checkpoints += 1
+        true
+
+      override def commitCombined(): Boolean =
+        checkpoints += 1
+        combinedCheckpoints += 1
+        true
     groups.attachCheckpoint(checkpoint)
     delivery.attachCheckpoint(checkpoint)
     try
@@ -388,6 +395,7 @@ final class DeliveryCoordinatorSuite extends FunSuite:
 
       assertEquals(delivery.endTransaction("atomic", producer.producerId, producer.producerEpoch, committed = true), Errors.None)
       assertEquals(checkpoints - beforeEnd, 1)
+      assertEquals(combinedCheckpoints, 1)
       assertEquals(groups.fetchOffset(GroupOffsetKey("workers", "events", 0)).map(_.offset), Some(44L))
       assert(delivery.image.completedTransactions.last.offsetsApplied)
     finally

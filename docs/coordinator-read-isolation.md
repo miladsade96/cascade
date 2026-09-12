@@ -10,7 +10,7 @@ Updates rebuild only the groups they touch. Unchanged group vectors are structur
 
 ## Transaction view
 
-I derive `DeliveryReadView` from the last acknowledged delivery image. It indexes the earliest active offset by topic-partition and completed outcomes by producer ID and epoch. Committed transactional data is visible only when the newest covering outcome is committed and its transactional offsets were applied atomically.
+I derive `DeliveryReadView` from the last acknowledged delivery image. It indexes the earliest active offset by topic-partition and completed outcomes by producer ID and epoch. Committed transactional data is visible only when the newest covering outcome is committed and its transactional offsets were applied atomically through the combined group-plus-transaction checkpoint.
 
 The Fetch handler captures one delivery view for the whole response. Last-stable-offset calculation and every transactional batch decision use that same object, even if a transaction completes while the response is being built. Transaction expiry remains scheduled on the write side; a late expiry can conservatively withhold data, but it cannot expose an uncommitted batch.
 
@@ -47,4 +47,4 @@ I do not add group, topic, partition, transactional ID, or producer labels. The 
 
 ## Remaining boundary
 
-This milestone narrows read/write contention for committed offsets, group administration, and transaction visibility. Format 12 now uses forced per-shard quorum journals instead of metadata-quorum publication for steady-state coordinator writes. Group joins, heartbeats, rebalances, deletion mutation, transaction mutation, checkpoint preparation, and installation still share broker-local write-side coordination. Distributed resolution of decided transactions, journal checkpoint compaction, membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.
+This milestone narrows read/write contention for committed offsets, group administration, and transaction visibility. Format 12 uses forced per-shard quorum journals instead of metadata-quorum publication for steady-state coordinator writes. The later coordinator completion work separates group and delivery mutation monitors, certifies majority decisions for cross-node resolution, and compacts terminal journals to forced checkpoints. Membership and transaction churn qualification, arbitrary network impairment, and dedicated-host RF=3 capacity evidence remain production gates.

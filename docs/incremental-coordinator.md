@@ -14,7 +14,7 @@ This document describes the format-10 incremental metadata path. The later [form
 - A new committed feature and storage-format floor gate activation. Mixed-version clusters retain their previous encoding until every voter supports the new format.
 - I require codec/validation tests, torn-tail and checkpoint recovery, wire-level fault tests, Kafka offset/transaction recovery, the complete suite, and measured journal/replication bytes before claiming the optimization works.
 
-The later format-12 path implements independent shard quorum journals. Physical power loss, distributed resolution after coordinator loss, shard-journal compaction, fine-grained service locks, multi-day load, and dedicated-host capacity remain separate release gates.
+The later format-12 path now implements independent shard quorum journals, certified cross-node resolution, checkpoint compaction, and separate group/delivery mutation monitors. Physical power loss, multi-day load, and dedicated-host capacity remain separate release gates.
 
 ## Encoding and recovery
 

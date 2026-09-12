@@ -208,7 +208,6 @@ final class DeliveryCoordinator(
       case Left(error) => error
       case Right(active) =>
         val useAtomicSnapshot = !durableLocal && committed && active.pendingOffsets.nonEmpty
-        if useAtomicSnapshot then groups.stageReplicatedOffsets(offsetValues(active.pendingOffsets))
         val completed = CompletedTransaction(
           transactionalId,
           producerId,
@@ -218,17 +217,18 @@ final class DeliveryCoordinator(
           active.ranges,
           if committed then active.pendingOffsets else Vector.empty
         )
-        val transitionCommitted = commit(
-          current.copy(
-            version = current.version + 1L,
-            activeTransactions = current.activeTransactions.filterNot(_.transactionalId == transactionalId),
-            completedTransactions = current.completedTransactions :+ completed
-          )
+        val next = current.copy(
+          version = current.version + 1L,
+          activeTransactions = current.activeTransactions.filterNot(_.transactionalId == transactionalId),
+          completedTransactions = current.completedTransactions :+ completed
         )
-        if !transitionCommitted then
-          if useAtomicSnapshot then groups.rollbackUnacknowledged()
-          return Errors.CoordinatorNotAvailable
-        if useAtomicSnapshot then groups.publishAcknowledgedOffsets()
+        val transitionCommitted =
+          if useAtomicSnapshot then
+            groups.commitReplicatedOffsets(offsetValues(active.pendingOffsets)) {
+              commit(next, includeStagedGroupOffsets = true)
+            }
+          else commit(next)
+        if !transitionCommitted then return Errors.CoordinatorNotAvailable
         if committed && completed.pendingOffsets.nonEmpty && !useAtomicSnapshot then
           applyOffsets(completed.pendingOffsets)
           if !markOffsetsApplied(completed) then return Errors.CoordinatorNotAvailable
@@ -511,10 +511,12 @@ final class DeliveryCoordinator(
       activeTransactions = current.activeTransactions.filterNot(_.transactionalId == active.transactionalId) :+ active
     )
 
-  private def commit(next: DeliveryImage): Boolean =
+  private def commit(next: DeliveryImage, includeStagedGroupOffsets: Boolean = false): Boolean =
     store.commit(next, durableLocal)
     current = next
-    val committed = checkpoint.commit()
+    val committed =
+      if includeStagedGroupOffsets then checkpoint.commitCombined()
+      else checkpoint.commit()
     if committed then
       acknowledgedImage = current
       acknowledged = DeliveryReadView.from(current)

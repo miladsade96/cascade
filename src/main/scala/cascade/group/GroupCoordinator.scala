@@ -479,22 +479,21 @@ final class GroupCoordinator(
     (error, values)
   }
 
-  /** Stages offsets inside a caller-owned combined coordinator checkpoint. */
-  private[cascade] def stageReplicatedOffsets(values: Vector[OffsetCommitValue]): Unit = stateLock.synchronized {
+  /** Holds the group mutation boundary while a transaction publishes its combined coordinator checkpoint. */
+  private[cascade] def commitReplicatedOffsets(values: Vector[OffsetCommitValue])(operation: => Boolean): Boolean = stateLock.synchronized {
     offsets.commit(values, durableLocal, publish = false)
     stateVersion = Math.addExact(stateVersion, 1L)
     checkpointImage = snapshotImage()
-  }
-
-  /** Publishes transaction-staged offsets after their combined checkpoint succeeds. */
-  private[cascade] def publishAcknowledgedOffsets(): Unit = stateLock.synchronized {
-    offsets.publishAcknowledged()
-    acknowledgedImage = checkpointImage
-    acknowledgedAdmin = GroupAdminReadView.from(checkpointImage)
-  }
-
-  private[cascade] def rollbackUnacknowledged(): Unit = stateLock.synchronized {
-    installImage(acknowledgedImage, renewSessions = false)
+    var committed = false
+    try
+      committed = operation
+      if committed then
+        offsets.publishAcknowledged()
+        acknowledgedImage = checkpointImage
+        acknowledgedAdmin = GroupAdminReadView.from(checkpointImage)
+      committed
+    finally
+      if !committed then installImage(acknowledgedImage, renewSessions = false)
   }
 
   override def close(): Unit =
