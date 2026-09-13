@@ -21,7 +21,10 @@ final case class ConsumerHeartbeatCommand(
     rebalanceTimeoutMillis: Int,
     subscribedTopicNames: Option[Vector[String]],
     serverAssignor: Option[String],
-    ownedPartitions: Option[Vector[ConsumerTopicPartitions]]
+    ownedPartitions: Option[Vector[ConsumerTopicPartitions]],
+    subscribedTopicRegex: Option[String] = None,
+    clientId: String = "",
+    clientHost: String = ""
 )
 final case class ConsumerHeartbeatResult(
     errorCode: Short,
@@ -41,13 +44,18 @@ private[group] final class ConsumerMember(
     var serverAssignor: String,
     var memberEpoch: Int,
     var lastHeartbeatMillis: Long,
-    var assignment: Vector[ConsumerTopicPartitions]
+    var assignment: Vector[ConsumerTopicPartitions],
+    var subscribedTopicRegex: Option[String] = None,
+    var clientId: String = "",
+    var clientHost: String = "",
+    var targetAssignment: Vector[ConsumerTopicPartitions] = Vector.empty
 )
 
 private[group] final class ManagedConsumerGroup:
   val members: mutable.LinkedHashMap[String, ConsumerMember] = mutable.LinkedHashMap.empty
   val partitionCounts: mutable.HashMap[String, Int] = mutable.HashMap.empty
   var groupEpoch = 0
+  var assignmentEpoch = 0
 
 private[cascade] final case class StoredConsumerMember(
     memberId: String,
@@ -58,11 +66,38 @@ private[cascade] final case class StoredConsumerMember(
     serverAssignor: String,
     memberEpoch: Int,
     lastHeartbeatMillis: Long,
-    assignment: Vector[ConsumerTopicPartitions]
+    assignment: Vector[ConsumerTopicPartitions],
+    subscribedTopicRegex: Option[String] = None,
+    clientId: String = "",
+    clientHost: String = "",
+    targetAssignment: Vector[ConsumerTopicPartitions] = Vector.empty
 )
 
 private[cascade] final case class StoredConsumerGroup(
     groupId: String,
     groupEpoch: Int,
-    members: Vector[StoredConsumerMember]
+    members: Vector[StoredConsumerMember],
+    assignmentEpoch: Int = 0
+)
+
+private[cascade] final case class ConsumerGroupDescriptionMember(
+    memberId: String,
+    instanceId: Option[String],
+    rackId: Option[String],
+    memberEpoch: Int,
+    clientId: String,
+    clientHost: String,
+    subscribedTopicNames: Vector[String],
+    subscribedTopicRegex: Option[String],
+    assignment: Vector[ConsumerTopicPartitions],
+    targetAssignment: Vector[ConsumerTopicPartitions]
+)
+
+private[cascade] final case class ConsumerGroupDescription(
+    groupId: String,
+    state: String,
+    groupEpoch: Int,
+    assignmentEpoch: Int,
+    assignorName: String,
+    members: Vector[ConsumerGroupDescriptionMember]
 )
