@@ -149,6 +149,7 @@ final class BrokerIntegrationSuite extends FunSuite:
         (0 until 2).foreach { _ =>
           assertEquals(response.readUnsignedVarInt(), 2)
           response.readUuid()
+          assertEquals(response.readCompactString(), "described-events")
           assertEquals(response.readCompactArray(response.readInt()), Vector(0))
           response.skipTaggedFields()
           response.skipTaggedFields()

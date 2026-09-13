@@ -614,6 +614,7 @@ final class RequestHandler(
     def writeAssignment(values: Vector[ConsumerTopicPartitions]): Unit =
       writer.writeCompactArray(values) { topic =>
         writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
+        writer.writeCompactString(topicNameForId(topic.topicId).getOrElse(""))
         writer.writeCompactArray(topic.partitions)(writer.writeInt)
         writer.writeEmptyTaggedFields(): Unit
       }

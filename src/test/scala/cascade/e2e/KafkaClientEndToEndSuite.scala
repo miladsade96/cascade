@@ -212,6 +212,14 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         val committed = consumer.committed(partitions)
         assertEquals(committed.get(TopicPartition("modern-consumer-events", 0)).offset(), 6L)
         assertEquals(committed.get(TopicPartition("modern-consumer-events", 1)).offset(), 6L)
+        val inspector = Admin.create(adminProperties(broker.bootstrapServers))
+        try
+          val description = inspector.describeConsumerGroups(java.util.List.of("modern-consumer-group"))
+            .all().get(10, TimeUnit.SECONDS).get("modern-consumer-group")
+          assertEquals(description.groupId(), "modern-consumer-group")
+          assertEquals(description.members().size(), 1)
+          assertEquals(description.members().iterator().next().consumerId(), consumer.groupMetadata().memberId())
+        finally inspector.close(Duration.ofSeconds(5))
       finally consumer.close()
     finally
       broker.close()
