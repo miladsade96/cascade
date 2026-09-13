@@ -682,9 +682,14 @@ final class GroupCoordinator(
             member.serverAssignor,
             member.memberEpoch,
             member.lastHeartbeatMillis,
-            member.assignment
+            member.assignment,
+            member.subscribedTopicRegex,
+            member.clientId,
+            member.clientHost,
+            member.targetAssignment
           )
-        }.toVector
+        }.toVector,
+        group.assignmentEpoch
       )
     }
     GroupImage(stateVersion, storedGroups, offsets.entries, storedConsumers)
@@ -740,6 +745,7 @@ final class GroupCoordinator(
       group.members.clear()
       group.partitionCounts.clear()
       group.groupEpoch = stored.groupEpoch
+      group.assignmentEpoch = stored.assignmentEpoch
       stored.members.foreach { value =>
         group.members.update(
           value.memberId,
@@ -755,7 +761,11 @@ final class GroupCoordinator(
             else previousMembers.get(value.memberId)
               .map(member => math.max(member.lastHeartbeatMillis, value.lastHeartbeatMillis))
               .getOrElse(installedAtMillis),
-            value.assignment
+            value.assignment,
+            value.subscribedTopicRegex,
+            value.clientId,
+            value.clientHost,
+            value.targetAssignment
           )
         )
       }
