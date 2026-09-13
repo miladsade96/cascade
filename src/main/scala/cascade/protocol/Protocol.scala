@@ -26,6 +26,7 @@ object ApiKey:
   val CreateAcls: Short = 30
   val DeleteAcls: Short = 31
   val DescribeConfigs: Short = 32
+  val OffsetDelete: Short = 47
   val IncrementalAlterConfigs: Short = 44
   val DeleteGroups: Short = 42
   val SaslAuthenticate: Short = 36
@@ -33,6 +34,7 @@ object ApiKey:
   val ListPartitionReassignments: Short = 46
   val DescribeQuorum: Short = 55
   val ConsumerGroupHeartbeat: Short = 68
+  val ConsumerGroupDescribe: Short = 69
   val AddRaftVoter: Short = 80
   val RemoveRaftVoter: Short = 81
 
@@ -80,6 +82,7 @@ object Errors:
   val IllegalSaslState: Short = 34
   val SaslAuthenticationFailed: Short = 58
   val MemberIdRequired: Short = 79
+  val UnstableOffsetCommit: Short = 88
   val FencedInstanceId: Short = 82
   val NonEmptyGroup: Short = 68
   val GroupIdNotFound: Short = 69
@@ -89,9 +92,11 @@ object Errors:
   val ReassignmentInProgress: Short = 60
   val NoReassignmentInProgress: Short = 85
   val InconsistentClusterId: Short = 104
+  val UnknownTopicId: Short = 100
   val InvalidVoterKey: Short = 125
   val DuplicateVoter: Short = 126
   val VoterNotFound: Short = 127
+  val InvalidRegularExpression: Short = 128
   val FencedMemberEpoch: Short = 110
   val UnreleasedInstanceId: Short = 111
   val UnsupportedAssignor: Short = 112
