@@ -154,6 +154,35 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("consumer descriptions expose acknowledged epochs identity subscriptions and assignments") {
+    val directory = Files.createTempDirectory("cascade-consumer-description-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    try
+      val result = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "described-workers", "member-a", 0, Some("instance-a"), Some("rack-a"), 30_000,
+          Some(Vector("events")), Some("range"), Some(Vector.empty), None, "client-a", "127.0.0.1"
+        ),
+        _ => 2
+      )
+      assertEquals(result.errorCode, Errors.None)
+      val description = coordinator.describeConsumerGroup("described-workers").getOrElse(fail("missing consumer group"))
+      assertEquals(description.state, "Stable")
+      assertEquals(description.groupEpoch, 1)
+      assertEquals(description.assignmentEpoch, 1)
+      assertEquals(description.assignorName, "range")
+      assertEquals(description.members.map(_.memberId), Vector("member-a"))
+      assertEquals(description.members.head.instanceId, Some("instance-a"))
+      assertEquals(description.members.head.rackId, Some("rack-a"))
+      assertEquals(description.members.head.clientId, "client-a")
+      assertEquals(description.members.head.clientHost, "127.0.0.1")
+      assertEquals(description.members.head.assignment.flatMap(_.partitions), Vector(0, 1))
+      assertEquals(description.members.head.targetAssignment, description.members.head.assignment)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   test("classic member joins, synchronizes, heartbeats, and commits offsets") {
     val directory = Files.createTempDirectory("cascade-group-coordinator-test")
     val coordinator = GroupCoordinator(directory.resolve("offsets.log"))

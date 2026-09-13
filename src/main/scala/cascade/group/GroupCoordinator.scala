@@ -115,6 +115,33 @@ final class GroupCoordinator(
     readMetrics.recordGroupDescribe(result.nonEmpty)
     result
 
+  private[cascade] def describeConsumerGroup(groupId: String): Option[ConsumerGroupDescription] =
+    val image = acknowledgedImage
+    image.consumerGroups.find(_.groupId == groupId).map { group =>
+      val reconciling = group.members.exists(member => member.assignment != member.targetAssignment)
+      ConsumerGroupDescription(
+        group.groupId,
+        if group.members.isEmpty then "Empty" else if reconciling then "Reconciling" else "Stable",
+        group.groupEpoch,
+        group.assignmentEpoch,
+        group.members.headOption.map(_.serverAssignor).getOrElse(""),
+        group.members.map { member =>
+          ConsumerGroupDescriptionMember(
+            member.memberId,
+            member.instanceId,
+            member.rackId,
+            member.memberEpoch,
+            member.clientId,
+            member.clientHost,
+            member.subscriptions,
+            member.subscribedTopicRegex,
+            member.assignment,
+            member.targetAssignment
+          )
+        }
+      )
+    }
+
   private[cascade] def deleteGroup(groupId: String, admission: () => Short): Short = stateLock.synchronized {
     def complete(error: Short): Short =
       readMetrics.recordGroupDelete(error == Errors.None)
