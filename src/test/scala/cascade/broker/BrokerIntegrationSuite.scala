@@ -57,6 +57,50 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("serves ConsumerGroupHeartbeat v1 with regex subscriptions and client member IDs") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("regex-events", 72))
+        val join = requestHeader(ApiKey.ConsumerGroupHeartbeat, 1, 73, flexible = true)
+          .writeCompactString("regex-group")
+          .writeCompactString("client-member")
+          .writeInt(0)
+          .writeCompactNullableString(None)
+          .writeCompactNullableString(None)
+          .writeInt(30_000)
+        join.writeCompactNullableArray(None)(join.writeCompactString)
+        join.writeCompactNullableString(Some("regex-.*"))
+        join.writeCompactNullableString(Some("uniform"))
+        join.writeCompactNullableArray(Some(Vector.empty[Unit]))(_ => ())
+        join.writeEmptyTaggedFields()
+
+        val response = request(output, input, join.result())
+        assertEquals(response.readInt(), 73)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readCompactNullableString(), None)
+        assertEquals(response.readCompactNullableString(), Some("client-member"))
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readInt(), 5000)
+        assertEquals(response.readByte(), 1.toByte)
+        val assignment = response.readCompactArray {
+          response.readUuid()
+          val partitions = response.readCompactArray(response.readInt())
+          response.skipTaggedFields()
+          partitions
+        }
+        assertEquals(assignment, Vector(Vector(0)))
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("close is safe before start and permanently closes the broker") {
     val directory = Files.createTempDirectory("cascade-broker-lifecycle")
     val broker = KafkaBroker(

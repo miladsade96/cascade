@@ -121,7 +121,7 @@ final class RequestHandler(
       case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
       case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
       case ApiKey.DeleteGroups => deleteGroups(body, session)
-      case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(body)
+      case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(header, body, session)
       case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.DescribeAcls => describeAcls(body, session)
       case ApiKey.CreateAcls => createAcls(body, session)
@@ -493,7 +493,11 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def consumerGroupHeartbeat(cursor: ByteCursor): Option[Array[Byte]] =
+  private def consumerGroupHeartbeat(
+      header: RequestHeader,
+      cursor: ByteCursor,
+      session: ConnectionSession
+  ): Option[Array[Byte]] =
     val groupId = cursor.readCompactString()
     val memberId = cursor.readCompactString()
     val memberEpoch = cursor.readInt()
@@ -501,6 +505,7 @@ final class RequestHandler(
     val rackId = cursor.readCompactNullableString()
     val rebalanceTimeoutMillis = cursor.readInt()
     val subscriptions = cursor.readCompactNullableArray(cursor.readCompactString())
+    val subscriptionRegex = if header.apiVersion >= 1 then cursor.readCompactNullableString() else None
     val serverAssignor = cursor.readCompactNullableString()
     val owned = cursor.readCompactNullableArray {
       val (high, low) = cursor.readUuid()
@@ -511,7 +516,9 @@ final class RequestHandler(
     cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val result =
-      if !clusterManager.supportsFeature(ClusterFeature.ConsumerProtocol) then
+      if header.apiVersion >= 1 && memberEpoch == 0 && memberId.isEmpty then
+        ConsumerHeartbeatResult(Errors.InvalidRequest, Some("heartbeat v1 requires a consumer-generated member ID"), None, memberEpoch, 5000, None)
+      else if !clusterManager.supportsFeature(ClusterFeature.ConsumerProtocol) then
         ConsumerHeartbeatResult(Errors.UnsupportedVersion, Some("consumer protocol is not active on every broker"), None, memberEpoch, 5000, None)
       else if isGroupCoordinatorFor(groupId) then
         groupCoordinator.consumerHeartbeat(
@@ -524,9 +531,13 @@ final class RequestHandler(
             rebalanceTimeoutMillis,
             subscriptions,
             serverAssignor,
-            owned
+            owned,
+            subscriptionRegex,
+            header.clientId.getOrElse(""),
+            session.remoteAddress
           ),
-          topic => clusterManager.topic(topic).map(_.partitions.size).orElse(registry.partitions(topic).map(_.size)).getOrElse(0)
+          topic => clusterManager.topic(topic).map(_.partitions.size).orElse(registry.partitions(topic).map(_.size)).getOrElse(0),
+          () => clusterManager.topicNames
         )
       else ConsumerHeartbeatResult(Errors.NotCoordinator, Some("request belongs to another coordinator shard"), None, memberEpoch, 5000, None)
     val writer = ByteWriter().writeInt(0).writeShort(result.errorCode)
@@ -1594,6 +1605,8 @@ final class RequestHandler(
       case ApiKey.OffsetCommit | ApiKey.OffsetFetch | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
           ApiKey.SyncGroup =>
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+      case ApiKey.ConsumerGroupHeartbeat =>
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readCompactString())
       case ApiKey.InitProducerId =>
         cursor.readNullableString() match
           case Some(transactionalId) =>

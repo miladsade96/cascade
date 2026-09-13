@@ -137,7 +137,7 @@ object Compatibility:
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.DescribeQuorum, 0, 2),
-    ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 0),
+    ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 1),
     ApiVersion(ApiKey.AddRaftVoter, 0, 1),
     ApiVersion(ApiKey.RemoveRaftVoter, 0, 0)
   )
