@@ -1,18 +1,20 @@
 # Consumer group administration
 
-I expose the Kafka group administration APIs needed by Kafka 4.3.1 `Admin`: `ListGroups` v0-v4, `DescribeGroups` v0-v4, and `DeleteGroups` v0-v1. They cover classic groups, `ConsumerGroupHeartbeat` v0 groups, and groups that only retain committed offsets. This is an explicit compatibility range, not a claim that every Kafka group API is implemented.
+I expose the Kafka 4.3.1 consumer administration surface: `ListGroups` v0-v5, `DescribeGroups` v0-v4, `DeleteGroups` v0-v2, `ConsumerGroupDescribe` v0-v1, `OffsetFetch` v4-v10, and `OffsetDelete` v0. These APIs cover classic groups, modern consumer groups, and groups that only retain committed offsets. The exact version ranges remain part of the compatibility contract.
 
 ## Acknowledged view
 
 List and describe read one immutable group view published at the coordinator checkpoint boundary. A mutation is not visible while its local or quorum checkpoint is unresolved. When the checkpoint succeeds, the group image and its offsets become visible together; when it fails, neither becomes visible. Administration reads do not wait on an in-flight coordinator publication.
 
-The view is detached from mutable member state and sorted by group ID. Classic descriptions include the selected protocol, member metadata, assignment, client ID, and static instance ID. Cascade does not persist a client network address, so the legacy `client_host` field is empty. Offset-only groups appear as `Empty` with an empty protocol type. Consumer-protocol groups are identified with protocol type `consumer`; detailed modern member inspection still belongs to the not-yet-implemented `ConsumerGroupDescribe` API.
+The view is detached from mutable member state and sorted by group ID. Classic descriptions include the selected protocol, member metadata, assignment, client ID, and static instance ID. Offset-only groups appear as `Empty` with an empty protocol type. Modern descriptions include group and assignment epochs, state, assignor, member and instance IDs, rack, client ID and host, explicit or regex subscriptions, and both the current and target assignment.
 
-`ListGroups` v4 applies Kafka's state filter against the same snapshot. In a cluster, each broker only reports the group IDs it currently owns. Kafka Admin collects the broker-local results to build a cluster-wide listing.
+`ListGroups` v4 applies Kafka's state filter against the same snapshot. Version 5 also filters and reports `Classic` or `Consumer` group types. In a cluster, each broker only reports the group IDs it currently owns. Kafka Admin collects the broker-local results to build a cluster-wide listing.
+
+`OffsetFetch` v6-v10 uses flexible encoding, version 8 reads several groups in one request, version 9 validates modern member identity and epoch, and version 10 uses topic IDs. Membership validation and offsets come from immutable acknowledged images, so a paused write cannot block or expose a tentative offset read.
 
 ## Authorization
 
-With ACLs enabled, listing returns only groups for which the principal has `Describe`. Describe returns `GROUP_AUTHORIZATION_FAILED` for a denied group. Delete requires `Delete` on every requested group and returns a result for each ID. Coordinator discovery returns Kafka authorization errors on the wire instead of dropping the connection.
+With ACLs enabled, listing returns only groups for which the principal has `Describe`. Both description APIs return `GROUP_AUTHORIZATION_FAILED` for a denied group. Offset reads and commits require `Read`; group and selected-offset deletion require `Delete`. Coordinator discovery returns Kafka authorization errors on the wire instead of dropping the connection.
 
 For example:
 
@@ -35,6 +37,8 @@ Delete is deliberately conservative:
 
 The deletion record survives journal compaction, broker restart, full cluster restart, and coordinator failover. A client timeout can still make a completed administrative mutation look ambiguous, so callers should re-describe the group before retrying a destructive request.
 
+`OffsetDelete` removes only the requested committed offsets. It returns `GROUP_SUBSCRIBED_TO_TOPIC` for a topic still used by an active member, preserves unrelated offsets, and publishes the removal through the same atomic checkpoint. Kafka Admin exposes this as `deleteConsumerGroupOffsets`.
+
 ## Operations
 
 I export these node-scoped counters:
@@ -52,6 +56,6 @@ The bundled Grafana dashboard graphs their five-minute rates. A sustained delete
 
 ## Qualification and remaining work
 
-The test boundary includes byte-level protocol cases, Kafka 4.3.1 Admin lifecycle tests, state filters, missing and active groups, per-group ACLs, deletion with offset cleanup, broker restart, and three-broker coordinator failover. The complete Scala suite and external client matrix remain release gates.
+The test boundary includes byte-level flexible and legacy frames, Kafka 4.3.1 Admin lifecycle tests, modern detailed descriptions, state and type filters, missing and active groups, selected and full deletion, topic IDs, member-epoch fencing, backward state decoding, broker restart, and three-broker coordinator failover. The 2026-09-13 full run passed 552/552 tests after a real-client check found and fixed one assignment-structure framing defect and the full suite found and fixed one blocking membership-read path.
 
-Later `ConsumerGroupHeartbeat` versions, `ConsumerGroupDescribe`, `ListConsumerGroupOffsets`, `DeleteConsumerGroupOffsets`, high-cardinality rebalance churn, and dedicated-host administration capacity are still open. Format 12 now supplies the independent shard quorum; distributed decision resolution, shard-journal compaction, and finer-grained mutation locks remain on the [production-readiness checklist](production-readiness.md). The old-or-new read boundary is described in [coordinator read isolation](coordinator-read-isolation.md).
+High-cardinality multi-day rebalance churn and dedicated-host administration capacity are still open. Format 12 supplies the independent shard quorum, including distributed decision resolution and shard-journal compaction. The remaining operational qualification is tracked in the [production-readiness checklist](production-readiness.md), and the old-or-new read boundary is described in [coordinator read isolation](coordinator-read-isolation.md).
