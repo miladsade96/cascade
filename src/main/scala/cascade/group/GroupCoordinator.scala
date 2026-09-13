@@ -557,6 +557,33 @@ final class GroupCoordinator(
       if !committed then installImage(acknowledgedImage, renewSessions = false)
   }
 
+  private[cascade] def deleteOffsets(
+      groupId: String,
+      keys: Vector[GroupOffsetKey],
+      admission: () => Short
+  ): OffsetDeleteResult = stateLock.synchronized {
+    val gate = admission()
+    if gate != Errors.None then return OffsetDeleteResult(gate, Map.empty)
+    if groupId.isEmpty then return OffsetDeleteResult(Errors.InvalidGroupId, Map.empty)
+    val hasOffsets = offsets.entries.exists(_.key.groupId == groupId)
+    if !groups.contains(groupId) && !consumerGroups.contains(groupId) && !hasOffsets then
+      return OffsetDeleteResult(Errors.GroupIdNotFound, Map.empty)
+
+    val activeClassic = groups.get(groupId).exists(_.members.nonEmpty)
+    val subscribedTopics = consumerGroups.get(groupId).toVector
+      .flatMap(_.members.valuesIterator.flatMap(_.subscriptions)).toSet
+    val partitionErrors = keys.distinct.map { key =>
+      val error =
+        if activeClassic || subscribedTopics(key.topic) then Errors.GroupSubscribedToTopic
+        else Errors.None
+      key -> error
+    }.toMap
+    val removable = partitionErrors.collect { case (key, Errors.None) => key }.toVector
+    val removed = offsets.remove(removable, durableLocal, publish = false)
+    if removed.nonEmpty && !checkpointState() then OffsetDeleteResult(Errors.CoordinatorNotAvailable, Map.empty)
+    else OffsetDeleteResult(Errors.None, partitionErrors)
+  }
+
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
       expirationExecutor.foreach { executor =>

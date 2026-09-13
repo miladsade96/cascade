@@ -35,6 +35,11 @@ final case class ConsumerHeartbeatResult(
     assignment: Option[Vector[ConsumerTopicPartitions]]
 )
 
+private[cascade] final case class OffsetDeleteResult(
+    errorCode: Short,
+    partitionErrors: Map[GroupOffsetKey, Short]
+)
+
 private[group] final class ConsumerMember(
     val memberId: String,
     var instanceId: Option[String],

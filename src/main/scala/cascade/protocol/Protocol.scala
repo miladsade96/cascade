@@ -84,6 +84,7 @@ object Errors:
   val MemberIdRequired: Short = 79
   val UnstableOffsetCommit: Short = 88
   val FencedInstanceId: Short = 82
+  val GroupSubscribedToTopic: Short = 86
   val NonEmptyGroup: Short = 68
   val GroupIdNotFound: Short = 69
   val FencedLeaderEpoch: Short = 74

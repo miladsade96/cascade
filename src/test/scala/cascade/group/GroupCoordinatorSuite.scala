@@ -396,6 +396,37 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("selected offset deletion protects topics used by active consumers") {
+    val directory = Files.createTempDirectory("cascade-selected-offset-delete-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    val active = GroupOffsetKey("modern-workers", "active-events", 0)
+    val idle = GroupOffsetKey("modern-workers", "idle-events", 0)
+    try
+      val values = Vector(
+        OffsetCommitValue(active, CommittedOffset(10L, -1, None, 1000L)),
+        OffsetCommitValue(idle, CommittedOffset(20L, -1, None, 1000L))
+      )
+      assertEquals(coordinator.commitOffsets("modern-workers", -1, "", values), Errors.None)
+      val joined = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "modern-workers", "member-a", 0, None, None, 30_000,
+          Some(Vector("active-events")), Some("uniform"), Some(Vector.empty)
+        ),
+        _ => 1
+      )
+      assertEquals(joined.errorCode, Errors.None)
+
+      val result = coordinator.deleteOffsets("modern-workers", Vector(active, idle), () => Errors.None)
+      assertEquals(result.errorCode, Errors.None)
+      assertEquals(result.partitionErrors(active), Errors.GroupSubscribedToTopic)
+      assertEquals(result.partitionErrors(idle), Errors.None)
+      assertEquals(coordinator.fetchOffset(active).map(_.offset), Some(10L))
+      assertEquals(coordinator.fetchOffset(idle), None)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   private def command(
       memberId: String,
       metadata: Array[Byte],
