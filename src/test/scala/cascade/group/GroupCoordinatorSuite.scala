@@ -107,6 +107,45 @@ final class GroupCoordinatorSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("consumer regex subscriptions track newly matching topics and reject invalid expressions") {
+    val directory = Files.createTempDirectory("cascade-consumer-regex-test")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    var topics = Vector("events-blue", "audit")
+    try
+      val joined = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "regex-workers", "member-a", 0, None, None, 30_000, None, Some("uniform"), Some(Vector.empty),
+          subscribedTopicRegex = Some("events-.*")
+        ),
+        _ => 2,
+        () => topics
+      )
+      assertEquals(joined.errorCode, Errors.None)
+      assertEquals(joined.assignment.toVector.flatten.size, 1)
+
+      topics :+= "events-green"
+      val refreshed = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand("regex-workers", "member-a", joined.memberEpoch, None, None, -1, None, None, None),
+        _ => 2,
+        () => topics
+      )
+      assertEquals(refreshed.errorCode, Errors.None)
+      assertEquals(refreshed.assignment.toVector.flatten.flatMap(_.partitions).size, 4)
+
+      val invalid = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "bad-regex", "member-b", 0, None, None, 30_000, None, None, Some(Vector.empty),
+          subscribedTopicRegex = Some("[")
+        ),
+        _ => 1,
+        () => topics
+      )
+      assertEquals(invalid.errorCode, Errors.InvalidRegularExpression)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   test("classic member joins, synchronizes, heartbeats, and commits offsets") {
     val directory = Files.createTempDirectory("cascade-group-coordinator-test")
     val coordinator = GroupCoordinator(directory.resolve("offsets.log"))

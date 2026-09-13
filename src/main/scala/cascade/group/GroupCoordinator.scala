@@ -6,6 +6,7 @@ import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.regex.{Pattern, PatternSyntaxException}
 import scala.collection.mutable
 
 final case class GroupProtocol(name: String, metadata: Array[Byte])
@@ -147,6 +148,7 @@ final class GroupCoordinator(
   def consumerHeartbeat(
       command: ConsumerHeartbeatCommand,
       partitionCount: String => Int,
+      topicNames: () => Vector[String] = () => Vector.empty,
       heartbeatIntervalMillis: Int = 5000
   ): ConsumerHeartbeatResult = stateLock.synchronized {
     def failure(code: Short, message: String, epoch: Int = command.memberEpoch): ConsumerHeartbeatResult =
@@ -157,6 +159,11 @@ final class GroupCoordinator(
       return failure(Errors.InconsistentGroupProtocol, "the group already uses the classic protocol")
     if command.serverAssignor.exists(name => name != "uniform" && name != "range") then
       return failure(Errors.UnsupportedAssignor, "supported server assignors are uniform and range")
+    val requestedPattern = command.subscribedTopicRegex.map { expression =>
+      try Pattern.compile(expression)
+      catch case error: PatternSyntaxException =>
+        return failure(Errors.InvalidRegularExpression, error.getDescription)
+    }
 
     val group = consumerGroups.getOrElseUpdate(command.groupId, ManagedConsumerGroup())
     if command.memberEpoch == -1 then
@@ -189,7 +196,7 @@ final class GroupCoordinator(
     val now = System.currentTimeMillis()
     val joining = command.memberEpoch == 0
     if joining then
-      if command.rebalanceTimeoutMillis <= 0 || command.subscribedTopicNames.isEmpty ||
+      if command.rebalanceTimeoutMillis <= 0 || (command.subscribedTopicNames.isEmpty && requestedPattern.isEmpty) ||
           command.ownedPartitions.forall(_.nonEmpty)
       then return failure(Errors.InvalidRequest, "initial heartbeat requires timeout, subscription, and an empty owned assignment")
       if staticMember.exists(_.memberId != command.memberId) then
@@ -201,6 +208,9 @@ final class GroupCoordinator(
         return failure(Errors.InconsistentGroupProtocol, "consumer group members must use one server assignor")
       val memberId = Option(command.memberId).filter(_.nonEmpty).getOrElse(newMemberId("consumer"))
       if group.members.contains(memberId) then return failure(Errors.FencedMemberEpoch, "member must rejoin with its current epoch")
+      val subscriptions = requestedPattern
+        .map(pattern => matchingTopics(pattern, topicNames()))
+        .getOrElse(command.subscribedTopicNames.getOrElse(Vector.empty).distinct.sorted)
       group.members.update(
         memberId,
         ConsumerMember(
@@ -208,11 +218,14 @@ final class GroupCoordinator(
           command.instanceId,
           command.rackId,
           command.rebalanceTimeoutMillis,
-          command.subscribedTopicNames.getOrElse(Vector.empty).distinct.sorted,
+          subscriptions,
           requestedAssignor,
           0,
           now,
-          Vector.empty
+          Vector.empty,
+          command.subscribedTopicRegex,
+          command.clientId,
+          command.clientHost
         )
       )
       rebalanceConsumerGroup(group, partitionCount)
@@ -243,8 +256,21 @@ final class GroupCoordinator(
           member.instanceId = command.instanceId.orElse(member.instanceId)
           member.rackId = command.rackId.orElse(member.rackId)
           if command.rebalanceTimeoutMillis >= 0 then member.rebalanceTimeoutMillis = command.rebalanceTimeoutMillis
-          command.subscribedTopicNames.foreach(names => member.subscriptions = names.distinct.sorted)
+          command.subscribedTopicNames.foreach { names =>
+            member.subscriptions = names.distinct.sorted
+            member.subscribedTopicRegex = None
+          }
+          requestedPattern.foreach { pattern =>
+            member.subscribedTopicRegex = command.subscribedTopicRegex
+            member.subscriptions = matchingTopics(pattern, topicNames())
+          }
+          if command.subscribedTopicNames.isEmpty && requestedPattern.isEmpty then
+            member.subscribedTopicRegex.foreach { expression =>
+              member.subscriptions = matchingTopics(Pattern.compile(expression), topicNames())
+            }
           command.serverAssignor.foreach(member.serverAssignor = _)
+          if command.clientId.nonEmpty then member.clientId = command.clientId
+          if command.clientHost.nonEmpty then member.clientHost = command.clientHost
           member.lastHeartbeatMillis = now
           val changed = previousSubscriptions != member.subscriptions
           if changed then rebalanceConsumerGroup(group, partitionCount)
@@ -827,3 +853,6 @@ final class GroupCoordinator(
       assigned: Vector[ConsumerTopicPartitions]
   ): Boolean = owned.exists(_.sortBy(value => (value.topicId.mostSignificantBits, value.topicId.leastSignificantBits)) ==
     assigned.sortBy(value => (value.topicId.mostSignificantBits, value.topicId.leastSignificantBits)))
+
+  private def matchingTopics(pattern: Pattern, topics: Vector[String]): Vector[String] =
+    topics.iterator.filter(topic => pattern.matcher(topic).matches()).toVector.distinct.sorted
