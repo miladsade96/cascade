@@ -112,7 +112,7 @@ object Compatibility:
     ApiVersion(ApiKey.ListOffsets, 2, 2),
     ApiVersion(ApiKey.Metadata, 4, 12),
     ApiVersion(ApiKey.OffsetCommit, 5, 7),
-    ApiVersion(ApiKey.OffsetFetch, 4, 5),
+    ApiVersion(ApiKey.OffsetFetch, 4, 10),
     ApiVersion(ApiKey.FindCoordinator, 2, 2),
     ApiVersion(ApiKey.JoinGroup, 5, 5),
     ApiVersion(ApiKey.Heartbeat, 3, 3),
@@ -155,6 +155,7 @@ object Compatibility:
       (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
+      (apiKey == ApiKey.OffsetFetch && version >= 6) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
@@ -166,6 +167,7 @@ object Compatibility:
     (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
+      (apiKey == ApiKey.OffsetFetch && version >= 6) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||

@@ -112,7 +112,7 @@ final class RequestHandler(
       case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
       case ApiKey.Metadata     => metadata(header.apiVersion, body, session)
       case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body)
-      case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body)
+      case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body, session)
       case ApiKey.FindCoordinator => findCoordinator(body, session)
       case ApiKey.JoinGroup    => joinGroup(header, body)
       case ApiKey.Heartbeat    => heartbeat(body)
@@ -695,46 +695,136 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def offsetFetch(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
-    val groupId = cursor.readString()
-    val requested = cursor.readNullableArray {
-      val topic = cursor.readString()
-      (topic, cursor.readArray(cursor.readInt()))
-    }
-    cursor.ensureFullyRead()
-    val (groupError, fetched) = groupCoordinator.readOffsets(groupId,
-      requested.map(_.flatMap { case (topic, partitions) => partitions.map(GroupOffsetKey(groupId, topic, _)) }),
-      () => if isGroupCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator)
-    val byKey = fetched.toMap
-    val offsets = requested match
-      case Some(topics) => topics.map { case (topic, partitions) =>
-          val values = partitions.map { partition =>
-            val key = GroupOffsetKey(groupId, topic, partition)
-            (partition, byKey.get(key))
-          }
-          (topic, values)
-        }
-      case None if groupError == Errors.None =>
-        fetched
-          .groupBy(_._1.topic)
-          .toVector
-          .sortBy(_._1)
-          .map { case (topic, values) =>
-            (topic, values.sortBy(_._1.partition).map { case (key, value) => (key.partition, Some(value)) })
-          }
-      case None => Vector.empty
-    val writer = ByteWriter().writeInt(0)
-    writer.writeArray(offsets) { case (topic, partitions) =>
-      writer.writeString(topic)
-      writer.writeArray(partitions) { case (partition, committed) =>
-        writer.writeInt(partition)
-        writer.writeLong(committed.map(_.offset).getOrElse(-1L))
-        if version >= 5 then writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
-        writer.writeNullableString(committed.flatMap(_.metadata))
-        writer.writeShort(groupError): Unit
+  private def offsetFetch(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    final case class RequestedTopic(name: Option[String], topicId: Option[ConsumerTopicId], partitions: Vector[Int])
+    final case class RequestedGroup(
+        groupId: String,
+        memberId: Option[String],
+        memberEpoch: Int,
+        topics: Option[Vector[RequestedTopic]]
+    )
+    final case class FetchedTopic(
+        requested: RequestedTopic,
+        partitions: Vector[(Int, Option[CommittedOffset], Short)]
+    )
+
+    def readCompactTopics(useTopicIds: Boolean): Option[Vector[RequestedTopic]] =
+      cursor.readCompactNullableArray {
+        val (name, topicId) =
+          if useTopicIds then
+            val (high, low) = cursor.readUuid()
+            None -> Some(ConsumerTopicId(high, low))
+          else Some(cursor.readCompactString()) -> None
+        val partitions = cursor.readCompactArray(cursor.readInt())
+        cursor.skipTaggedFields()
+        RequestedTopic(name, topicId, partitions)
       }
+
+    val requests =
+      if version >= 8 then
+        cursor.readCompactArray {
+          val groupId = cursor.readCompactString()
+          val memberId = if version >= 9 then cursor.readCompactNullableString() else None
+          val memberEpoch = if version >= 9 then cursor.readInt() else -1
+          val topics = readCompactTopics(version >= 10)
+          cursor.skipTaggedFields()
+          RequestedGroup(groupId, memberId, memberEpoch, topics)
+        }
+      else
+        val groupId = if version >= 6 then cursor.readCompactString() else cursor.readString()
+        val topics =
+          if version >= 6 then readCompactTopics(useTopicIds = false)
+          else cursor.readNullableArray {
+            RequestedTopic(Some(cursor.readString()), None, cursor.readArray(cursor.readInt()))
+          }
+        Vector(RequestedGroup(groupId, None, -1, topics))
+    if version >= 7 then cursor.readBoolean(): Unit
+    if version >= 6 then cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val responses = requests.map { request =>
+      val membershipError =
+        if version >= 9 then groupCoordinator.validateConsumerOffsetRequest(request.groupId, request.memberId, request.memberEpoch)
+        else Errors.None
+      val admission =
+        if membershipError != Errors.None then membershipError
+        else if !isGroupCoordinatorFor(request.groupId) then Errors.NotCoordinator
+        else if !isAuthorized(session, AclOperation.Read, ResourceType.Group, request.groupId) then Errors.GroupAuthorizationFailed
+        else Errors.None
+      val requestedKeys = request.topics.map(_.flatMap { topic =>
+        topic.name.orElse(topic.topicId.flatMap(topicNameForId)).toVector.flatMap { name =>
+          topic.partitions.map(GroupOffsetKey(request.groupId, name, _))
+        }
+      })
+      val (groupError, fetched) = groupCoordinator.readOffsets(request.groupId, requestedKeys, () => admission)
+      val byKey = fetched.toMap
+      val topics = request.topics match
+        case Some(values) => values.map { topic =>
+          val name = topic.name.orElse(topic.topicId.flatMap(topicNameForId))
+          val unknownId = version >= 10 && name.isEmpty
+          val partitions = topic.partitions.map { partition =>
+            val committed = name.flatMap(value => byKey.get(GroupOffsetKey(request.groupId, value, partition)))
+            val error = if unknownId then Errors.UnknownTopicId else groupError
+            (partition, committed, error)
+          }
+          FetchedTopic(topic, partitions)
+        }
+        case None if groupError == Errors.None =>
+          fetched.groupBy(_._1.topic).toVector.sortBy(_._1).map { case (topic, values) =>
+            val requested = RequestedTopic(Some(topic), Some(ConsumerTopicId.forName(topic)), values.map(_._1.partition).sorted)
+            FetchedTopic(requested, values.sortBy(_._1.partition).map { case (key, value) => (key.partition, Some(value), Errors.None) })
+          }
+        case None => Vector.empty
+      (request, groupError, topics)
     }
-    writer.writeShort(groupError)
+
+    val writer = ByteWriter().writeInt(0)
+    def writePartition(partition: Int, committed: Option[CommittedOffset], error: Short, flexible: Boolean): Unit =
+      writer.writeInt(partition)
+      writer.writeLong(committed.map(_.offset).getOrElse(-1L))
+      if version >= 5 then writer.writeInt(committed.map(_.leaderEpoch).getOrElse(-1))
+      if flexible then writer.writeCompactNullableString(committed.flatMap(_.metadata))
+      else writer.writeNullableString(committed.flatMap(_.metadata))
+      writer.writeShort(error)
+      if flexible then writer.writeEmptyTaggedFields(): Unit
+
+    if version >= 8 then
+      writer.writeCompactArray(responses) { case (request, groupError, topics) =>
+        writer.writeCompactString(request.groupId)
+        writer.writeCompactArray(topics) { topic =>
+          if version >= 10 then
+            val id = topic.requested.topicId.orElse(topic.requested.name.map(ConsumerTopicId.forName)).getOrElse(ConsumerTopicId(0L, 0L))
+            writer.writeUuid(id.mostSignificantBits, id.leastSignificantBits)
+          else writer.writeCompactString(topic.requested.name.getOrElse(""))
+          writer.writeCompactArray(topic.partitions) { case (partition, committed, error) =>
+            writePartition(partition, committed, error, flexible = true)
+          }
+          writer.writeEmptyTaggedFields(): Unit
+        }
+        writer.writeShort(groupError)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields()
+    else
+      val (_, groupError, topics) = responses.head
+      if version >= 6 then
+        writer.writeCompactArray(topics) { topic =>
+          writer.writeCompactString(topic.requested.name.getOrElse(""))
+          writer.writeCompactArray(topic.partitions) { case (partition, committed, error) =>
+            writePartition(partition, committed, error, flexible = true)
+          }
+          writer.writeEmptyTaggedFields(): Unit
+        }
+        writer.writeShort(groupError)
+        writer.writeEmptyTaggedFields()
+      else
+        writer.writeArray(topics) { topic =>
+          writer.writeString(topic.requested.name.getOrElse(""))
+          writer.writeArray(topic.partitions) { case (partition, committed, error) =>
+            writePartition(partition, committed, error, flexible = false)
+          }
+        }
+        writer.writeShort(groupError)
     Some(writer.result())
 
   private def metadata(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
@@ -1700,7 +1790,7 @@ final class RequestHandler(
     if authorizer.isEmpty then return
     val (_, cursor) = RequestHeader.decode(frame)
     apiKey match
-      case ApiKey.OffsetCommit | ApiKey.OffsetFetch | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
+      case ApiKey.OffsetCommit | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
           ApiKey.SyncGroup =>
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
       case ApiKey.ConsumerGroupHeartbeat =>

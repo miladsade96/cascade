@@ -258,6 +258,41 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("serves flexible OffsetFetch v7 with stable reads") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("flex-offset-events", 81))
+        request(output, input, offsetCommitV5Request("flex-offset-group", "flex-offset-events", 27L, 82))
+        val fetch = requestHeader(ApiKey.OffsetFetch, 7, 83, flexible = true)
+          .writeCompactString("flex-offset-group")
+        fetch.writeCompactNullableArray(Some(Vector("flex-offset-events"))) { topic =>
+          fetch.writeCompactString(topic).writeCompactArray(Vector(0))(fetch.writeInt).writeEmptyTaggedFields(): Unit
+        }
+        fetch.writeBoolean(true).writeEmptyTaggedFields()
+        val response = request(output, input, fetch.result())
+        assertEquals(response.readInt(), 83)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readCompactString(), "flex-offset-events")
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readLong(), 27L)
+        assertEquals(response.readInt(), -1)
+        assertEquals(response.readCompactNullableString(), None)
+        assertEquals(response.readShort(), Errors.None)
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        assertEquals(response.readShort(), Errors.None)
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("accepts the OffsetCommit v5 request shape used by KafkaJS") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
