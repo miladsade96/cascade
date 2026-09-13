@@ -345,6 +345,51 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("fetches offsets for multiple groups with OffsetFetch v8") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("multi-offset-events", 84))
+        request(output, input, offsetCommitV5Request("multi-a", "multi-offset-events", 31L, 85))
+        request(output, input, offsetCommitV5Request("multi-b", "multi-offset-events", 32L, 86))
+        val fetch = requestHeader(ApiKey.OffsetFetch, 8, 87, flexible = true)
+        fetch.writeCompactArray(Vector("multi-a", "multi-b")) { groupId =>
+          fetch.writeCompactString(groupId)
+          fetch.writeCompactNullableArray(Some(Vector("multi-offset-events"))) { topic =>
+            fetch.writeCompactString(topic).writeCompactArray(Vector(0))(fetch.writeInt).writeEmptyTaggedFields(): Unit
+          }
+          fetch.writeEmptyTaggedFields(): Unit
+        }
+        fetch.writeBoolean(false).writeEmptyTaggedFields()
+        val response = request(output, input, fetch.result())
+        assertEquals(response.readInt(), 87)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        val groups = response.readCompactArray {
+          val groupId = response.readCompactString()
+          assertEquals(response.readUnsignedVarInt(), 2)
+          assertEquals(response.readCompactString(), "multi-offset-events")
+          assertEquals(response.readUnsignedVarInt(), 2)
+          assertEquals(response.readInt(), 0)
+          val offset = response.readLong()
+          assertEquals(response.readInt(), -1)
+          assertEquals(response.readCompactNullableString(), None)
+          assertEquals(response.readShort(), Errors.None)
+          response.skipTaggedFields()
+          response.skipTaggedFields()
+          assertEquals(response.readShort(), Errors.None)
+          response.skipTaggedFields()
+          groupId -> offset
+        }
+        assertEquals(groups, Vector("multi-a" -> 31L, "multi-b" -> 32L))
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("describes acknowledged groups with Kafka DescribeGroups v4") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
