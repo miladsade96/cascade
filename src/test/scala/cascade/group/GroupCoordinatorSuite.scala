@@ -36,12 +36,15 @@ final class GroupCoordinatorSuite extends FunSuite:
       val second = heartbeat("member-b", 0, Some(Vector("events")))
       assertEquals(second.errorCode, Errors.None)
       assertEquals(second.memberEpoch, 2)
-      assertEquals(second.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(1, 3)))
+      assertEquals(second.assignment, Some(Vector.empty))
 
       val advanced = heartbeat("member-a", first.memberEpoch, None)
       assertEquals(advanced.errorCode, Errors.None)
       assertEquals(advanced.memberEpoch, 2)
       assertEquals(advanced.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(0, 2)))
+
+      val assignedSecond = heartbeat("member-b", second.memberEpoch, None)
+      assertEquals(assignedSecond.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(1, 3)))
 
       val left = heartbeat("member-b", -1, None)
       assertEquals(left.errorCode, Errors.None)
@@ -96,12 +99,17 @@ final class GroupCoordinatorSuite extends FunSuite:
       val first = join("member-a")
       assertEquals(first.errorCode, Errors.None)
       val second = join("member-b")
-      assertEquals(second.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(3, 4)))
+      assertEquals(second.assignment, Some(Vector.empty))
       val advanced = coordinator.consumerHeartbeat(
         ConsumerHeartbeatCommand("range-workers", "member-a", first.memberEpoch, None, None, -1, None, None, None),
         _ => 5
       )
       assertEquals(advanced.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(0, 1, 2)))
+      val assignedSecond = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand("range-workers", "member-b", second.memberEpoch, None, None, -1, None, None, None),
+        _ => 5
+      )
+      assertEquals(assignedSecond.assignment.flatMap(_.headOption).map(_.partitions), Some(Vector(3, 4)))
     finally
       coordinator.close()
       deleteTree(directory)

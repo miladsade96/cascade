@@ -159,11 +159,10 @@ final class GroupCoordinator(
       return failure(Errors.InconsistentGroupProtocol, "the group already uses the classic protocol")
     if command.serverAssignor.exists(name => name != "uniform" && name != "range") then
       return failure(Errors.UnsupportedAssignor, "supported server assignors are uniform and range")
-    val requestedPattern = command.subscribedTopicRegex.map { expression =>
-      try Pattern.compile(expression)
+    val requestedPattern =
+      try command.subscribedTopicRegex.map(Pattern.compile)
       catch case error: PatternSyntaxException =>
         return failure(Errors.InvalidRegularExpression, error.getDescription)
-    }
 
     val group = consumerGroups.getOrElseUpdate(command.groupId, ManagedConsumerGroup())
     if command.memberEpoch == -1 then
@@ -229,9 +228,10 @@ final class GroupCoordinator(
         )
       )
       rebalanceConsumerGroup(group, partitionCount)
-      if !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
       val member = group.members(memberId)
-      ConsumerHeartbeatResult(Errors.None, None, Some(memberId), member.memberEpoch, heartbeatIntervalMillis, Some(member.assignment))
+      val assignment = reconcileConsumerAssignment(group, member, command.ownedPartitions.getOrElse(Vector.empty))
+      if !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
+      ConsumerHeartbeatResult(Errors.None, None, Some(memberId), member.memberEpoch, heartbeatIntervalMillis, Some(assignment))
     else
       group.members.get(command.memberId) match
         case None => failure(Errors.UnknownMemberId, "consumer member does not exist")
@@ -239,13 +239,17 @@ final class GroupCoordinator(
           failure(Errors.FencedMemberEpoch, "consumer member epoch is ahead of the coordinator", member.memberEpoch)
         case Some(member) if command.memberEpoch < member.memberEpoch =>
           member.lastHeartbeatMillis = now
+          val previousAssignment = member.assignment
+          val assignment = reconcileConsumerAssignment(group, member, command.ownedPartitions.getOrElse(member.assignment))
+          if assignment != previousAssignment && !checkpointState() then
+            return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed", member.memberEpoch)
           ConsumerHeartbeatResult(
             Errors.None,
             None,
             Some(member.memberId),
             member.memberEpoch,
             heartbeatIntervalMillis,
-            Some(member.assignment)
+            Some(assignment)
           )
         case Some(member) if command.instanceId.exists(id => !member.instanceId.contains(id)) =>
           failure(Errors.UnreleasedInstanceId, "consumer instance does not own this member", member.memberEpoch)
@@ -274,14 +278,18 @@ final class GroupCoordinator(
           member.lastHeartbeatMillis = now
           val changed = previousSubscriptions != member.subscriptions
           if changed then rebalanceConsumerGroup(group, partitionCount)
-          if changed && !checkpointState() then return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
+          val previousAssignment = member.assignment
+          val assignment = reconcileConsumerAssignment(group, member, command.ownedPartitions.getOrElse(member.assignment))
+          val assignmentChanged = assignment != previousAssignment
+          if (changed || assignmentChanged) && !checkpointState() then
+            return failure(Errors.CoordinatorNotAvailable, "coordinator checkpoint failed")
           ConsumerHeartbeatResult(
             Errors.None,
             None,
             Some(member.memberId),
             member.memberEpoch,
             heartbeatIntervalMillis,
-            Option.when(changed || !ownedMatches(command.ownedPartitions, member.assignment))(member.assignment)
+            Option.when(changed || !ownedMatches(command.ownedPartitions, assignment))(assignment)
           )
   }
 
@@ -816,6 +824,7 @@ final class GroupCoordinator(
 
   private def rebalanceConsumerGroup(group: ManagedConsumerGroup, partitionCount: String => Int): Unit =
     group.groupEpoch = Math.addExact(group.groupEpoch, 1)
+    group.assignmentEpoch = group.groupEpoch
     val assignments = mutable.HashMap.from(group.members.keysIterator.map(_ -> mutable.ArrayBuffer.empty[ConsumerTopicPartitions]))
     val topicNames = group.members.valuesIterator.flatMap(_.subscriptions).toSet.toVector.sorted
     topicNames.foreach { topic =>
@@ -845,8 +854,29 @@ final class GroupCoordinator(
     }
     group.members.valuesIterator.foreach { member =>
       member.memberEpoch = group.groupEpoch
-      member.assignment = assignments(member.memberId).toVector
+      member.targetAssignment = assignments(member.memberId).toVector
     }
+
+  private def reconcileConsumerAssignment(
+      group: ManagedConsumerGroup,
+      member: ConsumerMember,
+      reportedOwned: Vector[ConsumerTopicPartitions]
+  ): Vector[ConsumerTopicPartitions] =
+    val previouslyGranted = assignmentKeys(member.assignment)
+    val owned = assignmentKeys(reportedOwned).intersect(previouslyGranted)
+    val occupied = group.members.valuesIterator
+      .filterNot(_ eq member)
+      .flatMap(other => assignmentKeys(other.assignment))
+      .toSet
+    val target = assignmentKeys(member.targetAssignment)
+    val granted = target.filterNot(occupied).toSet ++ owned.intersect(target)
+    val byTopic = granted.groupBy(_._1).toVector.sortBy(value => (value._1.mostSignificantBits, value._1.leastSignificantBits))
+      .map { case (topicId, values) => ConsumerTopicPartitions(topicId, values.map(_._2).toVector.sorted) }
+    member.assignment = byTopic
+    byTopic
+
+  private def assignmentKeys(values: Vector[ConsumerTopicPartitions]): Set[(ConsumerTopicId, Int)] =
+    values.iterator.flatMap(topic => topic.partitions.iterator.map(topic.topicId -> _)).toSet
 
   private def ownedMatches(
       owned: Option[Vector[ConsumerTopicPartitions]],
