@@ -163,6 +163,29 @@ final class OffsetStore(path: Path) extends AutoCloseable:
     removed
   }
 
+  /** Removes selected offsets while preserving every other group entry. */
+  def remove(
+      keys: Vector[GroupOffsetKey],
+      durable: Boolean = true,
+      publish: Boolean = true
+  ): Vector[GroupOffsetKey] = synchronized {
+    ensureOpen()
+    val removed = keys.distinct.filter(offsets.contains).sortBy(key => (key.groupId, key.topic, key.partition))
+    removed.foreach { key =>
+      offsets.remove(key): Unit
+      keysByGroup.get(key.groupId).foreach { groupKeys =>
+        groupKeys.remove(key): Unit
+        if groupKeys.isEmpty then keysByGroup.remove(key.groupId): Unit
+      }
+      pendingUpserts -= key
+      pendingRemovals += key
+    }
+    if removed.nonEmpty then cachedEntries = None
+    if durable && removed.nonEmpty then compact()
+    if publish then publishAcknowledged()
+    removed
+  }
+
   override def close(): Unit = synchronized {
     if !closed then
       closed = true
