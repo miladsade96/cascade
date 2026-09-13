@@ -78,9 +78,10 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       broker.start()
       val groupId = "admin-managed-group"
       val topicPartition = TopicPartition("admin-managed-events", 0)
+      val retainedPartition = TopicPartition("admin-managed-events", 1)
       val admin = Admin.create(adminProperties(broker.bootstrapServers))
       try
-        admin.createTopics(java.util.List.of(NewTopic(topicPartition.topic(), 1, 1.toShort))).all().get()
+        admin.createTopics(java.util.List.of(NewTopic(topicPartition.topic(), 2, 1.toShort))).all().get()
 
         val listings = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
         assert(!listings.exists(_.groupId() == groupId))
@@ -90,8 +91,16 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         )
         try
           groupedConsumer.assign(java.util.List.of(topicPartition))
-          groupedConsumer.commitSync(Map(topicPartition -> OffsetAndMetadata(1L)).asJava)
+          groupedConsumer.commitSync(Map(
+            topicPartition -> OffsetAndMetadata(1L),
+            retainedPartition -> OffsetAndMetadata(2L)
+          ).asJava)
         finally groupedConsumer.close()
+
+        admin.deleteConsumerGroupOffsets(groupId, java.util.Set.of(topicPartition)).all().get(10, TimeUnit.SECONDS)
+        val offsets = admin.listConsumerGroupOffsets(groupId).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS)
+        assertEquals(offsets.get(topicPartition), null)
+        assertEquals(offsets.get(retainedPartition).offset(), 2L)
 
         val managedListings = admin.listConsumerGroups().all().get(10, TimeUnit.SECONDS).asScala
         assert(managedListings.exists(_.groupId() == groupId))
