@@ -133,6 +133,7 @@ object Compatibility:
     ApiVersion(ApiKey.DeleteAcls, 1, 1),
     ApiVersion(ApiKey.DescribeConfigs, 2, 2),
     ApiVersion(ApiKey.DeleteGroups, 0, 2),
+    ApiVersion(ApiKey.OffsetDelete, 0, 0),
     ApiVersion(ApiKey.IncrementalAlterConfigs, 0, 0),
     ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),

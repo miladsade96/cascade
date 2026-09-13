@@ -121,6 +121,7 @@ final class RequestHandler(
       case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
       case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
       case ApiKey.DeleteGroups => deleteGroups(header.apiVersion, body, session)
+      case ApiKey.OffsetDelete => offsetDelete(body)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(header, body, session)
       case ApiKey.ConsumerGroupDescribe => consumerGroupDescribe(header.apiVersion, body, session)
       case ApiKey.CreateTopics => createTopics(body, session)
@@ -503,6 +504,35 @@ final class RequestHandler(
       writer.writeArray(results) { case (groupId, error) =>
         writer.writeString(groupId).writeShort(error): Unit
       }
+    Some(writer.result())
+
+  private def offsetDelete(cursor: ByteCursor): Option[Array[Byte]] =
+    val groupId = cursor.readString()
+    val requested = cursor.readArray {
+      val topic = cursor.readString()
+      topic -> cursor.readArray(cursor.readInt())
+    }
+    cursor.ensureFullyRead()
+    val keys = requested.flatMap { case (topic, partitions) =>
+      partitions.map(GroupOffsetKey(groupId, topic, _))
+    }
+    val validKeys = keys.filter(key => partitionExists(key.topic, key.partition))
+    val result = groupCoordinator.deleteOffsets(
+      groupId,
+      validKeys,
+      () => if isGroupCoordinatorFor(groupId) then Errors.None else Errors.NotCoordinator
+    )
+    val writer = ByteWriter().writeShort(result.errorCode).writeInt(0)
+    writer.writeArray(requested) { case (topic, partitions) =>
+      writer.writeString(topic)
+      writer.writeArray(partitions) { partition =>
+        val key = GroupOffsetKey(groupId, topic, partition)
+        val error =
+          if !partitionExists(topic, partition) then Errors.UnknownTopicOrPartition
+          else result.partitionErrors.getOrElse(key, result.errorCode)
+        writer.writeInt(partition).writeShort(error): Unit
+      }
+    }
     Some(writer.result())
 
   private def consumerGroupHeartbeat(
@@ -1675,6 +1705,8 @@ final class RequestHandler(
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
       case ApiKey.ConsumerGroupHeartbeat =>
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readCompactString())
+      case ApiKey.OffsetDelete =>
+        requireAuthorized(session, AclOperation.Delete, ResourceType.Group, cursor.readString())
       case ApiKey.InitProducerId =>
         cursor.readNullableString() match
           case Some(transactionalId) =>

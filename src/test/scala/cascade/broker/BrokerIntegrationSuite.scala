@@ -403,6 +403,47 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("deletes selected committed offsets with OffsetDelete v0") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("offset-delete-events", correlationId = 77))
+        request(output, input, offsetCommitV5Request("offset-delete-group", "offset-delete-events", 19L, correlationId = 78))
+
+        val delete = requestHeader(ApiKey.OffsetDelete, 0, 79)
+          .writeString("offset-delete-group")
+        delete.writeArray(Vector("offset-delete-events")) { topic =>
+          delete.writeString(topic).writeArray(Vector(0))(delete.writeInt): Unit
+        }
+        val response = request(output, input, delete.result())
+        assertEquals(response.readInt(), 79)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readArray {
+          val topic = response.readString()
+          val partitions = response.readArray((response.readInt(), response.readShort()))
+          topic -> partitions
+        }, Vector("offset-delete-events" -> Vector(0 -> Errors.None)))
+        response.ensureFullyRead()
+
+        val fetched = request(output, input, offsetFetchV4Request("offset-delete-group", "offset-delete-events", correlationId = 80))
+        assertEquals(fetched.readInt(), 80)
+        assertEquals(fetched.readInt(), 0)
+        assertEquals(fetched.readInt(), 1)
+        assertEquals(fetched.readString(), "offset-delete-events")
+        assertEquals(fetched.readInt(), 1)
+        assertEquals(fetched.readInt(), 0)
+        assertEquals(fetched.readLong(), -1L)
+        assertEquals(fetched.readNullableString(), None)
+        assertEquals(fetched.readShort(), Errors.None)
+        assertEquals(fetched.readShort(), Errors.None)
+        fetched.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("idempotent producer retries return the original offset and reject sequence gaps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
