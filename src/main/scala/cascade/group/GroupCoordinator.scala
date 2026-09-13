@@ -498,9 +498,11 @@ final class GroupCoordinator(
       else if command.groupId.isEmpty then Errors.InvalidGroupId
       else if command.values.exists(_.key.groupId != command.groupId) then Errors.InvalidRequest
       else if command.generationId < 0 then Errors.None
-      else groups.get(command.groupId)
-        .map(validateMember(_, command.generationId, command.memberId, command.groupInstanceId))
-        .getOrElse(Errors.UnknownMemberId)
+      else consumerGroups.get(command.groupId) match
+        case Some(_) => validateConsumerOffsetRequest(command.groupId, Option(command.memberId).filter(_.nonEmpty), command.generationId)
+        case None => groups.get(command.groupId)
+          .map(validateMember(_, command.generationId, command.memberId, command.groupInstanceId))
+          .getOrElse(Errors.UnknownMemberId)
     }
     // FIFO concatenation deliberately preserves last-write-wins, including decreasing offsets.
     val values = commands.zip(results).collect { case (command, Errors.None) => command.values }.flatten

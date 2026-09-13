@@ -178,6 +178,18 @@ final class GroupCoordinatorSuite extends FunSuite:
       assertEquals(description.members.head.clientHost, "127.0.0.1")
       assertEquals(description.members.head.assignment.flatMap(_.partitions), Vector(0, 1))
       assertEquals(description.members.head.targetAssignment, description.members.head.assignment)
+      val offset = OffsetCommitValue(
+        GroupOffsetKey("described-workers", "events", 0),
+        CommittedOffset(9L, -1, None, 2000L)
+      )
+      assertEquals(
+        coordinator.commitOffsets("described-workers", result.memberEpoch, "member-a", Vector(offset)),
+        Errors.None
+      )
+      assertEquals(
+        coordinator.commitOffsets("described-workers", result.memberEpoch - 1, "member-a", Vector(offset)),
+        Errors.StaleMemberEpoch
+      )
     finally
       coordinator.close()
       deleteTree(directory)
