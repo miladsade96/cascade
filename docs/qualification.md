@@ -2,6 +2,16 @@
 
 I use these runners to produce auditable evidence rather than treating a short unit test as a production qualification.
 
+## Consumer protocol
+
+For the Kafka 4.3.1 consumer-protocol milestone I run the wire, coordinator, real-client, and acknowledged-read gates together:
+
+```powershell
+.\sbt.bat "testOnly cascade.protocol.CompatibilityContractSuite cascade.group.GroupStateSuite cascade.group.OffsetStoreSuite cascade.group.GroupCoordinatorSuite cascade.broker.BrokerIntegrationSuite cascade.e2e.KafkaClientEndToEndSuite cascade.cluster.CoordinatorReadIsolationQuorumSuite"
+```
+
+The final release gate is still `.\sbt.bat test`. The 2026-09-13 run passed 552/552 tests in 182 seconds. That result is correctness and local regression evidence, not a multi-day churn or dedicated-host capacity result.
+
 ## Coordinator read isolation
 
 I run the deterministic blocked-publication and real three-broker pause tests before a coordinator release:
