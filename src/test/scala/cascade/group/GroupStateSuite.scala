@@ -57,9 +57,14 @@ final class GroupStateSuite extends FunSuite:
               "uniform",
               7,
               8_000L,
+              Vector(ConsumerTopicPartitions(ConsumerTopicId(10L, 20L), Vector(0))),
+              Some("events-.*"),
+              "consumer-client",
+              "10.0.0.8",
               Vector(ConsumerTopicPartitions(ConsumerTopicId(10L, 20L), Vector(0, 2)))
             )
-          )
+          ),
+          7
         )
       )
     )
@@ -75,4 +80,30 @@ final class GroupStateSuite extends FunSuite:
     interceptMessage[cascade.protocol.ProtocolException]("unsupported group-state format: 4") {
       GroupCodec.decode(bytes)
     }
+  }
+
+  test("format two consumer groups upgrade with safe assignment defaults") {
+    val writer = cascade.protocol.ByteWriter().writeShort(2).writeLong(9L)
+    writer.writeArray(Vector.empty[Unit])(_ => ())
+    writer.writeArray(Vector.empty[Unit])(_ => ())
+    writer.writeArray(Vector("legacy-modern")) { groupId =>
+      writer.writeString(groupId).writeInt(4)
+      writer.writeArray(Vector("member-a")) { memberId =>
+        writer.writeString(memberId)
+        writer.writeNullableString(None).writeNullableString(None)
+        writer.writeInt(30_000)
+        writer.writeArray(Vector("events"))(writer.writeString)
+        writer.writeString("uniform").writeInt(4).writeLong(1000L)
+        writer.writeArray(Vector(ConsumerTopicPartitions(ConsumerTopicId(1L, 2L), Vector(0)))) { topic =>
+          writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
+          writer.writeArray(topic.partitions)(writer.writeInt): Unit
+        }: Unit
+      }: Unit
+    }
+
+    val decoded = GroupCodec.decode(writer.result())
+    val group = decoded.consumerGroups.head
+    assertEquals(group.assignmentEpoch, group.groupEpoch)
+    assertEquals(group.members.head.targetAssignment, group.members.head.assignment)
+    assertEquals(group.members.head.subscribedTopicRegex, None)
   }
