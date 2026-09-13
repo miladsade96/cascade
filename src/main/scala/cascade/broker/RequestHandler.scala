@@ -122,6 +122,7 @@ final class RequestHandler(
       case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
       case ApiKey.DeleteGroups => deleteGroups(body, session)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(header, body, session)
+      case ApiKey.ConsumerGroupDescribe => consumerGroupDescribe(header.apiVersion, body, session)
       case ApiKey.CreateTopics => createTopics(body, session)
       case ApiKey.DescribeAcls => describeAcls(body, session)
       case ApiKey.CreateAcls => createAcls(body, session)
@@ -555,6 +556,62 @@ final class RequestHandler(
           writer.writeEmptyTaggedFields(): Unit
         }
         writer.writeEmptyTaggedFields()
+    writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def consumerGroupDescribe(
+      version: Short,
+      cursor: ByteCursor,
+      session: ConnectionSession
+  ): Option[Array[Byte]] =
+    val groupIds = cursor.readCompactArray(cursor.readCompactString())
+    val includeAuthorizedOperations = cursor.readBoolean()
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val writer = ByteWriter().writeInt(0)
+    def writeAssignment(values: Vector[ConsumerTopicPartitions]): Unit =
+      writer.writeCompactArray(values) { topic =>
+        writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
+        writer.writeCompactArray(topic.partitions)(writer.writeInt)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields(): Unit
+
+    writer.writeCompactArray(groupIds) { groupId =>
+      val (error, description) =
+        if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator -> None
+        else if !isAuthorized(session, AclOperation.Describe, ResourceType.Group, groupId) then
+          Errors.GroupAuthorizationFailed -> None
+        else groupCoordinator.describeConsumerGroup(groupId)
+          .fold(Errors.GroupIdNotFound -> None)(Errors.None -> Some(_))
+      writer.writeShort(error)
+      writer.writeCompactNullableString(None)
+      writer.writeCompactString(groupId)
+      writer.writeCompactString(description.map(_.state).getOrElse(""))
+      writer.writeInt(description.map(_.groupEpoch).getOrElse(0))
+      writer.writeInt(description.map(_.assignmentEpoch).getOrElse(0))
+      writer.writeCompactString(description.map(_.assignorName).getOrElse(""))
+      writer.writeCompactArray(description.toVector.flatMap(_.members)) { member =>
+        writer.writeCompactString(member.memberId)
+        writer.writeCompactNullableString(member.instanceId)
+        writer.writeCompactNullableString(member.rackId)
+        writer.writeInt(member.memberEpoch)
+        writer.writeCompactString(member.clientId)
+        writer.writeCompactString(member.clientHost)
+        writer.writeCompactArray(member.subscribedTopicNames)(writer.writeCompactString)
+        writer.writeCompactNullableString(member.subscribedTopicRegex)
+        writeAssignment(member.assignment)
+        writeAssignment(member.targetAssignment)
+        if version >= 1 then writer.writeByte(1)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      val operations =
+        if includeAuthorizedOperations && error == Errors.None then groupAuthorizedOperations(session, groupId)
+        else Int.MinValue
+      writer.writeInt(operations)
+      writer.writeEmptyTaggedFields(): Unit
+    }
     writer.writeEmptyTaggedFields()
     Some(writer.result())
 
