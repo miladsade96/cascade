@@ -46,3 +46,18 @@ final class CompatibilityContractSuite extends FunSuite:
       assert(available.maxVersion >= required.maxVersion, s"API ${required.apiKey} maximum version decreased")
     }
   }
+
+  test("the 1.5.0 consumer protocol contract advertises every implemented version") {
+    val current = Compatibility.supported.map(version => version.apiKey -> version).toMap
+    assertEquals(current(ApiKey.ConsumerGroupHeartbeat), ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 1))
+    assertEquals(current(ApiKey.ConsumerGroupDescribe), ApiVersion(ApiKey.ConsumerGroupDescribe, 0, 1))
+    assertEquals(current(ApiKey.OffsetCommit), ApiVersion(ApiKey.OffsetCommit, 5, 10))
+    assertEquals(current(ApiKey.OffsetFetch), ApiVersion(ApiKey.OffsetFetch, 4, 10))
+    assertEquals(current(ApiKey.OffsetDelete), ApiVersion(ApiKey.OffsetDelete, 0, 0))
+    assertEquals(current(ApiKey.ListGroups), ApiVersion(ApiKey.ListGroups, 0, 5))
+    assertEquals(current(ApiKey.DeleteGroups), ApiVersion(ApiKey.DeleteGroups, 0, 2))
+    assert(Compatibility.isFlexibleRequest(ApiKey.ConsumerGroupDescribe, 0))
+    assert(Compatibility.isFlexibleRequest(ApiKey.OffsetCommit, 8))
+    assert(Compatibility.isFlexibleRequest(ApiKey.OffsetFetch, 6))
+    assert(!Compatibility.isFlexibleRequest(ApiKey.OffsetDelete, 0))
+  }
