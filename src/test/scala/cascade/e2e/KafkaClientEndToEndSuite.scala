@@ -12,6 +12,7 @@ import java.time.Duration
 import java.util.Collection
 import java.util.Optional
 import java.util.Properties
+import java.util.regex.Pattern
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, ExecutionException, Executors, TimeUnit}
 import munit.FunSuite
@@ -229,6 +230,38 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           assertEquals(description.members().size(), 1)
           assertEquals(description.members().iterator().next().consumerId(), consumer.groupMetadata().memberId())
         finally inspector.close(Duration.ofSeconds(5))
+      finally consumer.close()
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
+  test("Apache Kafka 4.3 consumer protocol resolves regex subscriptions") {
+    val directory = Files.createTempDirectory("cascade-modern-regex-consumer-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(
+          NewTopic("regex-consumer-blue", 1, 1.toShort),
+          NewTopic("unmatched-audit", 1, 1.toShort)
+        )).all().get()
+      finally admin.close(Duration.ofSeconds(5))
+
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(broker.bootstrapServers))
+      try
+        producer.send(ProducerRecord("regex-consumer-blue", "matched".getBytes(StandardCharsets.UTF_8))).get()
+        producer.send(ProducerRecord("unmatched-audit", "excluded".getBytes(StandardCharsets.UTF_8))).get()
+      finally producer.close(Duration.ofSeconds(5))
+
+      val settings = consumerProperties(broker.bootstrapServers)
+      settings.put(ConsumerConfig.GROUP_ID_CONFIG, "modern-regex-group")
+      settings.put(ConsumerConfig.GROUP_PROTOCOL_CONFIG, "consumer")
+      val consumer = KafkaConsumer[Array[Byte], Array[Byte]](settings)
+      try
+        consumer.subscribe(Pattern.compile("regex-consumer-.*"))
+        assertEquals(pollValues(consumer, 1), Vector("matched"))
       finally consumer.close()
     finally
       broker.close()
