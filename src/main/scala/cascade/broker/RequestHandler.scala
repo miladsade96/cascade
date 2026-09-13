@@ -420,11 +420,12 @@ final class RequestHandler(
 
   private def listGroups(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val states = if version >= 4 then cursor.readCompactArray(cursor.readCompactString()).toSet else Set.empty[String]
+    val types = if version >= 5 then cursor.readCompactArray(cursor.readCompactString()).toSet else Set.empty[String]
     if version >= 3 then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val groups = groupCoordinator.listGroups(states).filter(group =>
       isGroupCoordinatorFor(group.groupId) && isAuthorized(session, AclOperation.Describe, ResourceType.Group, group.groupId)
-    )
+    ).filter(group => types.isEmpty || types(group.groupType))
     val writer = ByteWriter()
     if version >= 1 then writer.writeInt(0)
     writer.writeShort(Errors.None)
@@ -432,6 +433,7 @@ final class RequestHandler(
       writer.writeCompactArray(groups) { group =>
         writer.writeCompactString(group.groupId).writeCompactString(group.protocolType)
         if version >= 4 then writer.writeCompactString(group.state)
+        if version >= 5 then writer.writeCompactString(group.groupType)
         writer.writeEmptyTaggedFields(): Unit
       }
       writer.writeEmptyTaggedFields()

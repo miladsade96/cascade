@@ -14,7 +14,8 @@ private[cascade] final case class GroupAdminDescription(
     state: String,
     protocolType: String,
     protocolData: String,
-    members: Vector[GroupAdminMember]
+    members: Vector[GroupAdminMember],
+    groupType: String = "Classic"
 )
 
 /** Immutable administrative view derived only from acknowledged group state. */
@@ -60,7 +61,8 @@ private[cascade] object GroupAdminReadView:
         group.members.headOption.map(_.serverAssignor).getOrElse(""),
         group.members.map(member =>
           GroupAdminMember(member.memberId, member.instanceId, "", "", Vector.empty, Vector.empty)
-        )
+        ),
+        "Consumer"
       )
       group.groupId -> description
     }.toMap

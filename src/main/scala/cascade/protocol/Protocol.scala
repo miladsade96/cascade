@@ -118,7 +118,7 @@ object Compatibility:
     ApiVersion(ApiKey.LeaveGroup, 2, 2),
     ApiVersion(ApiKey.SyncGroup, 3, 3),
     ApiVersion(ApiKey.DescribeGroups, 0, 4),
-    ApiVersion(ApiKey.ListGroups, 0, 4),
+    ApiVersion(ApiKey.ListGroups, 0, 5),
     ApiVersion(ApiKey.SaslHandshake, 1, 1),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
     ApiVersion(ApiKey.CreateTopics, 2, 2),
