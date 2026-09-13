@@ -204,6 +204,14 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       try
         consumer.subscribe(java.util.List.of("modern-consumer-events"))
         assertEquals(pollValues(consumer, 12).toSet, (0 until 12).map(index => s"modern-$index").toSet)
+        consumer.commitSync()
+        val partitions = java.util.Set.of(
+          TopicPartition("modern-consumer-events", 0),
+          TopicPartition("modern-consumer-events", 1)
+        )
+        val committed = consumer.committed(partitions)
+        assertEquals(committed.get(TopicPartition("modern-consumer-events", 0)).offset(), 6L)
+        assertEquals(committed.get(TopicPartition("modern-consumer-events", 1)).offset(), 6L)
       finally consumer.close()
     finally
       broker.close()
