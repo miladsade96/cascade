@@ -101,6 +101,68 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("describes modern consumer groups with ConsumerGroupDescribe v1") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("described-events", 74))
+        val join = requestHeader(ApiKey.ConsumerGroupHeartbeat, 1, 75, flexible = true)
+          .writeCompactString("described-group")
+          .writeCompactString("described-member")
+          .writeInt(0)
+          .writeCompactNullableString(Some("instance-a"))
+          .writeCompactNullableString(Some("rack-a"))
+          .writeInt(30_000)
+        join.writeCompactNullableArray(Some(Vector("described-events")))(join.writeCompactString)
+        join.writeCompactNullableString(None)
+        join.writeCompactNullableString(Some("uniform"))
+        join.writeCompactNullableArray(Some(Vector.empty[Unit]))(_ => ())
+        join.writeEmptyTaggedFields()
+        request(output, input, join.result())
+
+        val describe = requestHeader(ApiKey.ConsumerGroupDescribe, 1, 76, flexible = true)
+        describe.writeCompactArray(Vector("described-group"))(describe.writeCompactString)
+        describe.writeBoolean(true).writeEmptyTaggedFields()
+        val response = request(output, input, describe.result())
+        assertEquals(response.readInt(), 76)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readCompactNullableString(), None)
+        assertEquals(response.readCompactString(), "described-group")
+        assertEquals(response.readCompactString(), "Stable")
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readCompactString(), "uniform")
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readCompactString(), "described-member")
+        assertEquals(response.readCompactNullableString(), Some("instance-a"))
+        assertEquals(response.readCompactNullableString(), Some("rack-a"))
+        assertEquals(response.readInt(), 1)
+        assertEquals(response.readCompactString(), "integration")
+        assertEquals(response.readCompactString(), "127.0.0.1")
+        assertEquals(response.readCompactArray(response.readCompactString()), Vector("described-events"))
+        assertEquals(response.readCompactNullableString(), None)
+        (0 until 2).foreach { _ =>
+          assertEquals(response.readUnsignedVarInt(), 2)
+          response.readUuid()
+          assertEquals(response.readCompactArray(response.readInt()), Vector(0))
+          response.skipTaggedFields()
+          response.skipTaggedFields()
+        }
+        assertEquals(response.readByte(), 1.toByte)
+        response.skipTaggedFields()
+        assertNotEquals(response.readInt(), Int.MinValue)
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("close is safe before start and permanently closes the broker") {
     val directory = Files.createTempDirectory("cascade-broker-lifecycle")
     val broker = KafkaBroker(
