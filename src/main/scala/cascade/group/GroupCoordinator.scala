@@ -546,14 +546,14 @@ final class GroupCoordinator(
       groupId: String,
       memberId: Option[String],
       memberEpoch: Int
-  ): Short = stateLock.synchronized {
-    consumerGroups.get(groupId) match
+  ): Short =
+    val image = acknowledgedImage
+    image.consumerGroups.find(_.groupId == groupId) match
       case None => Errors.None
-      case Some(group) => memberId.flatMap(group.members.get) match
+      case Some(group) => memberId.flatMap(id => group.members.find(_.memberId == id)) match
         case None => Errors.UnknownMemberId
         case Some(member) if memberEpoch != member.memberEpoch => Errors.StaleMemberEpoch
         case Some(_) => Errors.None
-  }
 
   /** Holds the group mutation boundary while a transaction publishes its combined coordinator checkpoint. */
   private[cascade] def commitReplicatedOffsets(values: Vector[OffsetCommitValue])(operation: => Boolean): Boolean = stateLock.synchronized {

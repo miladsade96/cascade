@@ -64,10 +64,12 @@ final class CoordinatorReadIsolationQuorumSuite extends FunSuite:
       assertEquals(readOffset(reader.nn, partition), 20L)
     finally
       cluster.faults.heal()
+      executor.shutdown()
+      if !executor.awaitTermination(10L, TimeUnit.SECONDS) then
+        executor.shutdownNow(): Unit
+        executor.awaitTermination(10L, TimeUnit.SECONDS): Unit
       Option(writer).foreach(_.close())
       Option(reader).foreach(_.close())
-      executor.shutdownNow(): Unit
-      executor.awaitTermination(10L, TimeUnit.SECONDS): Unit
       cluster.close()
   }
 
