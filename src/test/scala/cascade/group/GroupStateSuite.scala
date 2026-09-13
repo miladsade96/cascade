@@ -65,14 +65,14 @@ final class GroupStateSuite extends FunSuite:
     )
 
     val encoded = GroupCodec.encode(image)
-    assertEquals(cascade.protocol.ByteCursor(encoded).readShort(), 2.toShort)
+    assertEquals(cascade.protocol.ByteCursor(encoded).readShort(), 3.toShort)
     assertEquals(GroupCodec.decode(encoded), image)
   }
 
   test("group images reject unknown formats") {
     val bytes = GroupCodec.encode(GroupImage.Empty)
-    bytes(1) = 3
-    interceptMessage[cascade.protocol.ProtocolException]("unsupported group-state format: 3") {
+    bytes(1) = 4
+    interceptMessage[cascade.protocol.ProtocolException]("unsupported group-state format: 4") {
       GroupCodec.decode(bytes)
     }
   }

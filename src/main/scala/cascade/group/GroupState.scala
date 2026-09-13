@@ -46,7 +46,7 @@ private[cascade] object GroupImage:
   val Empty: GroupImage = GroupImage(0L, Vector.empty, Vector.empty, Vector.empty)
 
 private[cascade] object GroupCodec:
-  private val FormatVersion: Short = 2
+  private val FormatVersion: Short = 3
 
   def encode(image: GroupImage): Array[Byte] =
     val format: Short = if image.consumerGroups.isEmpty then 1 else FormatVersion
@@ -101,7 +101,15 @@ private[cascade] object GroupCodec:
             writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
             writer.writeArray(topic.partitions)(writer.writeInt): Unit
           }: Unit
+          writer.writeNullableString(member.subscribedTopicRegex)
+          writer.writeString(member.clientId)
+          writer.writeString(member.clientHost)
+          writer.writeArray(member.targetAssignment) { topic =>
+            writer.writeUuid(topic.topicId.mostSignificantBits, topic.topicId.leastSignificantBits)
+            writer.writeArray(topic.partitions)(writer.writeInt): Unit
+          }: Unit
         }: Unit
+        writer.writeInt(group.assignmentEpoch)
       }
     writer.result()
 
@@ -155,7 +163,7 @@ private[cascade] object GroupCodec:
         val groupId = cursor.readString()
         val groupEpoch = cursor.readInt()
         val members = cursor.readArray {
-          StoredConsumerMember(
+          val legacy = StoredConsumerMember(
             cursor.readString(),
             cursor.readNullableString(),
             cursor.readNullableString(),
@@ -169,8 +177,19 @@ private[cascade] object GroupCodec:
               ConsumerTopicPartitions(ConsumerTopicId(high, low), cursor.readArray(cursor.readInt()))
             }
           )
+          if format >= 3 then
+            legacy.copy(
+              subscribedTopicRegex = cursor.readNullableString(),
+              clientId = cursor.readString(),
+              clientHost = cursor.readString(),
+              targetAssignment = cursor.readArray {
+                val (high, low) = cursor.readUuid()
+                ConsumerTopicPartitions(ConsumerTopicId(high, low), cursor.readArray(cursor.readInt()))
+              }
+            )
+          else legacy.copy(targetAssignment = legacy.assignment)
         }
-        StoredConsumerGroup(groupId, groupEpoch, members)
+        StoredConsumerGroup(groupId, groupEpoch, members, if format >= 3 then cursor.readInt() else groupEpoch)
       }
       else Vector.empty
     cursor.ensureFullyRead()
