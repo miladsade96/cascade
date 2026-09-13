@@ -348,7 +348,7 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
-  test("deletes empty groups and their offsets with Kafka DeleteGroups v1") {
+  test("deletes empty groups and their offsets with Kafka DeleteGroups v1 and v2") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
       try
@@ -367,6 +367,21 @@ final class BrokerIntegrationSuite extends FunSuite:
           Vector("delete-readers" -> Errors.None, "missing" -> Errors.GroupIdNotFound)
         )
         deleted.ensureFullyRead()
+
+        request(output, input, offsetCommitV5Request("delete-readers-v2", "delete-events", 14L, correlationId = 71))
+        val flexibleDelete = requestHeader(ApiKey.DeleteGroups, 2, 72, flexible = true)
+        flexibleDelete.writeCompactArray(Vector("delete-readers-v2"))(flexibleDelete.writeCompactString)
+        flexibleDelete.writeEmptyTaggedFields()
+        val flexiblyDeleted = request(output, input, flexibleDelete.result())
+        assertEquals(flexiblyDeleted.readInt(), 72)
+        flexiblyDeleted.skipTaggedFields()
+        assertEquals(flexiblyDeleted.readInt(), 0)
+        assertEquals(flexiblyDeleted.readUnsignedVarInt(), 2)
+        assertEquals(flexiblyDeleted.readCompactString(), "delete-readers-v2")
+        assertEquals(flexiblyDeleted.readShort(), Errors.None)
+        flexiblyDeleted.skipTaggedFields()
+        flexiblyDeleted.skipTaggedFields()
+        flexiblyDeleted.ensureFullyRead()
 
         val list = requestHeader(ApiKey.ListGroups, 4, 70, flexible = true)
         list.writeCompactArray(Vector("Empty"))(list.writeCompactString).writeEmptyTaggedFields()

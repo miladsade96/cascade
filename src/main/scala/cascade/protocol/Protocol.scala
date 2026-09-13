@@ -131,7 +131,7 @@ object Compatibility:
     ApiVersion(ApiKey.CreateAcls, 1, 1),
     ApiVersion(ApiKey.DeleteAcls, 1, 1),
     ApiVersion(ApiKey.DescribeConfigs, 2, 2),
-    ApiVersion(ApiKey.DeleteGroups, 0, 1),
+    ApiVersion(ApiKey.DeleteGroups, 0, 2),
     ApiVersion(ApiKey.IncrementalAlterConfigs, 0, 0),
     ApiVersion(ApiKey.SaslAuthenticate, 1, 1),
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
@@ -152,6 +152,7 @@ object Compatibility:
     (apiKey == ApiKey.ApiVersions && version >= 3) ||
       (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
+      (apiKey == ApiKey.DeleteGroups && version >= 2) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
@@ -162,6 +163,7 @@ object Compatibility:
   def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
+      (apiKey == ApiKey.DeleteGroups && version >= 2) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||

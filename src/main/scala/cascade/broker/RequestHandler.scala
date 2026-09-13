@@ -120,7 +120,7 @@ final class RequestHandler(
       case ApiKey.SyncGroup    => syncGroup(body)
       case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
       case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
-      case ApiKey.DeleteGroups => deleteGroups(body, session)
+      case ApiKey.DeleteGroups => deleteGroups(header.apiVersion, body, session)
       case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(header, body, session)
       case ApiKey.ConsumerGroupDescribe => consumerGroupDescribe(header.apiVersion, body, session)
       case ApiKey.CreateTopics => createTopics(body, session)
@@ -481,8 +481,11 @@ final class RequestHandler(
       else mask
     }
 
-  private def deleteGroups(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
-    val groupIds = cursor.readArray(cursor.readString())
+  private def deleteGroups(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val groupIds =
+      if version >= 2 then cursor.readCompactArray(cursor.readCompactString())
+      else cursor.readArray(cursor.readString())
+    if version >= 2 then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val results = groupIds.map { groupId =>
       val error =
@@ -491,9 +494,15 @@ final class RequestHandler(
       groupId -> error
     }
     val writer = ByteWriter().writeInt(0)
-    writer.writeArray(results) { case (groupId, error) =>
-      writer.writeString(groupId).writeShort(error): Unit
-    }
+    if version >= 2 then
+      writer.writeCompactArray(results) { case (groupId, error) =>
+        writer.writeCompactString(groupId).writeShort(error).writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields()
+    else
+      writer.writeArray(results) { case (groupId, error) =>
+        writer.writeString(groupId).writeShort(error): Unit
+      }
     Some(writer.result())
 
   private def consumerGroupHeartbeat(
