@@ -111,7 +111,7 @@ final class RequestHandler(
       case ApiKey.SaslHandshake => saslHandshake(body, session)
       case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
       case ApiKey.Metadata     => metadata(header.apiVersion, body, session)
-      case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body)
+      case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body, session)
       case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body, session)
       case ApiKey.FindCoordinator => findCoordinator(body, session)
       case ApiKey.JoinGroup    => joinGroup(header, body)
@@ -656,43 +656,89 @@ final class RequestHandler(
     writer.writeEmptyTaggedFields()
     Some(writer.result())
 
-  private def offsetCommit(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
-    final case class RequestedPartition(index: Int, value: OffsetCommitValue, exists: Boolean)
-    val groupId = cursor.readString()
+  private def offsetCommit(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    final case class RequestedPartition(index: Int, value: Option[OffsetCommitValue], errorCode: Short)
+    final case class RequestedTopic(
+        name: Option[String],
+        topicId: Option[ConsumerTopicId],
+        partitions: Vector[RequestedPartition]
+    )
+    val flexible = version >= 8
+    val groupId = if flexible then cursor.readCompactString() else cursor.readString()
     val generationId = cursor.readInt()
-    val memberId = cursor.readString()
-    val groupInstanceId = if version >= 7 then cursor.readNullableString() else None
+    val memberId = if flexible then cursor.readCompactString() else cursor.readString()
+    val groupInstanceId =
+      if version >= 8 then cursor.readCompactNullableString()
+      else if version >= 7 then cursor.readNullableString()
+      else None
     val committedAt = System.currentTimeMillis()
-    val requests = cursor.readArray {
-      val topic = cursor.readString()
-      val partitions = cursor.readArray {
-        val index = cursor.readInt()
-        val offset = cursor.readLong()
-        val leaderEpoch = if version >= 6 then cursor.readInt() else -1
-        val metadata = cursor.readNullableString()
-        val value = OffsetCommitValue(
-          GroupOffsetKey(groupId, topic, index),
+
+    def readPartition(topic: Option[String], unknownTopicId: Boolean): RequestedPartition =
+      val index = cursor.readInt()
+      val offset = cursor.readLong()
+      val leaderEpoch = if version >= 6 then cursor.readInt() else -1
+      val metadata = if flexible then cursor.readCompactNullableString() else cursor.readNullableString()
+      if flexible then cursor.skipTaggedFields()
+      val value = topic.map { name =>
+        OffsetCommitValue(
+          GroupOffsetKey(groupId, name, index),
           CommittedOffset(offset, leaderEpoch, metadata, committedAt)
         )
-        RequestedPartition(index, value, registry.partition(topic, index).nonEmpty)
       }
-      (topic, partitions)
-    }
+      val error =
+        if unknownTopicId then Errors.UnknownTopicId
+        else if topic.exists(name => !partitionExists(name, index)) then Errors.UnknownTopicOrPartition
+        else Errors.None
+      RequestedPartition(index, value, error)
+
+    val requests =
+      if flexible then cursor.readCompactArray {
+        val (name, topicId) =
+          if version >= 10 then
+            val (high, low) = cursor.readUuid()
+            None -> Some(ConsumerTopicId(high, low))
+          else Some(cursor.readCompactString()) -> None
+        val resolvedName = name.orElse(topicId.flatMap(topicNameForId))
+        val partitions = cursor.readCompactArray(readPartition(resolvedName, version >= 10 && resolvedName.isEmpty))
+        cursor.skipTaggedFields()
+        RequestedTopic(name, topicId, partitions)
+      }
+      else cursor.readArray {
+        val name = cursor.readString()
+        RequestedTopic(Some(name), None, cursor.readArray(readPartition(Some(name), unknownTopicId = false)))
+      }
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
-    val validValues = requests.flatMap(_._2).filter(_.exists).map(_.value)
+
+    val validValues = requests.flatMap(_.partitions).filter(_.errorCode == Errors.None).flatMap(_.value)
     val groupError =
       if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator
+      else if !isAuthorized(session, AclOperation.Read, ResourceType.Group, groupId) then Errors.GroupAuthorizationFailed
       else offsetBatcher match
         case Some(batcher) => batcher.commit(OffsetCommitCommand(groupId, generationId, memberId, groupInstanceId, validValues))
         case None => groupCoordinator.commitOffsets(groupId, generationId, memberId, groupInstanceId, validValues)
     val writer = ByteWriter().writeInt(0)
-    writer.writeArray(requests) { case (topic, partitions) =>
-      writer.writeString(topic)
-      writer.writeArray(partitions) { partition =>
-        val error = if partition.exists then groupError else Errors.UnknownTopicOrPartition
-        writer.writeInt(partition.index).writeShort(error): Unit
+    if flexible then
+      writer.writeCompactArray(requests) { topic =>
+        if version >= 10 then
+          val id = topic.topicId.orElse(topic.name.map(ConsumerTopicId.forName)).getOrElse(ConsumerTopicId(0L, 0L))
+          writer.writeUuid(id.mostSignificantBits, id.leastSignificantBits)
+        else writer.writeCompactString(topic.name.getOrElse(""))
+        writer.writeCompactArray(topic.partitions) { partition =>
+          val error = if partition.errorCode == Errors.None then groupError else partition.errorCode
+          writer.writeInt(partition.index).writeShort(error).writeEmptyTaggedFields(): Unit
+        }
+        writer.writeEmptyTaggedFields(): Unit
       }
-    }
+      writer.writeEmptyTaggedFields()
+    else
+      writer.writeArray(requests) { topic =>
+        writer.writeString(topic.name.getOrElse(""))
+        writer.writeArray(topic.partitions) { partition =>
+          val error = if partition.errorCode == Errors.None then groupError else partition.errorCode
+          writer.writeInt(partition.index).writeShort(error): Unit
+        }
+      }
     Some(writer.result())
 
   private def offsetFetch(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
@@ -1790,7 +1836,7 @@ final class RequestHandler(
     if authorizer.isEmpty then return
     val (_, cursor) = RequestHeader.decode(frame)
     apiKey match
-      case ApiKey.OffsetCommit | ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
+      case ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
           ApiKey.SyncGroup =>
         requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
       case ApiKey.ConsumerGroupHeartbeat =>

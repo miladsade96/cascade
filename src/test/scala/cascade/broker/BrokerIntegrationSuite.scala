@@ -345,6 +345,44 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("commits offsets with flexible OffsetCommit v8") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("flex-commit-events", 88))
+        val commit = requestHeader(ApiKey.OffsetCommit, 8, 89, flexible = true)
+          .writeCompactString("flex-commit-group")
+          .writeInt(-1)
+          .writeCompactString("")
+          .writeCompactNullableString(None)
+        commit.writeCompactArray(Vector("flex-commit-events")) { topic =>
+          commit.writeCompactString(topic)
+          commit.writeCompactArray(Vector(0)) { partition =>
+            commit.writeInt(partition).writeLong(41L).writeInt(3)
+              .writeCompactNullableString(Some("checkpoint")).writeEmptyTaggedFields(): Unit
+          }
+          commit.writeEmptyTaggedFields(): Unit
+        }
+        commit.writeEmptyTaggedFields()
+        val response = request(output, input, commit.result())
+        assertEquals(response.readInt(), 89)
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readCompactString(), "flex-commit-events")
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readShort(), Errors.None)
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("fetches offsets for multiple groups with OffsetFetch v8") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
