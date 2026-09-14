@@ -76,7 +76,14 @@ final class DeliveryCoordinator(
     checkpoint = value
   }
 
-  def initProducerId(transactionalId: Option[String], timeoutMillis: Int): InitProducerIdResult = stateLock.synchronized {
+  def initProducerId(transactionalId: Option[String], timeoutMillis: Int): InitProducerIdResult =
+    initProducerId(transactionalId, timeoutMillis, None)
+
+  def initProducerId(
+      transactionalId: Option[String],
+      timeoutMillis: Int,
+      expectedProducer: Option[(Long, Short)]
+  ): InitProducerIdResult = stateLock.synchronized {
     transactionalId.foreach(awaitTransactionalAppends)
     expireTransactionsLocked(System.currentTimeMillis())
     if transactionalId.exists(_.isEmpty) then
@@ -86,6 +93,17 @@ final class DeliveryCoordinator(
     else
       transactionalId.flatMap(current.producerByTransactionalId.get) match
         case Some(existing) =>
+          expectedProducer match
+            case Some((producerId, producerEpoch))
+                if producerId == existing.producerId && producerEpoch.toInt + 1 == existing.producerEpoch.toInt =>
+              return InitProducerIdResult(Errors.None, existing.producerId, existing.producerEpoch)
+            case Some((producerId, producerEpoch))
+                if producerEpoch == Short.MaxValue && producerId < existing.producerId && existing.producerEpoch == 0 =>
+              return InitProducerIdResult(Errors.None, existing.producerId, existing.producerEpoch)
+            case Some((producerId, producerEpoch))
+                if producerId != existing.producerId || producerEpoch != existing.producerEpoch =>
+              return InitProducerIdResult(Errors.ProducerFenced, -1L, -1)
+            case _ => ()
           val (producerId, epoch) =
             if existing.producerEpoch == Short.MaxValue then (current.nextProducerId, 0.toShort)
             else (existing.producerId, (existing.producerEpoch + 1).toShort)
@@ -113,6 +131,7 @@ final class DeliveryCoordinator(
           if committed then InitProducerIdResult(Errors.None, producerId, epoch)
           else InitProducerIdResult(Errors.CoordinatorNotAvailable, -1L, -1)
         case None =>
+          if expectedProducer.nonEmpty then return InitProducerIdResult(Errors.ProducerFenced, -1L, -1)
           val producerId = current.nextProducerId
           val producer = ProducerRegistration(producerId, 0, transactionalId, timeoutMillis)
           val committed = commit(
