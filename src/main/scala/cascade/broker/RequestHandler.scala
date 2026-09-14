@@ -140,6 +140,7 @@ final class RequestHandler(
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
       case ApiKey.EndTxn => endTxn(body)
       case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
+      case ApiKey.DescribeTransactions => describeTransactions(body, session)
       case ApiKey.Produce      => produce(body, session)
       case ApiKey.Fetch        => fetch(body, session)
       case ApiKey.ListOffsets  => listOffsets(body, session)
@@ -1831,6 +1832,37 @@ final class RequestHandler(
         writer.writeInt(offset.index).writeShort(error): Unit
       }
     }
+    Some(writer.result())
+
+  private def describeTransactions(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val transactionalIds = cursor.readCompactArray(cursor.readCompactString())
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+    val writer = ByteWriter().writeInt(0)
+    writer.writeCompactArray(transactionalIds) { transactionalId =>
+      val (error, description) =
+        if !isAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, transactionalId) then
+          Errors.TransactionalIdAuthorizationFailed -> None
+        else if !isTransactionCoordinatorFor(transactionalId) then Errors.NotCoordinator -> None
+        else deliveryCoordinator.describeTransaction(transactionalId) match
+          case Some(value) => Errors.None -> Some(value)
+          case None        => Errors.TransactionalIdNotFound -> None
+      writer.writeShort(error)
+      writer.writeCompactString(transactionalId)
+      writer.writeCompactString(description.map(_.state.wireName).getOrElse(""))
+      writer.writeInt(description.map(_.transactionTimeoutMillis).getOrElse(0))
+      writer.writeLong(description.map(_.transactionStartTimeMillis).getOrElse(-1L))
+      writer.writeLong(description.map(_.producerId).getOrElse(-1L))
+      writer.writeShort(description.map(_.producerEpoch).getOrElse(-1.toShort))
+      val topics = description.toVector.flatMap(_.partitions).groupBy(_.topic).toVector.sortBy(_._1)
+      writer.writeCompactArray(topics) { case (topic, partitions) =>
+        writer.writeCompactString(topic)
+        writer.writeCompactArray(partitions.sortBy(_.partition)) { value => writer.writeInt(value.partition): Unit }
+        writer.writeEmptyTaggedFields(): Unit
+      }
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    writer.writeEmptyTaggedFields()
     Some(writer.result())
 
   private def authorizeControlRequest(apiKey: Short, frame: Array[Byte], session: ConnectionSession): Unit =
