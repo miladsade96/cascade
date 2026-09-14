@@ -136,7 +136,7 @@ final class RequestHandler(
       case ApiKey.AddRaftVoter => addRaftVoter(header.apiVersion, body)
       case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
       case ApiKey.InitProducerId => initProducerId(header.apiVersion, body)
-      case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(body)
+      case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(header.apiVersion, body)
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
       case ApiKey.EndTxn => endTxn(body)
       case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
@@ -1769,29 +1769,94 @@ final class RequestHandler(
     if flexible then writer.writeEmptyTaggedFields()
     Some(writer.result())
 
-  private def addPartitionsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
-    val transactionalId = cursor.readString()
-    val producerId = cursor.readLong()
-    val producerEpoch = cursor.readShort()
-    val requested = cursor.readArray {
-      val topic = cursor.readString()
-      (topic, cursor.readArray(cursor.readInt()))
-    }
+  private def addPartitionsToTxn(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    final case class RequestedTransaction(
+        transactionalId: String,
+        producerId: Long,
+        producerEpoch: Short,
+        verifyOnly: Boolean,
+        topics: Vector[(String, Vector[Int])]
+    )
+    val flexible = version >= 3
+    def readTopics(): Vector[(String, Vector[Int])] =
+      def readTopic(): (String, Vector[Int]) =
+        val topic = if flexible then cursor.readCompactString() else cursor.readString()
+        val partitions = if flexible then cursor.readCompactArray(cursor.readInt()) else cursor.readArray(cursor.readInt())
+        if flexible then cursor.skipTaggedFields()
+        topic -> partitions
+      if flexible then cursor.readCompactArray(readTopic()) else cursor.readArray(readTopic())
+
+    val transactions =
+      if version >= 4 then
+        cursor.readCompactArray {
+          val value = RequestedTransaction(
+            cursor.readCompactString(),
+            cursor.readLong(),
+            cursor.readShort(),
+            cursor.readBoolean(),
+            readTopics()
+          )
+          cursor.skipTaggedFields()
+          value
+        }
+      else
+        val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
+        Vector(RequestedTransaction(transactionalId, cursor.readLong(), cursor.readShort(), false, readTopics()))
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
-    val valid = requested.flatMap { case (topic, partitions) =>
-      partitions.filter(partitionExists(topic, _)).map(index => cascade.storage.TopicPartition(topic, index))
-    }
-    val transactionError =
-      if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.addPartitions(transactionalId, producerId, producerEpoch, valid)
-      else Errors.NotCoordinator
-    val writer = ByteWriter().writeInt(0)
-    writer.writeArray(requested) { case (topic, partitions) =>
-      writer.writeString(topic)
-      writer.writeArray(partitions) { index =>
-        val error = if partitionExists(topic, index) then transactionError else Errors.UnknownTopicOrPartition
-        writer.writeInt(index).writeShort(error): Unit
+
+    val results = transactions.map { transaction =>
+      val requested = transaction.topics.flatMap { case (topic, partitions) =>
+        partitions.map(index => cascade.storage.TopicPartition(topic, index))
       }
+      val existing = requested.filter(value => partitionExists(value.topic, value.partition))
+      val errors =
+        if !isTransactionCoordinatorFor(transaction.transactionalId) then existing.map(_ -> Errors.NotCoordinator).toMap
+        else if transaction.verifyOnly then
+          deliveryCoordinator.verifyPartitions(
+            transaction.transactionalId,
+            transaction.producerId,
+            transaction.producerEpoch,
+            existing
+          ).toMap
+        else
+          val error = deliveryCoordinator.addPartitions(
+            transaction.transactionalId,
+            transaction.producerId,
+            transaction.producerEpoch,
+            existing
+          )
+          existing.map(_ -> error).toMap
+      transaction -> errors
     }
+
+    val writer = ByteWriter().writeInt(0)
+    def writeTopicResults(transaction: RequestedTransaction, errors: Map[cascade.storage.TopicPartition, Short]): Unit =
+      val writeTopic: ((String, Vector[Int])) => Unit = { case (topic, partitions) =>
+        if flexible then writer.writeCompactString(topic) else writer.writeString(topic)
+        val writePartition: Int => Unit = { index =>
+          val key = cascade.storage.TopicPartition(topic, index)
+          val error = if partitionExists(topic, index) then errors.getOrElse(key, Errors.InvalidRequest) else Errors.UnknownTopicOrPartition
+          writer.writeInt(index).writeShort(error)
+          if flexible then writer.writeEmptyTaggedFields()
+          ()
+        }
+        if flexible then writer.writeCompactArray(partitions)(writePartition) else writer.writeArray(partitions)(writePartition)
+        if flexible then writer.writeEmptyTaggedFields()
+      }
+      if flexible then writer.writeCompactArray(transaction.topics)(writeTopic) else writer.writeArray(transaction.topics)(writeTopic)
+
+    if version >= 4 then
+      writer.writeShort(Errors.None)
+      writer.writeCompactArray(results) { case (transaction, errors) =>
+        writer.writeCompactString(transaction.transactionalId)
+        writeTopicResults(transaction, errors)
+        writer.writeEmptyTaggedFields(): Unit
+      }
+    else
+      val (transaction, errors) = results.head
+      writeTopicResults(transaction, errors)
+    if flexible then writer.writeEmptyTaggedFields()
     Some(writer.result())
 
   private def addOffsetsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
@@ -1985,15 +2050,28 @@ final class RequestHandler(
             requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
           case None => requireAuthorized(session, AclOperation.IdempotentWrite, ResourceType.Cluster, "cascade")
       case ApiKey.AddPartitionsToTxn =>
-        val transactionalId = cursor.readString()
-        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
-        cursor.readLong()
-        cursor.readShort()
-        cursor.readArray {
-          val topic = cursor.readString()
-          requireAuthorized(session, AclOperation.Write, ResourceType.Topic, topic)
-          cursor.readArray(cursor.readInt())
-        }: Unit
+        val flexible = requestHeader.apiVersion >= 3
+        def authorizeTopics(): Unit =
+          def authorizeTopic(): Unit =
+            val topic = if flexible then cursor.readCompactString() else cursor.readString()
+            requireAuthorized(session, AclOperation.Write, ResourceType.Topic, topic)
+            if flexible then
+              cursor.readCompactArray(cursor.readInt()): Unit
+              cursor.skipTaggedFields()
+            else cursor.readArray(cursor.readInt()): Unit
+          if flexible then cursor.readCompactArray(authorizeTopic()): Unit else cursor.readArray(authorizeTopic()): Unit
+
+        def authorizeTransaction(includeVerifyOnly: Boolean): Unit =
+          val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
+          requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
+          cursor.readLong()
+          cursor.readShort()
+          if includeVerifyOnly then cursor.readBoolean(): Unit
+          authorizeTopics()
+          if flexible && includeVerifyOnly then cursor.skipTaggedFields()
+
+        if requestHeader.apiVersion >= 4 then cursor.readCompactArray(authorizeTransaction(includeVerifyOnly = true)): Unit
+        else authorizeTransaction(includeVerifyOnly = false)
       case ApiKey.AddOffsetsToTxn =>
         requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
         cursor.readLong()

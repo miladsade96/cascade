@@ -972,6 +972,77 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("serves batched verify-only transaction partition admission") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("delivery-verify", correlationId = 97))
+        request(output, input, metadataRequest("delivery-verify-other", correlationId = 98))
+
+        val init = requestHeader(ApiKey.InitProducerId, 4, 99, flexible = true)
+          .writeCompactNullableString(Some("delivery-verify-txn"))
+          .writeInt(30_000)
+          .writeLong(-1L)
+          .writeShort((-1).toShort)
+          .writeEmptyTaggedFields()
+        val initialized = request(output, input, init.result())
+        assertEquals(initialized.readInt(), 99)
+        initialized.skipTaggedFields()
+        initialized.readInt()
+        assertEquals(initialized.readShort(), Errors.None)
+        val producerId = initialized.readLong()
+        val producerEpoch = initialized.readShort()
+        initialized.skipTaggedFields()
+
+        def partitionsRequest(correlationId: Int, verifyOnly: Boolean, topicName: String = "delivery-verify"): Array[Byte] =
+          val writer = requestHeader(ApiKey.AddPartitionsToTxn, 5, correlationId, flexible = true)
+          writer.writeCompactArray(Vector("delivery-verify-txn")) { transactionalId =>
+            writer.writeCompactString(transactionalId).writeLong(producerId).writeShort(producerEpoch).writeBoolean(verifyOnly)
+            writer.writeCompactArray(Vector(topicName)) { topic =>
+              writer.writeCompactString(topic)
+              writer.writeCompactArray(Vector(0))(writer.writeInt)
+              writer.writeEmptyTaggedFields(): Unit
+            }
+            writer.writeEmptyTaggedFields(): Unit
+          }
+          writer.writeEmptyTaggedFields().result()
+
+        def readPartitionError(response: ByteCursor, correlationId: Int, topicName: String = "delivery-verify"): Short =
+          assertEquals(response.readInt(), correlationId)
+          response.skipTaggedFields()
+          response.readInt()
+          assertEquals(response.readShort(), Errors.None)
+          assertEquals(response.readUnsignedVarInt(), 2)
+          assertEquals(response.readCompactString(), "delivery-verify-txn")
+          assertEquals(response.readUnsignedVarInt(), 2)
+          assertEquals(response.readCompactString(), topicName)
+          assertEquals(response.readUnsignedVarInt(), 2)
+          assertEquals(response.readInt(), 0)
+          val error = response.readShort()
+          response.skipTaggedFields()
+          response.skipTaggedFields()
+          response.skipTaggedFields()
+          response.skipTaggedFields()
+          response.ensureFullyRead()
+          error
+
+        assertEquals(readPartitionError(request(output, input, partitionsRequest(100, verifyOnly = true)), 100), Errors.InvalidTxnState)
+        assertEquals(readPartitionError(request(output, input, partitionsRequest(101, verifyOnly = false)), 101), Errors.None)
+        assertEquals(readPartitionError(request(output, input, partitionsRequest(102, verifyOnly = true)), 102), Errors.None)
+        assertEquals(
+          readPartitionError(
+            request(output, input, partitionsRequest(103, verifyOnly = true, topicName = "delivery-verify-other")),
+            103,
+            "delivery-verify-other"
+          ),
+          Errors.TransactionAbortable
+        )
+      finally socket.close()
+    }
+  }
+
   test("serves resumable flexible producer initialization without double epoch bumps") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
