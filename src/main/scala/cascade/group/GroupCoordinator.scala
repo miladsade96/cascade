@@ -487,6 +487,22 @@ final class GroupCoordinator(
       values: Vector[OffsetCommitValue]
   ): Short = commitOffsetBatch(Vector(OffsetCommitCommand(groupId, generationId, memberId, groupInstanceId, values))).head
 
+  /** Validates a classic or consumer-protocol member without mutating its committed offsets. */
+  private[cascade] def validateOffsetCommit(
+      groupId: String,
+      generationId: Int,
+      memberId: String,
+      groupInstanceId: Option[String]
+  ): Short = stateLock.synchronized {
+    if groupId.isEmpty then Errors.InvalidGroupId
+    else if generationId < 0 then Errors.None
+    else consumerGroups.get(groupId) match
+      case Some(_) => validateConsumerOffsetRequest(groupId, Option(memberId).filter(_.nonEmpty), generationId)
+      case None => groups.get(groupId)
+        .map(validateMember(_, generationId, memberId, groupInstanceId))
+        .getOrElse(Errors.UnknownMemberId)
+  }
+
   /** One validation/staging/publication boundary; a failed quorum rolls back every accepted command. */
   private[cascade] def commitOffsetBatch(
       commands: Vector[OffsetCommitCommand],
@@ -497,12 +513,7 @@ final class GroupCoordinator(
       if gate != Errors.None then gate
       else if command.groupId.isEmpty then Errors.InvalidGroupId
       else if command.values.exists(_.key.groupId != command.groupId) then Errors.InvalidRequest
-      else if command.generationId < 0 then Errors.None
-      else consumerGroups.get(command.groupId) match
-        case Some(_) => validateConsumerOffsetRequest(command.groupId, Option(command.memberId).filter(_.nonEmpty), command.generationId)
-        case None => groups.get(command.groupId)
-          .map(validateMember(_, command.generationId, command.memberId, command.groupInstanceId))
-          .getOrElse(Errors.UnknownMemberId)
+      else validateOffsetCommit(command.groupId, command.generationId, command.memberId, command.groupInstanceId)
     }
     // FIFO concatenation deliberately preserves last-write-wins, including decreasing offsets.
     val values = commands.zip(results).collect { case (command, Errors.None) => command.values }.flatten

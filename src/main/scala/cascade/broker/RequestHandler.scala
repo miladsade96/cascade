@@ -137,9 +137,9 @@ final class RequestHandler(
       case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
       case ApiKey.InitProducerId => initProducerId(header.apiVersion, body)
       case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(header.apiVersion, body)
-      case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
-      case ApiKey.EndTxn => endTxn(body)
-      case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
+      case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(header.apiVersion, body)
+      case ApiKey.EndTxn => endTxn(header.apiVersion, body)
+      case ApiKey.TxnOffsetCommit => txnOffsetCommit(header.apiVersion, body)
       case ApiKey.DescribeTransactions => describeTransactions(body, session)
       case ApiKey.ListTransactions => listTransactions(header.apiVersion, body, session)
       case ApiKey.DescribeProducers => describeProducers(body, session)
@@ -1859,62 +1859,84 @@ final class RequestHandler(
     if flexible then writer.writeEmptyTaggedFields()
     Some(writer.result())
 
-  private def addOffsetsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
-    val transactionalId = cursor.readString()
+  private def addOffsetsToTxn(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    val flexible = version >= 3
+    val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
     val producerId = cursor.readLong()
     val producerEpoch = cursor.readShort()
-    val groupId = cursor.readString()
+    val groupId = if flexible then cursor.readCompactString() else cursor.readString()
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val error =
       if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.addOffsets(transactionalId, producerId, producerEpoch, groupId)
       else Errors.NotCoordinator
-    Some(ByteWriter().writeInt(0).writeShort(error).result())
+    val writer = ByteWriter().writeInt(0).writeShort(error)
+    if flexible then writer.writeEmptyTaggedFields()
+    Some(writer.result())
 
-  private def endTxn(cursor: ByteCursor): Option[Array[Byte]] =
-    val transactionalId = cursor.readString()
+  private def endTxn(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    val flexible = version >= 3
+    val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
     val producerId = cursor.readLong()
     val producerEpoch = cursor.readShort()
     val committed = cursor.readBoolean()
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val error =
       if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
       else Errors.NotCoordinator
-    Some(ByteWriter().writeInt(0).writeShort(error).result())
+    val writer = ByteWriter().writeInt(0).writeShort(error)
+    if flexible then writer.writeEmptyTaggedFields()
+    Some(writer.result())
 
-  private def txnOffsetCommit(cursor: ByteCursor): Option[Array[Byte]] =
+  private def txnOffsetCommit(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
     final case class RequestedOffset(index: Int, value: PendingOffset, exists: Boolean)
-    val transactionalId = cursor.readString()
-    val groupId = cursor.readString()
+    val flexible = version >= 3
+    val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
+    val groupId = if flexible then cursor.readCompactString() else cursor.readString()
     val producerId = cursor.readLong()
     val producerEpoch = cursor.readShort()
-    val requested = cursor.readArray {
-      val topic = cursor.readString()
-      val offsets = cursor.readArray {
+    val generationId = if version >= 3 then cursor.readInt() else -1
+    val memberId = if version >= 3 then cursor.readCompactString() else ""
+    val groupInstanceId = if version >= 3 then cursor.readCompactNullableString() else None
+    def readTopic(): (String, Vector[RequestedOffset]) =
+      val topic = if flexible then cursor.readCompactString() else cursor.readString()
+      def readOffset(): RequestedOffset =
         val index = cursor.readInt()
         val offset = cursor.readLong()
-        val leaderEpoch = cursor.readInt()
-        val metadata = cursor.readNullableString()
-        RequestedOffset(
+        val leaderEpoch = if version >= 2 then cursor.readInt() else -1
+        val metadata = if flexible then cursor.readCompactNullableString() else cursor.readNullableString()
+        val result = RequestedOffset(
           index,
           PendingOffset(groupId, topic, index, offset, leaderEpoch, metadata),
           partitionExists(topic, index)
         )
-      }
-      (topic, offsets)
-    }
+        if flexible then cursor.skipTaggedFields()
+        result
+      val offsets = if flexible then cursor.readCompactArray(readOffset()) else cursor.readArray(readOffset())
+      if flexible then cursor.skipTaggedFields()
+      topic -> offsets
+    val requested = if flexible then cursor.readCompactArray(readTopic()) else cursor.readArray(readTopic())
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val values = requested.flatMap(_._2).filter(_.exists).map(_.value)
+    val membershipError = groupCoordinator.validateOffsetCommit(groupId, generationId, memberId, groupInstanceId)
     val transactionError =
-      if isGroupCoordinatorFor(groupId) then deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
-      else Errors.NotCoordinator
+      if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator
+      else if membershipError != Errors.None then membershipError
+      else deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
     val writer = ByteWriter().writeInt(0)
-    writer.writeArray(requested) { case (topic, offsets) =>
-      writer.writeString(topic)
-      writer.writeArray(offsets) { offset =>
-        val error = if offset.exists then transactionError else Errors.UnknownTopicOrPartition
-        writer.writeInt(offset.index).writeShort(error): Unit
-      }
-    }
+    def writeTopic(value: (String, Vector[RequestedOffset])): Unit = value match
+      case (topic, offsets) =>
+        if flexible then writer.writeCompactString(topic) else writer.writeString(topic)
+        def writeOffset(offset: RequestedOffset): Unit =
+          val error = if offset.exists then transactionError else Errors.UnknownTopicOrPartition
+          writer.writeInt(offset.index).writeShort(error)
+          if flexible then writer.writeEmptyTaggedFields()
+        if flexible then writer.writeCompactArray(offsets)(writeOffset) else writer.writeArray(offsets)(writeOffset)
+        if flexible then writer.writeEmptyTaggedFields()
+    if flexible then writer.writeCompactArray(requested)(writeTopic) else writer.writeArray(requested)(writeTopic)
+    if flexible then writer.writeEmptyTaggedFields()
     Some(writer.result())
 
   private def describeTransactions(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
@@ -2073,15 +2095,22 @@ final class RequestHandler(
         if requestHeader.apiVersion >= 4 then cursor.readCompactArray(authorizeTransaction(includeVerifyOnly = true)): Unit
         else authorizeTransaction(includeVerifyOnly = false)
       case ApiKey.AddOffsetsToTxn =>
-        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
+        val flexible = requestHeader.apiVersion >= 3
+        val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
         cursor.readLong()
         cursor.readShort()
-        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+        val groupId = if flexible then cursor.readCompactString() else cursor.readString()
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, groupId)
       case ApiKey.EndTxn =>
-        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
+        val transactionalId = if requestHeader.apiVersion >= 3 then cursor.readCompactString() else cursor.readString()
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
       case ApiKey.TxnOffsetCommit =>
-        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, cursor.readString())
-        requireAuthorized(session, AclOperation.Read, ResourceType.Group, cursor.readString())
+        val flexible = requestHeader.apiVersion >= 3
+        val transactionalId = if flexible then cursor.readCompactString() else cursor.readString()
+        val groupId = if flexible then cursor.readCompactString() else cursor.readString()
+        requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
+        requireAuthorized(session, AclOperation.Read, ResourceType.Group, groupId)
       case ApiKey.AlterPartitionReassignments | ApiKey.AddRaftVoter | ApiKey.RemoveRaftVoter =>
         requireAuthorized(session, AclOperation.Alter, ResourceType.Cluster, "cascade")
       case ApiKey.ListPartitionReassignments | ApiKey.DescribeQuorum =>

@@ -130,9 +130,9 @@ object Compatibility:
     ApiVersion(ApiKey.CreateTopics, 2, 2),
     ApiVersion(ApiKey.InitProducerId, 0, 5),
     ApiVersion(ApiKey.AddPartitionsToTxn, 0, 5),
-    ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
-    ApiVersion(ApiKey.EndTxn, 1, 1),
-    ApiVersion(ApiKey.TxnOffsetCommit, 2, 2),
+    ApiVersion(ApiKey.AddOffsetsToTxn, 0, 4),
+    ApiVersion(ApiKey.EndTxn, 0, 4),
+    ApiVersion(ApiKey.TxnOffsetCommit, 0, 4),
     ApiVersion(ApiKey.DescribeAcls, 1, 1),
     ApiVersion(ApiKey.CreateAcls, 1, 1),
     ApiVersion(ApiKey.DeleteAcls, 1, 1),
@@ -167,6 +167,7 @@ object Compatibility:
       (apiKey == ApiKey.OffsetCommit && version >= 8) ||
       (apiKey == ApiKey.InitProducerId && version >= 2) ||
       (apiKey == ApiKey.AddPartitionsToTxn && version >= 3) ||
+      ((apiKey == ApiKey.AddOffsetsToTxn || apiKey == ApiKey.EndTxn || apiKey == ApiKey.TxnOffsetCommit) && version >= 3) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
@@ -183,6 +184,7 @@ object Compatibility:
       (apiKey == ApiKey.OffsetCommit && version >= 8) ||
       (apiKey == ApiKey.InitProducerId && version >= 2) ||
       (apiKey == ApiKey.AddPartitionsToTxn && version >= 3) ||
+      ((apiKey == ApiKey.AddOffsetsToTxn || apiKey == ApiKey.EndTxn || apiKey == ApiKey.TxnOffsetCommit) && version >= 3) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
