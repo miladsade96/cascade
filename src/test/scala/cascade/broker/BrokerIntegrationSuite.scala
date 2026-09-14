@@ -972,6 +972,38 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("serves resumable flexible producer initialization without double epoch bumps") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        def initialize(correlationId: Int, producerId: Long, producerEpoch: Short): (Short, Long, Short) =
+          val writer = requestHeader(ApiKey.InitProducerId, 4, correlationId, flexible = true)
+            .writeCompactNullableString(Some("resumable-producer"))
+            .writeInt(30_000)
+            .writeLong(producerId)
+            .writeShort(producerEpoch)
+            .writeEmptyTaggedFields()
+          val response = request(output, input, writer.result())
+          assertEquals(response.readInt(), correlationId)
+          response.skipTaggedFields()
+          response.readInt()
+          val result = (response.readShort(), response.readLong(), response.readShort())
+          response.skipTaggedFields()
+          response.ensureFullyRead()
+          result
+
+        val first = initialize(97, -1L, -1)
+        assertEquals(first._1, Errors.None)
+        val bumped = initialize(98, first._2, first._3)
+        assertEquals(bumped, (Errors.None, first._2, 1.toShort))
+        assertEquals(initialize(99, first._2, first._3), bumped)
+        assertEquals(initialize(100, first._2, 7.toShort)._1, Errors.ProducerFenced)
+      finally socket.close()
+    }
+  }
+
   private def apiVersionsRequest(correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.ApiVersions, 4, correlationId, flexible = true)
     writer.writeCompactString("cascade-test").writeCompactString("1.0").writeEmptyTaggedFields().result()
