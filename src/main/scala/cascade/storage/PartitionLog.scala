@@ -338,6 +338,11 @@ final class PartitionLog(
     recentProducerBatches.get(producerId).fold(Vector.empty)(_.toVector)
   }
 
+  /** Latest retained sequence state for DescribeProducers, ordered independently of hash-map iteration. */
+  def latestProducerBatches: Vector[RecordBatchMetadata] = synchronized {
+    recentProducerBatches.valuesIterator.flatMap(_.lastOption).toVector.sortBy(_.producerId)
+  }
+
   def offsetForTimestamp(timestamp: Long): Long = synchronized {
     if timestamp == -2L then logStartOffset
     else if timestamp == -1L then committedOffset
