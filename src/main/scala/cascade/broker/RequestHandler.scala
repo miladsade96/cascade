@@ -141,6 +141,7 @@ final class RequestHandler(
       case ApiKey.EndTxn => endTxn(body)
       case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
       case ApiKey.DescribeTransactions => describeTransactions(body, session)
+      case ApiKey.ListTransactions => listTransactions(header.apiVersion, body, session)
       case ApiKey.Produce      => produce(body, session)
       case ApiKey.Fetch        => fetch(body, session)
       case ApiKey.ListOffsets  => listOffsets(body, session)
@@ -1860,6 +1861,45 @@ final class RequestHandler(
         writer.writeCompactArray(partitions.sortBy(_.partition)) { value => writer.writeInt(value.partition): Unit }
         writer.writeEmptyTaggedFields(): Unit
       }
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def listTransactions(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val stateFilters = cursor.readCompactArray(cursor.readCompactString())
+    val producerFilters = cursor.readCompactArray(cursor.readLong())
+    val durationFilter = if version >= 1 then cursor.readLong() else -1L
+    val pattern = if version >= 2 then cursor.readCompactNullableString() else None
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val knownStates = TransactionState.values.map(_.wireName).toSet
+    val unknownStates = stateFilters.distinct.filterNot(knownStates)
+    val compiledPattern = pattern.filter(_.nonEmpty).map { value =>
+      try Right(java.util.regex.Pattern.compile(value))
+      catch case _: java.util.regex.PatternSyntaxException => Left(Errors.InvalidRegularExpression)
+    }
+    val patternError = compiledPattern.collectFirst { case Left(error) => error }
+    val transactions =
+      if patternError.nonEmpty then Vector.empty
+      else
+        val matcher = compiledPattern.collectFirst { case Right(value) => value }
+        deliveryCoordinator.listTransactions().filter { transaction =>
+          isTransactionCoordinatorFor(transaction.transactionalId) &&
+          isAuthorized(session, AclOperation.Describe, ResourceType.TransactionalId, transaction.transactionalId) &&
+          (stateFilters.isEmpty || stateFilters.contains(transaction.state.wireName)) &&
+          (producerFilters.isEmpty || producerFilters.contains(transaction.producerId)) &&
+          (durationFilter < 0L || transaction.durationMillis.exists(_ > durationFilter)) &&
+          matcher.forall(_.matcher(transaction.transactionalId).matches())
+        }
+
+    val writer = ByteWriter().writeInt(0).writeShort(patternError.getOrElse(Errors.None))
+    writer.writeCompactArray(unknownStates)(writer.writeCompactString)
+    writer.writeCompactArray(transactions) { transaction =>
+      writer.writeCompactString(transaction.transactionalId)
+      writer.writeLong(transaction.producerId)
+      writer.writeCompactString(transaction.state.wireName)
       writer.writeEmptyTaggedFields(): Unit
     }
     writer.writeEmptyTaggedFields()
