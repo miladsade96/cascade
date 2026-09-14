@@ -142,6 +142,7 @@ final class RequestHandler(
       case ApiKey.TxnOffsetCommit => txnOffsetCommit(body)
       case ApiKey.DescribeTransactions => describeTransactions(body, session)
       case ApiKey.ListTransactions => listTransactions(header.apiVersion, body, session)
+      case ApiKey.DescribeProducers => describeProducers(body, session)
       case ApiKey.Produce      => produce(body, session)
       case ApiKey.Fetch        => fetch(body, session)
       case ApiKey.ListOffsets  => listOffsets(body, session)
@@ -1900,6 +1901,49 @@ final class RequestHandler(
       writer.writeCompactString(transaction.transactionalId)
       writer.writeLong(transaction.producerId)
       writer.writeCompactString(transaction.state.wireName)
+      writer.writeEmptyTaggedFields(): Unit
+    }
+    writer.writeEmptyTaggedFields()
+    Some(writer.result())
+
+  private def describeProducers(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val requested = cursor.readCompactArray {
+      val topic = cursor.readCompactString()
+      val partitions = cursor.readCompactArray(cursor.readInt())
+      cursor.skipTaggedFields()
+      topic -> partitions
+    }
+    cursor.skipTaggedFields()
+    cursor.ensureFullyRead()
+
+    val writer = ByteWriter().writeInt(0)
+    writer.writeCompactArray(requested) { case (topic, partitions) =>
+      writer.writeCompactString(topic)
+      writer.writeCompactArray(partitions) { partition =>
+        val metadata = clusterManager.partition(topic, partition)
+        val (error, producers) =
+          if !isAuthorized(session, AclOperation.Read, ResourceType.Topic, topic) then
+            Errors.TopicAuthorizationFailed -> Vector.empty
+          else if clusterManager.isEnabled && metadata.isEmpty then Errors.UnknownTopicOrPartition -> Vector.empty
+          else if clusterManager.isEnabled && metadata.exists(_.leaderId != config.nodeId) then
+            Errors.NotLeaderOrFollower -> Vector.empty
+          else deliveryCoordinator.describeProducers(topic, partition) match
+            case Some(values) => Errors.None -> values
+            case None         => Errors.UnknownTopicOrPartition -> Vector.empty
+        writer.writeInt(partition)
+        writer.writeShort(error)
+        writer.writeCompactNullableString(None)
+        writer.writeCompactArray(producers) { producer =>
+          writer.writeLong(producer.producerId)
+          writer.writeInt(producer.producerEpoch.toInt)
+          writer.writeInt(producer.lastSequence)
+          writer.writeLong(producer.lastTimestamp)
+          writer.writeInt(-1)
+          writer.writeLong(producer.currentTransactionStartOffset.getOrElse(-1L))
+          writer.writeEmptyTaggedFields(): Unit
+        }
+        writer.writeEmptyTaggedFields(): Unit
+      }
       writer.writeEmptyTaggedFields(): Unit
     }
     writer.writeEmptyTaggedFields()
