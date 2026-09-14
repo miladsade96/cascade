@@ -311,6 +311,52 @@ final class DeliveryCoordinator(
 
   private[cascade] def acknowledgedReadView: DeliveryReadView = acknowledged
 
+  /** Transaction administration reads one complete acknowledged image without taking the mutation monitor. */
+  def describeTransaction(transactionalId: String): Option[TransactionDescription] =
+    val image = acknowledgedImage
+    image.producerByTransactionalId.get(transactionalId).map { producer =>
+      image.activeByTransactionalId.get(transactionalId) match
+        case Some(active) =>
+          TransactionDescription(
+            transactionalId,
+            TransactionState.Ongoing,
+            active.timeoutMillis,
+            active.startedAtMillis,
+            producer.producerId,
+            producer.producerEpoch,
+            active.partitions.distinct.sortBy(value => (value.topic, value.partition))
+          )
+        case None =>
+          TransactionDescription(
+            transactionalId,
+            TransactionState.Empty,
+            producer.transactionTimeoutMillis,
+            -1L,
+            producer.producerId,
+            producer.producerEpoch,
+            Vector.empty
+          )
+    }
+
+  def listTransactions(nowMillis: Long = System.currentTimeMillis()): Vector[TransactionListing] =
+    val image = acknowledgedImage
+    image.producers.iterator
+      .flatMap { producer =>
+        producer.transactionalId.map { transactionalId =>
+          image.activeByTransactionalId.get(transactionalId) match
+            case Some(active) =>
+              TransactionListing(
+                transactionalId,
+                producer.producerId,
+                TransactionState.Ongoing,
+                Some(math.max(0L, nowMillis - active.startedAtMillis))
+              )
+            case None => TransactionListing(transactionalId, producer.producerId, TransactionState.Empty, None)
+        }
+      }
+      .toVector
+      .sortBy(_.transactionalId)
+
   private[cascade] def lastStableOffset(
       view: DeliveryReadView,
       topic: String,
