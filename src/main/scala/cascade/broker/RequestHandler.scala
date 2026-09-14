@@ -135,7 +135,7 @@ final class RequestHandler(
       case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
       case ApiKey.AddRaftVoter => addRaftVoter(header.apiVersion, body)
       case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
-      case ApiKey.InitProducerId => initProducerId(body)
+      case ApiKey.InitProducerId => initProducerId(header.apiVersion, body)
       case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(body)
       case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(body)
       case ApiKey.EndTxn => endTxn(body)
@@ -1730,28 +1730,44 @@ final class RequestHandler(
     }
     Some(writer.result())
 
-  private def initProducerId(cursor: ByteCursor): Option[Array[Byte]] =
-    val transactionalId = cursor.readNullableString()
+  private def initProducerId(version: Short, cursor: ByteCursor): Option[Array[Byte]] =
+    val flexible = version >= 2
+    val transactionalId = if flexible then cursor.readCompactNullableString() else cursor.readNullableString()
     val timeoutMillis = cursor.readInt()
+    val expected =
+      if version >= 3 then
+        val producerId = cursor.readLong()
+        val producerEpoch = cursor.readShort()
+        if producerId == -1L && producerEpoch == -1 then Right(None)
+        else if producerId >= 0L && producerEpoch >= 0 then Right(Some(producerId -> producerEpoch))
+        else Left(Errors.InvalidRequest)
+      else Right(None)
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
     val initialized =
-      if transactionalId.fold(!clusterManager.isBrokerFenced)(isTransactionCoordinatorFor) then
-        deliveryCoordinator.initProducerId(transactionalId, timeoutMillis)
-      else InitProducerIdResult(Errors.NotCoordinator, -1L, -1)
+      expected match
+        case Left(error) => InitProducerIdResult(error, -1L, -1)
+        case Right(expectedProducer) =>
+          if transactionalId.fold(!clusterManager.isBrokerFenced)(isTransactionCoordinatorFor) then
+            deliveryCoordinator.initProducerId(transactionalId, timeoutMillis, expectedProducer)
+          else InitProducerIdResult(Errors.NotCoordinator, -1L, -1)
     // Anonymous IDs use the quorum allocator, not a transaction coordinator. A retry must not
     // direct Kafka clients to look up a null transactional ID after fencing or a shard conflict.
     val result =
       if transactionalId.isEmpty && Set(Errors.NotCoordinator, Errors.CoordinatorNotAvailable).contains(initialized.errorCode) then
         initialized.copy(errorCode = Errors.CoordinatorLoadInProgress)
       else initialized
-    Some(
+    val compatibleResult =
+      if result.errorCode == Errors.ProducerFenced && version < 4 then result.copy(errorCode = Errors.InvalidProducerEpoch)
+      else result
+    val writer =
       ByteWriter()
         .writeInt(0)
-        .writeShort(result.errorCode)
-        .writeLong(result.producerId)
-        .writeShort(result.producerEpoch)
-        .result()
-    )
+        .writeShort(compatibleResult.errorCode)
+        .writeLong(compatibleResult.producerId)
+        .writeShort(compatibleResult.producerEpoch)
+    if flexible then writer.writeEmptyTaggedFields()
+    Some(writer.result())
 
   private def addPartitionsToTxn(cursor: ByteCursor): Option[Array[Byte]] =
     val transactionalId = cursor.readString()
@@ -1951,7 +1967,7 @@ final class RequestHandler(
 
   private def authorizeControlRequest(apiKey: Short, frame: Array[Byte], session: ConnectionSession): Unit =
     if authorizer.isEmpty then return
-    val (_, cursor) = RequestHeader.decode(frame)
+    val (requestHeader, cursor) = RequestHeader.decode(frame)
     apiKey match
       case ApiKey.JoinGroup | ApiKey.Heartbeat | ApiKey.LeaveGroup |
           ApiKey.SyncGroup =>
@@ -1961,7 +1977,10 @@ final class RequestHandler(
       case ApiKey.OffsetDelete =>
         requireAuthorized(session, AclOperation.Delete, ResourceType.Group, cursor.readString())
       case ApiKey.InitProducerId =>
-        cursor.readNullableString() match
+        val transactionalId =
+          if requestHeader.apiVersion >= 2 then cursor.readCompactNullableString()
+          else cursor.readNullableString()
+        transactionalId match
           case Some(transactionalId) =>
             requireAuthorized(session, AclOperation.Write, ResourceType.TransactionalId, transactionalId)
           case None => requireAuthorized(session, AclOperation.IdempotentWrite, ResourceType.Cluster, "cascade")
