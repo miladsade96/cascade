@@ -129,6 +129,31 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("expected producer epochs make initialization retries stable") {
+    val directory = Files.createTempDirectory("cascade-delivery-init-retry")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val first = delivery.initProducerId(Some("retrying"), 30_000)
+        val bumped = delivery.initProducerId(Some("retrying"), 30_000, Some(first.producerId -> first.producerEpoch))
+        assertEquals(bumped.producerEpoch, 1.toShort)
+        assertEquals(
+          delivery.initProducerId(Some("retrying"), 30_000, Some(first.producerId -> first.producerEpoch)),
+          bumped
+        )
+        val next = delivery.initProducerId(Some("retrying"), 30_000, Some(bumped.producerId -> bumped.producerEpoch))
+        assertEquals(next.producerEpoch, 2.toShort)
+        assertEquals(
+          delivery.initProducerId(Some("retrying"), 30_000, Some(next.producerId -> 0.toShort)).errorCode,
+          Errors.ProducerFenced
+        )
+        assertEquals(
+          delivery.initProducerId(Some("missing"), 30_000, Some(99L -> 1.toShort)).errorCode,
+          Errors.ProducerFenced
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("transactional offsets commit once and are not replayed over a newer offset") {
     val directory = Files.createTempDirectory("cascade-delivery-offsets")
     val key = GroupOffsetKey("workers", "events", 0)
