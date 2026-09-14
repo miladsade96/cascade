@@ -144,6 +144,9 @@ object Compatibility:
     ApiVersion(ApiKey.AlterPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.ListPartitionReassignments, 0, 0),
     ApiVersion(ApiKey.DescribeQuorum, 0, 2),
+    ApiVersion(ApiKey.DescribeProducers, 0, 0),
+    ApiVersion(ApiKey.DescribeTransactions, 0, 0),
+    ApiVersion(ApiKey.ListTransactions, 0, 2),
     ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 1),
     ApiVersion(ApiKey.ConsumerGroupDescribe, 0, 1),
     ApiVersion(ApiKey.AddRaftVoter, 0, 1),
@@ -165,6 +168,7 @@ object Compatibility:
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
+      apiKey == ApiKey.DescribeProducers || apiKey == ApiKey.DescribeTransactions || apiKey == ApiKey.ListTransactions ||
       apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
   // ApiVersions deliberately retains response header v0 even for flexible body versions.
@@ -178,6 +182,7 @@ object Compatibility:
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
+      apiKey == ApiKey.DescribeProducers || apiKey == ApiKey.DescribeTransactions || apiKey == ApiKey.ListTransactions ||
       apiKey == ApiKey.AddRaftVoter || apiKey == ApiKey.RemoveRaftVoter
 
 final case class RequestHeader(
