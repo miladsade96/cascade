@@ -10,7 +10,18 @@ For the Kafka 4.3.1 consumer-protocol milestone I run the wire, coordinator, rea
 .\sbt.bat "testOnly cascade.protocol.CompatibilityContractSuite cascade.group.GroupStateSuite cascade.group.OffsetStoreSuite cascade.group.GroupCoordinatorSuite cascade.broker.BrokerIntegrationSuite cascade.e2e.KafkaClientEndToEndSuite cascade.cluster.CoordinatorReadIsolationQuorumSuite"
 ```
 
-The final release gate is still `.\sbt.bat test`. The 2026-09-13 run passed 552/552 tests in 182 seconds. That result is correctness and local regression evidence, not a multi-day churn or dedicated-host capacity result.
+The final release gate is still `.\sbt.bat test`. The 2026-09-14 run passed 564/564 tests in 179 seconds. That result is correctness and local regression evidence, not a multi-day churn or dedicated-host capacity result.
+
+## Delivery semantics
+
+I run the complete wire/coordinator/client regression and a configurable exact transaction churn campaign:
+
+```powershell
+.\sbt.bat "testOnly cascade.protocol.CompatibilityContractSuite cascade.delivery.DeliveryCoordinatorSuite cascade.delivery.DeliveryReadViewSuite cascade.group.GroupCoordinatorSuite cascade.broker.BrokerIntegrationSuite cascade.e2e.KafkaClientEndToEndSuite cascade.qualification.DeliverySemanticsQualificationSuite"
+.\sbt.bat "Test / runMain cascade.qualification.DeliverySemanticsQualification --transactions 256 --concurrency 16 --report artifacts/delivery-semantics-1.6.0.json"
+```
+
+I require exact committed and uncommitted value sets, no duplicates or omissions, and the same committed set after broker restart. The 2026-09-14 development-host run passed with 256 transactional IDs, 16 concurrent workers, 256 committed records, 512 uncommitted records, 256 recovered committed records, and zero mismatches. The [dated report](performance/2026-09-14-delivery-semantics.md) keeps the scope and remaining limits.
 
 ## Coordinator read isolation
 

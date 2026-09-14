@@ -58,7 +58,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Language-neutral access | Length-prefixed Kafka TCP frames and an explicit `ApiVersions` contract; no custom client library required |
 | Pure Scala/JDK runtime | Scala 3 broker implementation with Java 21 virtual threads and positional file I/O |
 | Efficient record path | Kafka magic-v2 batches remain compressed and opaque; the broker updates only the base offset outside the batch CRC region |
-| Delivery guarantees | Producer IDs, epoch fencing, bounded duplicate detection, sequence recovery, transactions, timeouts, transactional offsets, and `read_committed` |
+| Delivery guarantees | Producer IDs, resumable epoch fencing, bounded duplicate detection, sequence recovery, flexible transaction RPCs, transactional offsets, `read_committed`, and Kafka Admin delivery inspection |
 | Durable state | CRC32C-protected data journals, quorum metadata, and forced format-12 journals for 64 group shards, 64 transaction shards, and the producer allocator |
 | Consumer coordination | Classic join/sync plus ConsumerGroupHeartbeat v0-v1, cooperative server assignment, regex subscriptions, detailed modern descriptions, and complete offset administration |
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
@@ -400,11 +400,11 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | SaslHandshake | 17 | 1 | Negotiate `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, or `OAUTHBEARER` before authentication |
 | ApiVersions | 18 | 0-4 | Legacy and flexible encodings with tagged fields |
 | CreateTopics | 19 | 2 | Validation and quorum-committed topic metadata |
-| InitProducerId | 22 | 1 | Durable producer IDs, epoch allocation, and fencing |
-| AddPartitionsToTxn | 24 | 1 | Transaction partition enrollment and timeout start |
-| AddOffsetsToTxn | 25 | 1 | Consumer-group enrollment in a transaction |
-| EndTxn | 26 | 1 | Durable commit/abort outcome and offset-application checkpoint |
-| TxnOffsetCommit | 28 | 2 | Staged offsets made visible only by transaction commit |
+| InitProducerId | 22 | 0-5 | Durable producer IDs, resumable expected-epoch allocation, and fencing |
+| AddPartitionsToTxn | 24 | 0-5 | Legacy/flexible enrollment, batched transactions, and verify-only admission |
+| AddOffsetsToTxn | 25 | 0-4 | Legacy/flexible consumer-group enrollment in a transaction |
+| EndTxn | 26 | 0-4 | Durable commit/abort outcome and offset-application checkpoint |
+| TxnOffsetCommit | 28 | 0-4 | Flexible member-aware offsets made visible only by transaction commit |
 | DescribeAcls | 29 | 1 | List exact, prefix, wildcard, allow, and deny ACL bindings |
 | CreateAcls | 30 | 1 | Atomically persist and activate Kafka ACL bindings |
 | DeleteAcls | 31 | 1 | Filter, remove, persist, and report matching ACL bindings |
@@ -415,6 +415,9 @@ Cascade returns exactly this matrix from `ApiVersions`:
 | AlterPartitionReassignments | 45 | 0 | Start, replace, or cancel a durable online replica move |
 | ListPartitionReassignments | 46 | 0 | Report intermediate, adding, and removing replicas |
 | OffsetDelete | 47 | 0 | Selected offset deletion with active-subscription protection |
+| DescribeProducers | 61 | 0 | Acknowledged producer epochs, sequences, timestamps, and active transaction offsets |
+| DescribeTransactions | 65 | 0 | Acknowledged transaction state, producer identity, timeout, start time, and partitions |
+| ListTransactions | 66 | 0-2 | State, producer ID, duration, and regular-expression filtering |
 | ConsumerGroupHeartbeat | 68 | 0-1 | Member epochs, explicit/regex subscriptions, cooperative server assignment, static identity, and leave/rejoin |
 | ConsumerGroupDescribe | 69 | 0-1 | Detailed modern membership, current/target assignments, group type, and authorized operations |
 | DescribeQuorum | 55 | 0-2 | Metadata leader, epoch, high watermark, voter identities, and endpoints |
@@ -555,7 +558,7 @@ On 2026-09-02 I qualified shard-scoped coordinator commits with **3,000 offset w
 
 I then qualified incremental coordinator journal/peer records at version 1.2.0: **3,000 writes and 1,000/1,000 exact offsets** passed through failover and restart, with measured delta traffic on disk and wire. Throughput was **25.664 writes/s** and p99 was **4,103.894 ms**, so this is still not production-capacity evidence. The latest one-million-record regression consumed exactly **1,000,000** records at **468,221 produced records/s** and **515,511 consumed records/s**. Both pinned rolling campaigns passed 40-record and committed-offset checks.
 
-The coordinator completion implementation adds majority decision certificates, distributed decision queries and recovery, conflict-driven voter-baseline reconciliation, atomic per-shard journal checkpoints, recovery/compaction metrics, independent group and delivery mutation monitors, and lifecycle controls. The latest [1,000-group campaign](docs/performance/2026-09-12-coordinator-completion.md) verified **3,000 writes and 1,000/1,000 final offsets** through controller loss and full restart with **668/668** successful quorum transactions. The [consumer-protocol milestone](docs/performance/2026-09-13-consumer-protocol.md) then passed a complete **552/552** regression in **3 minutes 2 seconds**, including real Kafka 4.3.1 heartbeat v1, regex subscription, topic-ID offset commit/fetch, detailed Admin description, selected offset deletion, and acknowledged-read isolation. Dedicated-host RF=3 capacity, multi-day churn, and physical fault evidence remain open.
+The coordinator completion implementation adds majority decision certificates, distributed decision queries and recovery, conflict-driven voter-baseline reconciliation, atomic per-shard journal checkpoints, recovery/compaction metrics, independent group and delivery mutation monitors, and lifecycle controls. The latest [1,000-group campaign](docs/performance/2026-09-12-coordinator-completion.md) verified **3,000 writes and 1,000/1,000 final offsets** through controller loss and full restart with **668/668** successful quorum transactions. The [delivery-semantics milestone](docs/performance/2026-09-14-delivery-semantics.md) passed **564/564** tests and an exact 256-transaction campaign with 16 concurrent workers, commit/abort isolation, and restart recovery. Dedicated-host RF=3 capacity, multi-day churn, Kafka transaction protocol V2, and physical fault evidence remain open.
 
 - Unit tests for binary codecs, the frozen 1.0.0 API contract, record batches, storage/coordinator recovery, delivery semantics, cluster metadata, SCRAM, strict JSON/JWKS parsing, RSA/EC/Ed25519 JWT validation, role mapping, credential and peer policy, TLS reload/rejection, quotas, metrics, health/readiness, capacity evaluation, structured-log rotation, backup integrity, deployment artifacts, and maintenance commands.
 - TCP integration tests for discovery, Produce/Fetch, idempotence, OffsetCommit v5-v10, OffsetFetch v4-v10, OffsetDelete v0, ConsumerGroupHeartbeat v0-v1, ConsumerGroupDescribe v0-v1, flexible administration, TLS, SASL, malformed exchanges, live policy rotation, auditing, quotas, and operational HTTP state.
