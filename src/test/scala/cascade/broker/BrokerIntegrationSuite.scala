@@ -845,6 +845,133 @@ final class BrokerIntegrationSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("serves flexible transaction and producer administration from live delivery state") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("delivery-admin", correlationId = 90))
+
+        val initialized = request(
+          output,
+          input,
+          requestHeader(ApiKey.InitProducerId, 1, 91)
+            .writeNullableString(Some("admin-transaction"))
+            .writeInt(30_000)
+            .result()
+        )
+        assertEquals(initialized.readInt(), 91)
+        initialized.readInt()
+        assertEquals(initialized.readShort(), Errors.None)
+        val producerId = initialized.readLong()
+        val producerEpoch = initialized.readShort()
+        initialized.ensureFullyRead()
+
+        val add = requestHeader(ApiKey.AddPartitionsToTxn, 1, 92)
+          .writeString("admin-transaction")
+          .writeLong(producerId)
+          .writeShort(producerEpoch)
+        add.writeArray(Vector("delivery-admin")) { topic =>
+          add.writeString(topic).writeArray(Vector(0))(add.writeInt): Unit
+        }
+        val added = request(output, input, add.result())
+        assertEquals(added.readInt(), 92)
+        added.readInt()
+        assertEquals(added.readInt(), 1)
+        assertEquals(added.readString(), "delivery-admin")
+        assertEquals(added.readInt(), 1)
+        assertEquals(added.readInt(), 0)
+        assertEquals(added.readShort(), Errors.None)
+        added.ensureFullyRead()
+
+        val records = TestRecordBatch.producer(producerId, producerEpoch, 0, transactional = true)
+        val produce = requestHeader(ApiKey.Produce, 3, 93)
+          .writeNullableString(Some("admin-transaction"))
+          .writeShort(1)
+          .writeInt(30_000)
+        produce.writeArray(Vector("delivery-admin")) { topic =>
+          produce.writeString(topic)
+          produce.writeArray(Vector(0)) { partition =>
+            produce.writeInt(partition).writeNullableBytes(Some(records)): Unit
+          }: Unit
+        }
+        assertProduceResult(request(output, input, produce.result()), 93, Errors.None, 0L, "delivery-admin")
+
+        val describe = requestHeader(ApiKey.DescribeTransactions, 0, 94, flexible = true)
+        describe.writeCompactArray(Vector("admin-transaction"))(describe.writeCompactString).writeEmptyTaggedFields()
+        val described = request(output, input, describe.result())
+        assertEquals(described.readInt(), 94)
+        described.skipTaggedFields()
+        assertEquals(described.readInt(), 0)
+        assertEquals(described.readUnsignedVarInt(), 2)
+        assertEquals(described.readShort(), Errors.None)
+        assertEquals(described.readCompactString(), "admin-transaction")
+        assertEquals(described.readCompactString(), "Ongoing")
+        assertEquals(described.readInt(), 30_000)
+        assert(described.readLong() > 0L)
+        assertEquals(described.readLong(), producerId)
+        assertEquals(described.readShort(), producerEpoch)
+        assertEquals(described.readUnsignedVarInt(), 2)
+        assertEquals(described.readCompactString(), "delivery-admin")
+        assertEquals(described.readUnsignedVarInt(), 2)
+        assertEquals(described.readInt(), 0)
+        described.skipTaggedFields()
+        described.skipTaggedFields()
+        described.skipTaggedFields()
+        described.ensureFullyRead()
+
+        val list = requestHeader(ApiKey.ListTransactions, 2, 95, flexible = true)
+        list.writeCompactArray(Vector("Ongoing"))(list.writeCompactString)
+        list.writeCompactArray(Vector(producerId))(list.writeLong)
+        list.writeLong(-1L).writeCompactNullableString(Some("admin-.*")).writeEmptyTaggedFields()
+        val listed = request(output, input, list.result())
+        assertEquals(listed.readInt(), 95)
+        listed.skipTaggedFields()
+        listed.readInt()
+        assertEquals(listed.readShort(), Errors.None)
+        assertEquals(listed.readUnsignedVarInt(), 1)
+        assertEquals(listed.readUnsignedVarInt(), 2)
+        assertEquals(listed.readCompactString(), "admin-transaction")
+        assertEquals(listed.readLong(), producerId)
+        assertEquals(listed.readCompactString(), "Ongoing")
+        listed.skipTaggedFields()
+        listed.skipTaggedFields()
+        listed.ensureFullyRead()
+
+        val describeProducers = requestHeader(ApiKey.DescribeProducers, 0, 96, flexible = true)
+        describeProducers.writeCompactArray(Vector("delivery-admin")) { topic =>
+          describeProducers.writeCompactString(topic)
+          describeProducers.writeCompactArray(Vector(0))(describeProducers.writeInt)
+          describeProducers.writeEmptyTaggedFields(): Unit
+        }
+        describeProducers.writeEmptyTaggedFields()
+        val producerState = request(output, input, describeProducers.result())
+        assertEquals(producerState.readInt(), 96)
+        producerState.skipTaggedFields()
+        producerState.readInt()
+        assertEquals(producerState.readUnsignedVarInt(), 2)
+        assertEquals(producerState.readCompactString(), "delivery-admin")
+        assertEquals(producerState.readUnsignedVarInt(), 2)
+        assertEquals(producerState.readInt(), 0)
+        assertEquals(producerState.readShort(), Errors.None)
+        assertEquals(producerState.readCompactNullableString(), None)
+        assertEquals(producerState.readUnsignedVarInt(), 2)
+        assertEquals(producerState.readLong(), producerId)
+        assertEquals(producerState.readInt(), producerEpoch.toInt)
+        assertEquals(producerState.readInt(), 0)
+        assertEquals(producerState.readLong(), 0L)
+        assertEquals(producerState.readInt(), -1)
+        assertEquals(producerState.readLong(), 0L)
+        producerState.skipTaggedFields()
+        producerState.skipTaggedFields()
+        producerState.skipTaggedFields()
+        producerState.skipTaggedFields()
+        producerState.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   private def apiVersionsRequest(correlationId: Int): Array[Byte] =
     val writer = requestHeader(ApiKey.ApiVersions, 4, correlationId, flexible = true)
     writer.writeCompactString("cascade-test").writeCompactString("1.0").writeEmptyTaggedFields().result()
