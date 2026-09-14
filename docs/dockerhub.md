@@ -23,7 +23,7 @@ This example advertises `localhost` for local development. For remote clients I 
 
 ## Scope
 
-Cascade is **not yet a production-grade Kafka replacement**. The 1.5.0 source tree adds the complete Kafka 4.3.1 modern consumer surface on top of the 1.4.0 coordinator architecture, but the published 1.3.1 image predates both milestones. Multi-day soak, dedicated-host capacity, physical power/device loss, and published-image rolling-upgrade boundaries remain open. A post-publication scan of 1.3.0 found 21 base-image vulnerabilities; I preserve that historical tag and address the findings in 1.3.1. Exact qualification, current scan results, publication status, and immutable digests are in the release notes. A clean scan is point-in-time evidence, not a permanent security guarantee.
+Cascade is **not yet a production-grade Kafka replacement**. The 1.6.0 source tree adds modern delivery semantics and administration on top of the 1.5.0 consumer protocol and 1.4.0 coordinator architecture, but the published 1.3.1 image predates those milestones. Multi-day soak, dedicated-host capacity, transaction protocol V2, physical power/device loss, and published-image rolling-upgrade boundaries remain open. A post-publication scan of 1.3.0 found 21 base-image vulnerabilities; I preserve that historical tag and address the findings in 1.3.1. Exact qualification, current scan results, publication status, and immutable digests are in the release notes. A clean scan is point-in-time evidence, not a permanent security guarantee.
 
 - [Source and API compatibility](https://github.com/miladsade96/cascade)
 - [Container guide](https://github.com/miladsade96/cascade/blob/main/docs/containers.md)
