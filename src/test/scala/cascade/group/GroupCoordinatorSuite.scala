@@ -7,6 +7,36 @@ import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 final class GroupCoordinatorSuite extends FunSuite:
+  test("transactional offset validation fences stale consumer epochs without mutation") {
+    val directory = Files.createTempDirectory("cascade-transaction-member-validation")
+    val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)
+    try
+      val joined = coordinator.consumerHeartbeat(
+        ConsumerHeartbeatCommand(
+          "transaction-workers", "member-a", 0, None, None, 30_000,
+          Some(Vector("events")), None, Some(Vector.empty)
+        ),
+        _ => 1
+      )
+      assertEquals(joined.errorCode, Errors.None)
+      assertEquals(
+        coordinator.validateOffsetCommit("transaction-workers", joined.memberEpoch, "member-a", None),
+        Errors.None
+      )
+      assertEquals(
+        coordinator.validateOffsetCommit("transaction-workers", joined.memberEpoch - 1, "member-a", None),
+        Errors.StaleMemberEpoch
+      )
+      assertEquals(
+        coordinator.validateOffsetCommit("transaction-workers", joined.memberEpoch, "missing-member", None),
+        Errors.UnknownMemberId
+      )
+      assertEquals(coordinator.fetchOffset(GroupOffsetKey("transaction-workers", "events", 0)), None)
+    finally
+      coordinator.close()
+      deleteTree(directory)
+  }
+
   test("consumer protocol assigns on heartbeat and advances members without a join-sync barrier") {
     val directory = Files.createTempDirectory("cascade-consumer-heartbeat-test")
     val coordinator = GroupCoordinator(directory.resolve("offsets.log"), scheduleExpiration = false)

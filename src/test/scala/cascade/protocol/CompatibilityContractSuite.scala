@@ -47,7 +47,7 @@ final class CompatibilityContractSuite extends FunSuite:
     }
   }
 
-  test("the 1.5.0 consumer protocol contract advertises every implemented version") {
+  test("the delivery and consumer protocol contract advertises every implemented version") {
     val current = Compatibility.supported.map(version => version.apiKey -> version).toMap
     assertEquals(current(ApiKey.ConsumerGroupHeartbeat), ApiVersion(ApiKey.ConsumerGroupHeartbeat, 0, 1))
     assertEquals(current(ApiKey.ConsumerGroupDescribe), ApiVersion(ApiKey.ConsumerGroupDescribe, 0, 1))
@@ -59,6 +59,11 @@ final class CompatibilityContractSuite extends FunSuite:
     assertEquals(current(ApiKey.DescribeProducers), ApiVersion(ApiKey.DescribeProducers, 0, 0))
     assertEquals(current(ApiKey.DescribeTransactions), ApiVersion(ApiKey.DescribeTransactions, 0, 0))
     assertEquals(current(ApiKey.ListTransactions), ApiVersion(ApiKey.ListTransactions, 0, 2))
+    assertEquals(current(ApiKey.InitProducerId), ApiVersion(ApiKey.InitProducerId, 0, 5))
+    assertEquals(current(ApiKey.AddPartitionsToTxn), ApiVersion(ApiKey.AddPartitionsToTxn, 0, 5))
+    assertEquals(current(ApiKey.AddOffsetsToTxn), ApiVersion(ApiKey.AddOffsetsToTxn, 0, 4))
+    assertEquals(current(ApiKey.EndTxn), ApiVersion(ApiKey.EndTxn, 0, 4))
+    assertEquals(current(ApiKey.TxnOffsetCommit), ApiVersion(ApiKey.TxnOffsetCommit, 0, 4))
     assert(Compatibility.isFlexibleRequest(ApiKey.ConsumerGroupDescribe, 0))
     assert(Compatibility.isFlexibleRequest(ApiKey.OffsetCommit, 8))
     assert(Compatibility.isFlexibleRequest(ApiKey.OffsetFetch, 6))
@@ -66,4 +71,10 @@ final class CompatibilityContractSuite extends FunSuite:
     assert(Compatibility.isFlexibleRequest(ApiKey.DescribeProducers, 0))
     assert(Compatibility.isFlexibleRequest(ApiKey.DescribeTransactions, 0))
     assert(Compatibility.isFlexibleRequest(ApiKey.ListTransactions, 2))
+    assert(Compatibility.isFlexibleRequest(ApiKey.InitProducerId, 5))
+    assert(Compatibility.isFlexibleRequest(ApiKey.AddPartitionsToTxn, 5))
+    assert(Compatibility.isFlexibleRequest(ApiKey.AddOffsetsToTxn, 4))
+    assert(Compatibility.isFlexibleRequest(ApiKey.EndTxn, 4))
+    assert(Compatibility.isFlexibleRequest(ApiKey.TxnOffsetCommit, 4))
+    assert(!Compatibility.isFlexibleRequest(ApiKey.TxnOffsetCommit, 2))
   }
