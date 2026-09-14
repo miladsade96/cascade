@@ -184,6 +184,23 @@ final class DeliveryCoordinator(
             if committed then Errors.None else Errors.CoordinatorNotAvailable
   }
 
+  def verifyPartitions(
+      transactionalId: String,
+      producerId: Long,
+      producerEpoch: Short,
+      partitions: Vector[TopicPartition]
+  ): Vector[(TopicPartition, Short)] = stateLock.synchronized {
+    awaitTransactionalAppends(transactionalId)
+    expireTransactionsLocked(System.currentTimeMillis())
+    activeFor(transactionalId, producerId, producerEpoch) match
+      case Left(error) => partitions.map(_ -> error)
+      case Right(active) =>
+        val enrolled = active.partitions.toSet
+        partitions.map { partition =>
+          partition -> (if enrolled(partition) then Errors.None else Errors.TransactionAbortable)
+        }
+  }
+
   def addOffsets(transactionalId: String, producerId: Long, producerEpoch: Short, groupId: String): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())

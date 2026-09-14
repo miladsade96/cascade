@@ -154,6 +154,26 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("verify-only partition enrollment reports transaction-abortable gaps") {
+    val directory = Files.createTempDirectory("cascade-delivery-verify-partitions")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("verifier"), 30_000)
+        val enrolled = TopicPartition("events", 0)
+        val missing = TopicPartition("events", 1)
+        assertEquals(delivery.addPartitions("verifier", producer.producerId, producer.producerEpoch, Vector(enrolled)), Errors.None)
+        assertEquals(
+          delivery.verifyPartitions("verifier", producer.producerId, producer.producerEpoch, Vector(enrolled, missing)),
+          Vector(enrolled -> Errors.None, missing -> Errors.TransactionAbortable)
+        )
+        assertEquals(
+          delivery.verifyPartitions("verifier", producer.producerId, 9.toShort, Vector(enrolled)),
+          Vector(enrolled -> Errors.ProducerFenced)
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("transactional offsets commit once and are not replayed over a newer offset") {
     val directory = Files.createTempDirectory("cascade-delivery-offsets")
     val key = GroupOffsetKey("workers", "events", 0)
