@@ -128,7 +128,7 @@ object Compatibility:
     ApiVersion(ApiKey.SaslHandshake, 1, 1),
     ApiVersion(ApiKey.ApiVersions, 0, 4),
     ApiVersion(ApiKey.CreateTopics, 2, 2),
-    ApiVersion(ApiKey.InitProducerId, 1, 1),
+    ApiVersion(ApiKey.InitProducerId, 0, 5),
     ApiVersion(ApiKey.AddPartitionsToTxn, 1, 1),
     ApiVersion(ApiKey.AddOffsetsToTxn, 1, 1),
     ApiVersion(ApiKey.EndTxn, 1, 1),
@@ -165,6 +165,7 @@ object Compatibility:
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
       (apiKey == ApiKey.OffsetFetch && version >= 6) ||
       (apiKey == ApiKey.OffsetCommit && version >= 8) ||
+      (apiKey == ApiKey.InitProducerId && version >= 2) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
@@ -179,6 +180,7 @@ object Compatibility:
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
       (apiKey == ApiKey.OffsetFetch && version >= 6) ||
       (apiKey == ApiKey.OffsetCommit && version >= 8) ||
+      (apiKey == ApiKey.InitProducerId && version >= 2) ||
       apiKey == ApiKey.AlterPartitionReassignments || apiKey == ApiKey.ListPartitionReassignments ||
       apiKey == ApiKey.DescribeQuorum || apiKey == ApiKey.ConsumerGroupHeartbeat ||
       apiKey == ApiKey.ConsumerGroupDescribe ||
