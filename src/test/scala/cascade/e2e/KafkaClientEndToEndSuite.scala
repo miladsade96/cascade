@@ -16,7 +16,7 @@ import java.util.regex.Pattern
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{Callable, ConcurrentHashMap, CountDownLatch, ExecutionException, Executors, TimeUnit}
 import munit.FunSuite
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, AlterConfigOp, ConfigEntry, NewPartitionReassignment, NewTopic, RaftVoterEndpoint}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, AlterConfigOp, ConfigEntry, NewPartitionReassignment, NewTopic, RaftVoterEndpoint, TransactionState}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
@@ -1504,6 +1504,49 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         uncommittedReader.seekToBeginning(java.util.List.of(partition))
         assertEquals(pollValues(uncommittedReader, expected = 2), Vector("committed", "aborted"))
       finally uncommittedReader.close()
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
+  test("Kafka Admin describes live transactions and producer sequence state") {
+    val directory = Files.createTempDirectory("cascade-delivery-admin-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val topic = "delivery-admin-events"
+      val transactionalId = "delivery-admin-producer"
+      val partition = TopicPartition(topic, 0)
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](
+        transactionalProducerProperties(broker.bootstrapServers, transactionalId)
+      )
+      try
+        admin.createTopics(java.util.List.of(new NewTopic(topic, 1, 1.toShort))).all().get()
+        producer.initTransactions()
+        producer.beginTransaction()
+        producer.send(ProducerRecord(topic, "open".getBytes(StandardCharsets.UTF_8))).get()
+
+        val transaction = admin.describeTransactions(java.util.List.of(transactionalId)).all().get().get(transactionalId)
+        assertEquals(transaction.state(), TransactionState.ONGOING)
+        assertEquals(transaction.topicPartitions().asScala.toSet, Set(partition))
+        assertEquals(transaction.transactionTimeoutMs(), 30_000L)
+        assert(transaction.transactionStartTimeMs().isPresent)
+
+        val listed = admin.listTransactions().all().get().asScala.find(_.transactionalId() == transactionalId)
+          .getOrElse(fail("active transaction was not listed"))
+        assertEquals(listed.state(), TransactionState.ONGOING)
+        assertEquals(listed.producerId(), transaction.producerId())
+
+        val producers = admin.describeProducers(java.util.List.of(partition)).all().get().get(partition).activeProducers().asScala
+        val state = producers.find(_.producerId() == transaction.producerId()).getOrElse(fail("producer state was not described"))
+        assertEquals(state.producerEpoch(), transaction.producerEpoch())
+        assertEquals(state.lastSequence(), 0)
+        assertEquals(state.currentTransactionStartOffset().getAsLong, 0L)
+        producer.abortTransaction()
+      finally
+        producer.close(Duration.ofSeconds(5))
+        admin.close(Duration.ofSeconds(5))
     finally
       broker.close()
       deleteTree(directory)
