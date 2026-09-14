@@ -12,6 +12,38 @@ import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 final class DeliveryCoordinatorSuite extends FunSuite:
+  test("transaction administration reports stable empty and ongoing states") {
+    val directory = Files.createTempDirectory("cascade-delivery-administration")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("orders"), 30_000)
+        val empty = delivery.describeTransaction("orders").getOrElse(fail("missing transaction"))
+        assertEquals(empty.state, TransactionState.Empty)
+        assertEquals(empty.transactionStartTimeMillis, -1L)
+        assertEquals(empty.partitions, Vector.empty)
+        assertEquals(delivery.describeTransaction("missing"), None)
+
+        assertEquals(
+          delivery.addPartitions(
+            "orders",
+            producer.producerId,
+            producer.producerEpoch,
+            Vector(TopicPartition("events", 0), TopicPartition("events", 0))
+          ),
+          Errors.None
+        )
+        val ongoing = delivery.describeTransaction("orders").getOrElse(fail("missing active transaction"))
+        assertEquals(ongoing.state, TransactionState.Ongoing)
+        assertEquals(ongoing.partitions, Vector(TopicPartition("events", 0)))
+        assert(ongoing.transactionStartTimeMillis > 0L)
+        assertEquals(
+          delivery.listTransactions(ongoing.transactionStartTimeMillis + 25L),
+          Vector(TransactionListing("orders", producer.producerId, TransactionState.Ongoing, Some(25L)))
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("non-transactional idempotent producers accept Kafka's timeout sentinel") {
     val directory = Files.createTempDirectory("cascade-idempotent-timeout-sentinel")
     try
