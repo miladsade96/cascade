@@ -44,6 +44,49 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("producer descriptions combine durable sequences with acknowledged transaction starts") {
+    val directory = Files.createTempDirectory("cascade-producer-administration")
+    try
+      withCoordinator(directory) { (delivery, _, registry) =>
+        val producer = delivery.initProducerId(Some("described"), 30_000)
+        assertEquals(
+          delivery.addPartitions(
+            "described",
+            producer.producerId,
+            producer.producerEpoch,
+            Vector(TopicPartition("events", 0))
+          ),
+          Errors.None
+        )
+        val records = TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true)
+        val appended = delivery.append(
+          Some("described"),
+          "events",
+          0,
+          records,
+          -1,
+          30_000,
+          new ReplicatedAppender:
+            override def append(
+                topic: String,
+                partition: Int,
+                records: Array[Byte],
+                acknowledgements: Short,
+                timeoutMillis: Int
+            ): ReplicatedAppendResult =
+              val result = registry.partition(topic, partition).get.append(records)
+              ReplicatedAppendResult(Errors.None, result.baseOffset)
+        )
+        assertEquals(appended, DeliveryAppendResult(Errors.None, 0L))
+        assertEquals(
+          delivery.describeProducers("events", 0),
+          Some(Vector(ProducerStateDescription(producer.producerId, producer.producerEpoch, 0, 0L, Some(0L))))
+        )
+        assertEquals(delivery.describeProducers("events", 9), None)
+      }
+    finally deleteTree(directory)
+  }
+
   test("non-transactional idempotent producers accept Kafka's timeout sentinel") {
     val directory = Files.createTempDirectory("cascade-idempotent-timeout-sentinel")
     try
