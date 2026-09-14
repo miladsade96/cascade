@@ -33,6 +33,9 @@ object ApiKey:
   val AlterPartitionReassignments: Short = 45
   val ListPartitionReassignments: Short = 46
   val DescribeQuorum: Short = 55
+  val DescribeProducers: Short = 61
+  val DescribeTransactions: Short = 65
+  val ListTransactions: Short = 66
   val ConsumerGroupHeartbeat: Short = 68
   val ConsumerGroupDescribe: Short = 69
   val AddRaftVoter: Short = 80
@@ -93,6 +96,7 @@ object Errors:
   val ReassignmentInProgress: Short = 60
   val NoReassignmentInProgress: Short = 85
   val InconsistentClusterId: Short = 104
+  val TransactionalIdNotFound: Short = 105
   val UnknownTopicId: Short = 100
   val InvalidVoterKey: Short = 125
   val DuplicateVoter: Short = 126
@@ -102,6 +106,7 @@ object Errors:
   val UnreleasedInstanceId: Short = 111
   val UnsupportedAssignor: Short = 112
   val StaleMemberEpoch: Short = 113
+  val TransactionAbortable: Short = 120
 
 final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
