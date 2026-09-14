@@ -43,6 +43,35 @@ final case class CompletedTransaction(
     pendingOffsets: Vector[PendingOffset]
 )
 
+enum TransactionState(val wireName: String):
+  case Empty extends TransactionState("Empty")
+  case Ongoing extends TransactionState("Ongoing")
+
+final case class TransactionDescription(
+    transactionalId: String,
+    state: TransactionState,
+    transactionTimeoutMillis: Int,
+    transactionStartTimeMillis: Long,
+    producerId: Long,
+    producerEpoch: Short,
+    partitions: Vector[TopicPartition]
+)
+
+final case class TransactionListing(
+    transactionalId: String,
+    producerId: Long,
+    state: TransactionState,
+    durationMillis: Option[Long]
+)
+
+final case class ProducerStateDescription(
+    producerId: Long,
+    producerEpoch: Short,
+    lastSequence: Int,
+    lastTimestamp: Long,
+    currentTransactionStartOffset: Option[Long]
+)
+
 final case class DeliveryImage(
     version: Long,
     nextProducerId: Long,
