@@ -357,6 +357,27 @@ final class DeliveryCoordinator(
       .toVector
       .sortBy(_.transactionalId)
 
+  def describeProducers(topic: String, partition: Int): Option[Vector[ProducerStateDescription]] =
+    val image = acknowledgedImage
+    registry.partition(topic, partition).map { log =>
+      val activeStarts = image.activeTransactions.iterator
+        .flatMap { transaction =>
+          transaction.ranges.iterator
+            .filter(range => range.topic == topic && range.partition == partition)
+            .map(range => (transaction.producerId, transaction.producerEpoch) -> range.firstOffset)
+        }
+        .toMap
+      log.latestProducerBatches.map { batch =>
+        ProducerStateDescription(
+          batch.producerId,
+          batch.producerEpoch,
+          batch.lastSequence,
+          batch.maxTimestamp,
+          activeStarts.get((batch.producerId, batch.producerEpoch))
+        )
+      }
+    }
+
   private[cascade] def lastStableOffset(
       view: DeliveryReadView,
       topic: String,
