@@ -769,7 +769,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
             false
       synchronized {
         if role == ControllerRole.Leader && currentTerm == term then
-          if established then controllerReady = true
+          if established then
+            quotaLedger.activateTerm(term): Unit
+            controllerReady = true
           else stepDownLocked(term, None)
       }
 
