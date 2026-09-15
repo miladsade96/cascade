@@ -20,6 +20,7 @@ final class FaultCluster(
     electionTimeoutMillis: Int = 600,
     journalCompactionBytes: Long = 128L * 1024 * 1024,
     maxConnectionsPerIp: Int = 1000,
+    resources: cascade.security.ResourceLimits = cascade.security.ResourceLimits(),
     offsetBatch: cascade.group.OffsetBatchConfig = cascade.group.OffsetBatchConfig(),
     coordinatorPublication: cascade.coordinator.CoordinatorPublicationConfig = cascade.coordinator.CoordinatorPublicationConfig(),
     advertisedCapabilities: Option[PeerCapabilities] = None
@@ -52,8 +53,7 @@ final class FaultCluster(
       controllerElectionTimeoutMillis = electionTimeoutMillis,
       offsetBatch = offsetBatch,
       coordinatorPublication = coordinatorPublication,
-      security = cascade.security.BrokerSecurityConfig(resources = cascade.security.ResourceLimits(
-        maxConnectionsPerIp = maxConnectionsPerIp)),
+      security = cascade.security.BrokerSecurityConfig(resources = resources.copy(maxConnectionsPerIp = maxConnectionsPerIp)),
       storageLifecycle = cascade.storage.StorageLifecycleConfig(journalCompactionBytes = journalCompactionBytes)
     )
   }
