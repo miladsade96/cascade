@@ -26,6 +26,7 @@ final class RequestQuota(
   require(maxThrottleMillis >= 0L, "maximum throttle cannot be negative")
 
   private val buckets = ConcurrentHashMap[String, TokenBucket]()
+  private val principals = ConcurrentHashMap.newKeySet[String]()
   private val throttled = AtomicLong(0L)
   private val rejected = AtomicLong(0L)
   private val totalThrottleMillis = AtomicLong(0L)
@@ -33,6 +34,7 @@ final class RequestQuota(
   def evaluate(principal: String, bytes: Int, rejectExcess: Boolean = true): QuotaDecision =
     if bytesPerSecond == 0L || bytes <= 0 then QuotaDecision.Allowed
     else
+      principals.add(principal): Unit
       val decision = distributedReservation(principal, bytes, rejectExcess).getOrElse {
         val shares = math.max(1, clusterShareCount())
         val localRate = bytesPerSecond.toDouble / shares.toDouble
@@ -52,7 +54,7 @@ final class RequestQuota(
         case QuotaDecision.Allowed => QuotaDecision.Allowed
 
   def snapshot: RequestQuotaSnapshot =
-    RequestQuotaSnapshot(throttled.get(), rejected.get(), totalThrottleMillis.get(), buckets.size())
+    RequestQuotaSnapshot(throttled.get(), rejected.get(), totalThrottleMillis.get(), principals.size())
 
 private[security] final class TokenBucket(nanoTime: () => Long, startFull: Boolean = true):
   private var tokens = 0d
