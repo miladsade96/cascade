@@ -30,12 +30,33 @@ final class RequestQuotaSuite extends FunSuite:
     assertEquals(quota.snapshot.principals, 0)
   }
 
-  test("bounds egress backpressure without rejecting an acknowledged response") {
+  test("fully delays egress instead of leaking acknowledged bytes above the limit") {
     val quota = RequestQuota(1000L, 1L, 25L, () => 0L)
-    assertEquals(quota.evaluate("alice", 1000, rejectExcess = false), QuotaDecision.Throttle(25L))
+    assertEquals(quota.evaluate("alice", 1000, rejectExcess = false), QuotaDecision.Throttle(999L))
     assertEquals(quota.snapshot.throttled, 1L)
     assertEquals(quota.snapshot.rejected, 0L)
-    assertEquals(quota.snapshot.throttleMillis, 25L)
+    assertEquals(quota.snapshot.throttleMillis, 999L)
+  }
+
+  test("uses a distributed decision before the conservative local share") {
+    var delegated = 0
+    val quota = RequestQuota(
+      1000L,
+      1000L,
+      1000L,
+      () => 0L,
+      () => 3,
+      (principal, bytes, rejectExcess) =>
+        delegated += 1
+        assertEquals(principal, "tenant")
+        assertEquals(bytes, 600)
+        assert(rejectExcess)
+        Some(QuotaDecision.Allowed)
+    )
+
+    assertEquals(quota.evaluate("tenant", 600), QuotaDecision.Allowed)
+    assertEquals(delegated, 1)
+    assertEquals(quota.snapshot.principals, 1)
   }
 
   test("cluster shares bound aggregate tenant bursts across brokers") {
