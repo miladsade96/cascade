@@ -6,7 +6,7 @@ services:
     build:
       context: .
       args:
-        VERSION: ${CASCADE_VERSION:-1.6.0}
+        VERSION: ${CASCADE_VERSION:-1.7.0}
         REVISION: ${CASCADE_REVISION:-local}
         CREATED: ${CASCADE_CREATED:-unknown}
     init: true

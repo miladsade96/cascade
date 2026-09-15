@@ -120,3 +120,10 @@ spec:
           annotations:
             summary: Cascade rejected traffic after quota delay exceeded its bound
             description: Identify the quota class and principal before raising limits.
+        - alert: CascadeDistributedQuotaCoordinationFailure
+          expr: increase(cascade_distributed_quota_failures_total[5m]) + increase(cascade_distributed_quota_configuration_mismatches_total[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Cascade failed closed during cluster quota coordination
+            description: Check controller stability, peer connectivity, and identical quota settings on every voter.

@@ -100,6 +100,17 @@
         {"expr": "sum(rate(cascade_coordinator_group_delete_failures_total[5m]))", "legendFormat": "delete failures", "refId": "F"}
       ],
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28}
+    },
+    {
+      "type": "timeseries",
+      "title": "Distributed quota coordination",
+      "targets": [
+        {"expr": "sum(rate(cascade_distributed_quota_reservations_total[5m]))", "legendFormat": "reservations", "refId": "A"},
+        {"expr": "sum(rate(cascade_distributed_quota_forwarded_total[5m]))", "legendFormat": "forwarded", "refId": "B"},
+        {"expr": "sum(rate(cascade_distributed_quota_failures_total[5m]))", "legendFormat": "failures", "refId": "C"},
+        {"expr": "sum(rate(cascade_distributed_quota_configuration_mismatches_total[5m]))", "legendFormat": "configuration mismatches", "refId": "D"}
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36}
     }
   ],
   "refresh": "15s",
