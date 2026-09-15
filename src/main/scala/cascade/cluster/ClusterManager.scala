@@ -3,6 +3,7 @@ package cascade.cluster
 import cascade.broker.BrokerConfig
 import cascade.coordinator.{CoordinatorDecisionQueryCodec, CoordinatorDelta, CoordinatorDeltaBatcher, CoordinatorDeltaCodec, CoordinatorImageInstaller, CoordinatorKey, CoordinatorPublicationSnapshot, CoordinatorQuorumPhase, CoordinatorQuorumRecord, CoordinatorQuorumRequest, CoordinatorQuorumRequestCodec, CoordinatorQuorumSnapshot, CoordinatorShard, CoordinatorShardQuorum, CoordinatorShardState, CoordinatorShardStore, CoordinatorTransactionStatus}
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
+import cascade.security.{ClusterQuotaLedger, ClusterQuotaReservation, DistributedQuotaCodec, DistributedQuotaSnapshot, QuotaDecision, QuotaKind, QuotaLimit}
 import cascade.storage.{CleanupPolicy, CreateTopicResult, TopicLifecyclePolicy, TopicRegistry}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, ScheduledExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -74,6 +75,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   @volatile private var current = metadataStore.map(_.metadata).getOrElse(ClusterMetadata.Empty)
   private var lastMetadataDelta: Option[MetadataDelta] = None
   private val metadataTransfers = MetadataTransferMetrics()
+  private val quotaLedger = ClusterQuotaLedger(config.security.resources)
   private val coordinatorShardStore = Option.when(enabled)(CoordinatorShardStore(
     config.dataDirectory.resolve(".cascade").resolve("coordinator-quorum"),
     current.coordinator,
@@ -98,6 +100,8 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def metadataJournalSnapshot: MetadataJournalSnapshot = metadataStore.map(_.snapshot).getOrElse(MetadataJournalSnapshot.Empty)
   def shardObjectSnapshot: ShardObjectSnapshot = metadataStore.map(_.objectSnapshot).getOrElse(ShardObjectSnapshot())
   def metadataTransferSnapshot: MetadataTransferSnapshot = metadataTransfers.snapshot
+
+  def distributedQuotaSnapshot: DistributedQuotaSnapshot = quotaLedger.snapshot
 
   def coordinatorPublicationSnapshot: CoordinatorPublicationSnapshot =
     coordinatorPublisher.map(_.snapshot).getOrElse(CoordinatorPublicationSnapshot())
@@ -196,6 +200,46 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def supportsFeature(name: String, minimumLevel: Short = 1): Boolean =
     !enabled || current.featureLevels.getOrElse(name, 0.toShort) >= minimumLevel
+
+  def reserveClusterQuota(
+      kind: QuotaKind,
+      principal: String,
+      bytes: Int,
+      rejectExcess: Boolean,
+      limit: QuotaLimit
+  ): Option[QuotaDecision] =
+    if !enabled || !supportsFeature(ClusterFeature.DistributedQuotas, 2) then None
+    else
+      val term = currentTerm
+      val request = ClusterQuotaReservation(kind, principal, bytes, rejectExcess, limit, term)
+      val result = controllerNode match
+        case Some(controller) if controller.id == config.nodeId => reserveQuotaOnController(request)
+        case Some(controller) =>
+          quotaLedger.recordForwarded()
+          try
+            val response = peerClient.call(
+              controller,
+              InternalApi.QuotaReserve,
+              DistributedQuotaCodec.encodeReservation(request),
+              config.peerTimeoutMillis
+            )
+            DistributedQuotaCodec.decodeResult(response)
+          catch
+            case error: Throwable =>
+              quotaLedger.recordFailure()
+              throw IllegalStateException("cluster quota coordinator is unavailable", error)
+        case None =>
+          quotaLedger.recordFailure()
+          throw IllegalStateException("cluster quota controller election is in progress")
+      if result.errorCode != Errors.None || result.controllerTerm != term then
+        quotaLedger.recordFailure()
+        throw IllegalStateException(
+          s"cluster quota reservation failed with error ${result.errorCode} in term ${result.controllerTerm}; expected term $term"
+        )
+      Some(result.decision.getOrElse {
+        quotaLedger.recordFailure()
+        throw IllegalStateException("cluster quota coordinator returned no decision")
+      })
 
   def ownsCoordinator(key: String): Boolean =
     ownsCoordinator(CoordinatorKey.group(key))
@@ -461,6 +505,9 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       ByteWriter().writeShort(error)
         .writeByteArray(MetadataCodec.encode(ClusterMetadata.Empty.copy(coordinator = metadata)))
         .result()
+    case InternalApi.QuotaReserve =>
+      val request = DistributedQuotaCodec.decodeReservation(cursor)
+      DistributedQuotaCodec.encodeResult(reserveQuotaOnController(request))
     case InternalApi.MetadataPrepare => metadataPrepare(cursor)
     case InternalApi.MetadataCommit => metadataCommit(cursor)
     case InternalApi.MetadataDeltaCommit => metadataDeltaCommit(cursor)
@@ -481,6 +528,16 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
       val result = metadataMutationLock.synchronized(alterTopicLifecycleOnController(topic, policy))
       ByteWriter().writeShort(result.errorCode).writeNullableString(result.message).result()
     case _ => throw IllegalArgumentException(s"unsupported metadata API: $apiKey")
+
+  private def reserveQuotaOnController(request: ClusterQuotaReservation): cascade.security.ClusterQuotaResult = synchronized {
+    if !supportsFeature(ClusterFeature.DistributedQuotas, 2) then
+      cascade.security.ClusterQuotaResult(Errors.UnsupportedVersion, None, currentTerm)
+    else if !isActiveController || request.controllerTerm != currentTerm then
+      cascade.security.ClusterQuotaResult(Errors.NotController, None, currentTerm)
+    else
+      quotaLedger.activateTerm(currentTerm): Unit
+      quotaLedger.reserve(request)
+  }
 
   private def addVoterOnController(voter: QuorumVoter): MembershipChangeResult =
     if !isActiveController then
