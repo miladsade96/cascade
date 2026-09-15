@@ -6,7 +6,7 @@ import cascade.delivery.DeliveryCoordinator
 import cascade.group.GroupCoordinator
 import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSnapshot, CapacityLimits, CapacityMonitor, HealthPolicy, OperationsServer, PeerSecurityMetrics, StructuredLogger, TrafficMetrics, TrafficQuotaSnapshot}
 import cascade.protocol.{ApiKey, ProtocolException, ProtocolThrottle}
-import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
+import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, QuotaKind, QuotaLimit, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
 import cascade.storage.{FlushStatistics, TopicRegistry}
 import cascade.backup.{BackupCreator, BackupManifest}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
@@ -70,25 +70,33 @@ final class KafkaBroker(
     config.security.resources.requestBytesPerSecond,
     config.security.resources.requestBurstBytes,
     config.security.resources.maxThrottleMillis,
-    clusterShareCount = () => quotaShareCount
+    clusterShareCount = () => quotaShareCount,
+    distributedReservation = (principal, bytes, rejectExcess) =>
+      distributedQuotaReservation(QuotaKind.Request, principal, bytes, rejectExcess)
   )
   private val responseQuota = RequestQuota(
     config.security.resources.responseBytesPerSecond,
     config.security.resources.responseBurstBytes,
     config.security.resources.maxThrottleMillis,
-    clusterShareCount = () => quotaShareCount
+    clusterShareCount = () => quotaShareCount,
+    distributedReservation = (principal, bytes, rejectExcess) =>
+      distributedQuotaReservation(QuotaKind.Response, principal, bytes, rejectExcess)
   )
   private val produceQuota = RequestQuota(
     config.security.resources.produceBytesPerSecond,
     config.security.resources.produceBurstBytes,
     config.security.resources.maxThrottleMillis,
-    clusterShareCount = () => quotaShareCount
+    clusterShareCount = () => quotaShareCount,
+    distributedReservation = (principal, bytes, rejectExcess) =>
+      distributedQuotaReservation(QuotaKind.Produce, principal, bytes, rejectExcess)
   )
   private val fetchQuota = RequestQuota(
     config.security.resources.fetchBytesPerSecond,
     config.security.resources.fetchBurstBytes,
     config.security.resources.maxThrottleMillis,
-    clusterShareCount = () => quotaShareCount
+    clusterShareCount = () => quotaShareCount,
+    distributedReservation = (principal, bytes, rejectExcess) =>
+      distributedQuotaReservation(QuotaKind.Fetch, principal, bytes, rejectExcess)
   )
   private val registry = TopicRegistry(
     config.dataDirectory,
@@ -432,6 +440,16 @@ final class KafkaBroker(
 
   private def quotaShareCount: Int =
     Option(clusterManager).map(_.clusterNodes.size).getOrElse(math.max(1, config.clusterNodes.size))
+
+  private def distributedQuotaReservation(
+      kind: QuotaKind,
+      principal: String,
+      bytes: Int,
+      rejectExcess: Boolean
+  ): Option[QuotaDecision] =
+    Option(clusterManager).flatMap(
+      _.reserveClusterQuota(kind, principal, bytes, rejectExcess, QuotaLimit.forKind(config.security.resources, kind))
+    )
 
   private def requestApiKey(frame: Array[Byte]): Short =
     if frame.length < 2 then -1.toShort
