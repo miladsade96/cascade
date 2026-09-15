@@ -39,7 +39,7 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 - Deny-by-default topic, group, transaction, and cluster ACLs with exact/prefix/wildcard matching, explicit-deny precedence, super users, and live atomic policy rotation.
 - Forced JSONL authentication/authorization audit events with escaped fields, source address, TLS state, principal, decision, operation, and resource.
 - Kafka-compatible ACL describe/create/delete administration with atomic durable policy publication.
-- Global and per-IP connection caps, a bounded in-flight request semaphore, immediate overload shedding, and per-principal ingress, egress, Produce, and Fetch token buckets whose configured rate and burst are conservatively divided across the current quorum.
+- Global and per-IP connection caps, a bounded in-flight request semaphore, immediate overload shedding, and controller-fenced per-principal ingress, egress, Produce, and Fetch token buckets that reclaim idle capacity while enforcing the exact cluster rate and burst.
 - A separate loopback-default operations listener with bearer authentication for remote binds, liveness/readiness/status JSON, and bounded-label Prometheus 0.0.4 metrics.
 - Readiness gates for broker state, fencing, flush backlog, disk reserve, structured-log health, TLS material, peer identity policy, and credential policy.
 - Size-rotated JSONL broker events plus deduplicated connection, request, flush-backlog, and disk-capacity alert/resolution events.
@@ -91,7 +91,7 @@ I won't describe a release as a Kafka replacement until every blocking row above
 
 When I publish a performance result, I'll include the hardware, durability policy, workload, client configuration, and exact delivery count. When I claim compatibility, I'll list the API keys and versions instead of just saying "Kafka compatible."
 
-The most recent complete Scala/Kafka-Java run passed **564/564** tests with no failures or skips in **179 seconds**. It includes modern transaction initialization and flexible RPCs, batched verify-only admission, member-aware transactional offsets, acknowledged delivery administration, exact commit/abort isolation and restart recovery, plus the existing consumer, storage, security, cluster, and fault gates. The separate 256-transaction campaign verified 256 committed, 512 uncommitted, and 256 recovered committed values with zero mismatches.
+The most recent complete Scala/Kafka-Java run passed **577/577** tests with no failures or skips in **156 seconds**. It includes exact cluster-wide quota reclamation, concurrent aggregate-bound enforcement, controller-term fencing, mixed-version activation, and real three-broker forwarding/failover, plus the existing transaction, consumer, storage, security, cluster, and fault gates. The [dated quota report](performance/2026-09-15-distributed-quotas.md) records the focused results and limitations. The separate 256-transaction campaign verified 256 committed, 512 uncommitted, and 256 recovered committed values with zero mismatches.
 
 The controller publication campaign commits 3,000 writes across 1,000 groups and recovers 1,000/1,000 exact offsets after controller failover and full restart. It combines 1,675 requests into 1,156 batches with zero queue rejection. The 57.934 writes/s and 4,714.624 ms p99 are not production-capacity evidence or a matched comparison. The [publication report](performance/2026-09-05-coordinator-publication.md) records the host, retries, metrics, limitations, and full regression results.
 
