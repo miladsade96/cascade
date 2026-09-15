@@ -87,7 +87,7 @@ final class ClusterQuotaLedger(resources: ResourceLimits, nanoTime: () => Long =
     if request.controllerTerm < activeTerm then
       ClusterQuotaResult(Errors.NotController, None, activeTerm)
     else
-      if request.controllerTerm > activeTerm then activateTerm(request.controllerTerm)
+      if request.controllerTerm > activeTerm then activateTerm(request.controllerTerm): Unit
       val expected = QuotaLimit.forKind(resources, request.kind)
       if request.limit != expected then
         configurationMismatches += 1L
