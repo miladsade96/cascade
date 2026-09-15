@@ -267,5 +267,6 @@ object InternalApi:
   val CoordinatorShardRecover: Short = -127
   val CoordinatorDecisionQuery: Short = -128
   val CoordinatorStateQuery: Short = -129
+  val QuotaReserve: Short = -130
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= CoordinatorStateQuery
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= QuotaReserve
