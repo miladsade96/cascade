@@ -187,7 +187,7 @@ object PeerCapabilities:
       ClusterFeature.ConsumerProtocol -> 1,
       ClusterFeature.OnlineSnapshot -> 1,
       ClusterFeature.AdvancedCompaction -> 1,
-      ClusterFeature.DistributedQuotas -> 1,
+      ClusterFeature.DistributedQuotas -> 2,
       ClusterFeature.IndependentCoordinator -> 1
     )
   )
