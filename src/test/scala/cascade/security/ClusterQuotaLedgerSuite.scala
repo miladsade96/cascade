@@ -1,7 +1,9 @@
 package cascade.security
 
 import cascade.protocol.Errors
+import java.util.concurrent.{Callable, Executors, TimeUnit}
 import munit.FunSuite
+import scala.jdk.CollectionConverters.*
 
 final class ClusterQuotaLedgerSuite extends FunSuite:
   private val resources = ResourceLimits(requestBytesPerSecond = 1000, requestBurstBytes = 1000, maxThrottleMillis = 2000)
@@ -62,6 +64,23 @@ final class ClusterQuotaLedgerSuite extends FunSuite:
     assertEquals(result.errorCode, Errors.InvalidConfiguration)
     assertEquals(result.decision, None)
     assertEquals(ledger.snapshot.configurationMismatches, 1L)
+  }
+
+  test("serializes concurrent reservations without overspending the global burst") {
+    var now = 0L
+    val ledger = ClusterQuotaLedger(resources, () => now)
+    ledger.activateTerm(1): Unit
+    now = 1_000_000_000L
+    val executor = Executors.newVirtualThreadPerTaskExecutor()
+    try
+      val tasks = Vector.fill(20)(Callable(() => reserve(ledger, "tenant", 100).decision.get))
+      val decisions = executor.invokeAll(tasks.asJava).asScala.map(_.get()).toVector
+      assertEquals(decisions.count(_ == QuotaDecision.Allowed), 10)
+      assertEquals(decisions.count(_.isInstanceOf[QuotaDecision.Throttle]), 10)
+      assertEquals(ledger.snapshot.reservations, 20L)
+    finally
+      executor.shutdownNow(): Unit
+      executor.awaitTermination(5, TimeUnit.SECONDS): Unit
   }
 
   private def reserve(
