@@ -33,6 +33,33 @@ final class DistributedQuotaFaultSuite extends FunSuite:
     finally cluster.close()
   }
 
+  test("a replacement controller cannot reuse the previous term's burst") {
+    val cluster = FaultCluster(
+      3,
+      resources = ResourceLimits(
+        requestBytesPerSecond = 1000,
+        requestBurstBytes = 10000,
+        maxThrottleMillis = 20000
+      )
+    )
+    try
+      cluster.startAll()
+      awaitDistributedQuotas(cluster)
+      val previousController = cluster.broker(1).metricsSnapshot.controllerId
+      val previousTerm = cluster.broker(previousController).distributedQuotaSnapshot.controllerTerm
+      cluster.stop(previousController)
+
+      val nextController = awaitController(cluster, previousController)
+      val requester = cluster.runningNodeIds.head
+      val decision = cluster.broker(requester)
+        .reserveClusterQuota(QuotaKind.Request, "User:failover-tenant", 10000)
+        .getOrElse(fail("distributed quotas became inactive after controller failover"))
+
+      assert(decision.isInstanceOf[QuotaDecision.Throttle])
+      assert(cluster.broker(nextController).distributedQuotaSnapshot.controllerTerm > previousTerm)
+    finally cluster.close()
+  }
+
   private def awaitDistributedQuotas(cluster: FaultCluster): Unit =
     val deadline = System.nanoTime() + 15_000_000_000L
     var active = false
@@ -41,3 +68,17 @@ final class DistributedQuotaFaultSuite extends FunSuite:
       catch case _: IllegalStateException => ()
       if !active then Thread.sleep(50)
     assert(active, "distributed quota feature level 2 did not activate")
+
+  private def awaitController(cluster: FaultCluster, excluded: Int): Int =
+    val deadline = System.nanoTime() + 15_000_000_000L
+    var elected = -1
+    while elected < 0 && System.nanoTime() < deadline do
+      elected = cluster.runningNodeIds.iterator.flatMap { nodeId =>
+        val snapshot = cluster.broker(nodeId).metricsSnapshot
+        Option.when(snapshot.controllerId != excluded && cluster.runningNodeIds.contains(snapshot.controllerId) && !snapshot.brokerFenced)(
+          snapshot.controllerId
+        )
+      }.nextOption().getOrElse(-1)
+      if elected < 0 then Thread.sleep(50)
+    if elected < 0 then fail("replacement controller was not elected")
+    elected
