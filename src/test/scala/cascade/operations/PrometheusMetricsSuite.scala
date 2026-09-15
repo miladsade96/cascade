@@ -1,6 +1,6 @@
 package cascade.operations
 
-import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
+import cascade.security.{DistributedQuotaSnapshot, RequestQuotaSnapshot, TlsReloadSnapshot}
 import munit.FunSuite
 
 final class PrometheusMetricsSuite extends FunSuite:
@@ -20,8 +20,12 @@ final class PrometheusMetricsSuite extends FunSuite:
     assert(output.contains("cascade_sasl_authentication_successes_total{mechanism=\"OAUTHBEARER\",node_id=\"7\"} 8.0\n"))
     assert(output.contains("cascade_sasl_authentication_failures_total{mechanism=\"UNKNOWN\",node_id=\"7\"} 7.0\n"))
     assert(output.contains("cascade_traffic_quota_throttled_total{node_id=\"7\",quota=\"fetch\"} 19.0\n"))
+    assert(output.contains("cascade_distributed_quota_controller_term{node_id=\"7\"} 12.0\n"))
+    assert(output.contains("cascade_distributed_quota_reservations_total{node_id=\"7\"} 41.0\n"))
+    assert(output.contains("cascade_distributed_quota_configuration_mismatches_total{node_id=\"7\"} 2.0\n"))
+    assert(output.contains("cascade_distributed_quota_failures_total{node_id=\"7\"} 3.0\n"))
     assert(output.contains("cascade_coordinator_delta_bytes_total{node_id=\"7\"} 0.0\n"))
-    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 154)
+    assertEquals(output.linesIterator.count(_.startsWith("cascade_")), 164)
   }
 
   test("metadata persistence and replication expose bounded node-only measurements") {
@@ -190,5 +194,17 @@ final class PrometheusMetricsSuite extends FunSuite:
       RequestQuotaSnapshot(10L, 11L, 1200L, 3),
       RequestQuotaSnapshot(14L, 15L, 1600L, 4),
       RequestQuotaSnapshot(19L, 20L, 2100L, 5)
+    ),
+    distributedQuota = DistributedQuotaSnapshot(
+      controllerTerm = 12L,
+      principals = 7,
+      reservations = 41L,
+      allowed = 31L,
+      throttled = 8L,
+      rejected = 2L,
+      configurationMismatches = 2L,
+      epochResets = 4L,
+      forwarded = 19L,
+      failures = 3L
     )
   )

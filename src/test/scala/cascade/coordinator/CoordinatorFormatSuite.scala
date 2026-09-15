@@ -59,3 +59,15 @@ final class CoordinatorFormatSuite extends FunSuite:
     assertEquals(mixed.metadataFormat, 11.toShort)
     assert(!mixed.supports(ClusterFeature.IndependentCoordinator))
   }
+
+  test("reclaimable quotas activate only after every voter reaches feature level two") {
+    val current = PeerCapabilities.Current
+    val previous = current.copy(featureLevels = current.featureLevels.updated(ClusterFeature.DistributedQuotas, 1))
+    val mixed = NegotiatedCapabilities.across(Vector(current, current, previous)).toOption.get
+    assertEquals(mixed.featureLevel(ClusterFeature.DistributedQuotas), 1.toShort)
+    assert(!mixed.supports(ClusterFeature.DistributedQuotas, 2))
+
+    val upgraded = NegotiatedCapabilities.across(Vector(current, current, current)).toOption.get
+    assertEquals(upgraded.featureLevel(ClusterFeature.DistributedQuotas), 2.toShort)
+    assert(upgraded.supports(ClusterFeature.DistributedQuotas, 2))
+  }
