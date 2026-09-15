@@ -23,6 +23,16 @@ I run the complete wire/coordinator/client regression and a configurable exact t
 
 I require exact committed and uncommitted value sets, no duplicates or omissions, and the same committed set after broker restart. The 2026-09-14 development-host run passed with 256 transactional IDs, 16 concurrent workers, 256 committed records, 512 uncommitted records, 256 recovered committed records, and zero mismatches. The [dated report](performance/2026-09-14-delivery-semantics.md) keeps the scope and remaining limits.
 
+## Distributed quotas
+
+I run the local bucket, peer-codec, exact ledger, metric, rolling-activation, and three-broker fault tests together:
+
+```powershell
+.\sbt.bat "testOnly cascade.security.RequestQuotaSuite cascade.security.DistributedQuotaCodecSuite cascade.security.ClusterQuotaLedgerSuite cascade.operations.PrometheusMetricsSuite cascade.coordinator.CoordinatorFormatSuite cascade.fault.DistributedQuotaFaultSuite"
+```
+
+The cluster gate fails unless one broker can consume capacity that the two idle brokers did not use, concurrent reservations stay within the one global burst, inconsistent limits fail closed, and a replacement controller cannot reuse its predecessor's burst. I still finish with `.\sbt.bat test`; short deterministic tests do not replace the authenticated 72-hour multi-tenant soak or dedicated-host quota capacity work.
+
 ## Coordinator read isolation
 
 I run the deterministic blocked-publication and real three-broker pause tests before a coordinator release:

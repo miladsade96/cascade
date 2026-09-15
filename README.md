@@ -14,7 +14,7 @@ The current release is `1.6.0`. Broker build metadata, Docker labels, the compat
 
 `miladsade96/cascade:1.3.1` remains the latest published Docker Hub image. I build `miladsade96/cascade:1.6.0` locally from this source, but I do not describe that tag as published until the runtime, client, cluster, and zero-finding security gates pass for the exact image and the registry digest is recorded. I do not move `latest` implicitly.
 
-So far, I've implemented broker-assigned offsets, magic-v2 record batches, classic and server-assigned consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, rendezvous-sharded coordinator ownership, a format-12 independent coordinator quorum with forced per-shard journals, coordinator failover, online partition reassignment, dynamic broker/voter membership, rolling feature negotiation, crash-safe storage lifecycle management, record-level/gzip compaction with tombstone grace and cleanup throttling, TLS, Kafka PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, Kafka ACL Admin APIs, security auditing, conservative cluster-shared principal quotas, Prometheus metrics, health/readiness checks, structured events, Kubernetes artifacts, capacity alerts, offline backup/restore, and write-barrier online snapshots.
+So far, I've implemented broker-assigned offsets, magic-v2 record batches, classic and server-assigned consumer coordination, durable metadata and offset journals, idempotent producer recovery, transactions, `read_committed` isolation, ISR replication, partition-leader promotion, quorum controller election, rendezvous-sharded coordinator ownership, a format-12 independent coordinator quorum with forced per-shard journals, coordinator failover, online partition reassignment, dynamic broker/voter membership, rolling feature negotiation, crash-safe storage lifecycle management, record-level/gzip compaction with tombstone grace and cleanup throttling, TLS, Kafka PLAIN, SCRAM-SHA-256/512, OAUTHBEARER, Kafka ACL Admin APIs, security auditing, controller-fenced cluster-wide principal quotas with dynamic unused-capacity reclamation, Prometheus metrics, health/readiness checks, structured events, Kubernetes artifacts, capacity alerts, offline backup/restore, and write-barrier online snapshots.
 
 > [!IMPORTANT]
 > Cascade isn't a production Kafka replacement yet. Coordinator decisions now carry durable majority certificates, a successor can query voters and complete a certified transaction, completed shard journals compact through forced atomic checkpoints, group and delivery mutation no longer share one broker-wide monitor, and the pinned format-11-to-format-12 source campaign passes. The published-image campaign, multi-day soak, physical power/device-loss campaign, coordinated cluster snapshot, and Snappy/LZ4/Zstd compaction remain open.
@@ -64,7 +64,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 | Dynamic cluster | Durable joint-consensus membership, Kafka Admin add/remove/describe APIs, controller election and fencing, synchronous ISR replication, persisted committed high watermarks, leader promotion, incremental divergent-tail repair, and safe replica re-admission |
 | Failure qualification | Deterministic directional partitions and protocol-triggered drops, subprocess force kills, clean/unclean startup detection, torn-tail recovery, and stable/joint quorum safety checks |
 | Storage lifecycle | Scheduled time/size retention, conservative keyed compaction, offset expiry, bounded coordinator journals, batch timestamp/transaction indexes, atomic retirement, and disk-reserve admission |
-| Security and isolation | TLS 1.2/1.3, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER, offline password verifiers, RSA/EC/Ed25519 JWKS validation, approved role mapping, deny-by-default ACLs and Kafka ACL Admin APIs, JSONL audit events, hostname-verified peer mTLS, atomic secret/policy rotation, connection/request caps, directional principal quotas, and overload shedding |
+| Security and isolation | TLS 1.2/1.3, Kafka PLAIN, SCRAM-SHA-256/512, and OAUTHBEARER, offline password verifiers, RSA/EC/Ed25519 JWKS validation, approved role mapping, deny-by-default ACLs and Kafka ACL Admin APIs, JSONL audit events, hostname-verified peer mTLS, atomic secret/policy rotation, connection/request caps, exact cluster-wide directional principal quotas, dynamic unused-capacity reclamation, and overload shedding |
 | Operations and recovery | Separate health/readiness/status endpoints, Prometheus 0.0.4 metrics, rotating structured events, deduplicated capacity alerts, mutable per-topic Kafka configuration, checksummed offline backup/restore, hardened containers, Kubernetes StatefulSets, NetworkPolicies, disruption budgets, Prometheus rules, and a Grafana dashboard |
 | Measured performance | Repeatable one-million and ten-million tests with exact record counting, latency, CPU, GC, heap, storage, and flush metrics |
 
@@ -78,7 +78,7 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 - Atomic key/trust-store reload for new client handshakes plus generation-aware peer reconnection; bad replacements preserve the last valid context and fail readiness.
 - Internal controller, metadata, replication, and recovery requests can require hostname-verified mutual TLS plus a certificate subject assigned to the claimed node ID.
 - Kafka-framed `SaslHandshake` v1 and `SaslAuthenticate` v1 with PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, and OAUTHBEARER identities scoped to one connection.
-- Global/per-IP connection caps, a bounded global in-flight request gate, and independent per-principal ingress, egress, Produce, and Fetch token buckets with Kafka throttle fields.
+- Global/per-IP connection caps, a bounded global in-flight request gate, and cluster-wide per-principal ingress, egress, Produce, and Fetch token buckets with Kafka throttle fields. In cluster mode the active controller serializes reservations, so an active broker can reclaim idle capacity without the cluster exceeding its configured limit.
 - Correlation IDs preserved in every response.
 - Ordered processing within a connection and Java 21 virtual-thread isolation between connections.
 - Explicitly advertised API keys and versions rather than a broad, unverified compatibility claim.
@@ -86,6 +86,8 @@ The one-million test is much shorter and benefits a lot from the filesystem cach
 - External exact-delivery tests for KafkaJS 2.2.4, confluent-kafka Python 2.15.0, franz-go 1.21.0, and Confluent.Kafka .NET 2.15.0.
 
 Any language can connect if its client speaks one of the supported Kafka protocol versions. I run the external [client compatibility matrix](compatibility/README.md) independently of the Scala test process and fail CI if any client sees the wrong records, cannot commit offsets, or causes a broker-side protocol error.
+
+The [distributed quota runbook](docs/distributed-quotas.md) describes feature-level activation, fail-closed behavior, controller failover, configuration consistency, and the metrics I use to distinguish legitimate throttling from coordinator trouble.
 
 ### Storage and durability
 
@@ -681,15 +683,15 @@ I track the release gates in [docs/production-readiness.md](docs/production-read
 | `--max-connections` | `10000` | Global active connection cap |
 | `--max-connections-per-ip` | `1000` | Active connection cap for one source IP |
 | `--max-inflight-requests` | `10000` | Global request permits before overload shedding closes a connection |
-| `--request-bytes-per-second` | `0` | Per-principal ingress quota; zero disables quota work |
+| `--request-bytes-per-second` | `0` | Per-principal cluster-wide ingress quota; zero disables quota work |
 | `--request-burst-bytes` | Quota rate | Per-principal token-bucket burst size |
-| `--response-bytes-per-second` | `0` | Per-principal egress quota; zero disables it |
+| `--response-bytes-per-second` | `0` | Per-principal cluster-wide egress quota; zero disables it |
 | `--response-burst-bytes` | Quota rate | Per-principal egress burst size |
-| `--produce-bytes-per-second` | `0` | Additional per-principal Produce ingress quota |
+| `--produce-bytes-per-second` | `0` | Additional per-principal cluster-wide Produce ingress quota |
 | `--produce-burst-bytes` | Quota rate | Produce-specific burst size |
-| `--fetch-bytes-per-second` | `0` | Additional per-principal Fetch egress quota |
+| `--fetch-bytes-per-second` | `0` | Additional per-principal cluster-wide Fetch egress quota |
 | `--fetch-burst-bytes` | Quota rate | Fetch-specific burst size |
-| `--max-throttle-ms` | `1000` | Maximum quota delay; larger required delays shed the request connection |
+| `--max-throttle-ms` | `1000` | Maximum ingress delay before rejection; acknowledged egress waits its full required delay so bytes never leak above the limit |
 | `--operations-host` | `127.0.0.1` | Separate HTTP operations bind host |
 | `--operations-port` | Empty | Enable the operations listener; `0` selects a free test port |
 | `--operations-token-file` | Empty | UTF-8 bearer token file; required for a non-loopback operations host and at least 32 characters |
