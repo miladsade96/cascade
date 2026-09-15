@@ -63,6 +63,7 @@ final case class DistributedQuotaSnapshot(
 final class ClusterQuotaLedger(resources: ResourceLimits, nanoTime: () => Long = () => System.nanoTime()):
   private val buckets = mutable.HashMap.empty[(QuotaKind, String), TokenBucket]
   private var activeTerm = -1L
+  private var termStartedNanos = 0L
   private var reservations = 0L
   private var allowed = 0L
   private var throttled = 0L
@@ -72,14 +73,21 @@ final class ClusterQuotaLedger(resources: ResourceLimits, nanoTime: () => Long =
   private var forwarded = 0L
   private var failures = 0L
 
+  def activateTerm(controllerTerm: Long): Boolean = synchronized {
+    if controllerTerm <= activeTerm then false
+    else
+      buckets.clear()
+      activeTerm = controllerTerm
+      termStartedNanos = nanoTime()
+      epochResets += 1L
+      true
+  }
+
   def reserve(request: ClusterQuotaReservation): ClusterQuotaResult = synchronized {
     if request.controllerTerm < activeTerm then
       ClusterQuotaResult(Errors.NotController, None, activeTerm)
     else
-      if request.controllerTerm > activeTerm then
-        buckets.clear()
-        activeTerm = request.controllerTerm
-        epochResets += 1L
+      if request.controllerTerm > activeTerm then activateTerm(request.controllerTerm)
       val expected = QuotaLimit.forKind(resources, request.kind)
       if request.limit != expected then
         configurationMismatches += 1L
@@ -88,7 +96,18 @@ final class ClusterQuotaLedger(resources: ResourceLimits, nanoTime: () => Long =
         ClusterQuotaResult(Errors.None, Some(QuotaDecision.Allowed), activeTerm)
       else
         reservations += 1L
-        val bucket = buckets.getOrElseUpdate((request.kind, request.principal), TokenBucket(nanoTime, startFull = false))
+        val bucket = buckets.getOrElseUpdate(
+          (request.kind, request.principal),
+          TokenBucket(
+            nanoTime,
+            startingTokens = Some(
+              math.min(
+                expected.effectiveBurstBytes.toDouble,
+                math.max(0L, nanoTime() - termStartedNanos).toDouble * expected.bytesPerSecond.toDouble / 1_000_000_000d
+              )
+            )
+          )
+        )
         val decision = bucket.reserve(
           request.bytes.toLong,
           expected.bytesPerSecond.toDouble,

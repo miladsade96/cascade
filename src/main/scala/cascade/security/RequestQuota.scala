@@ -56,16 +56,16 @@ final class RequestQuota(
   def snapshot: RequestQuotaSnapshot =
     RequestQuotaSnapshot(throttled.get(), rejected.get(), totalThrottleMillis.get(), principals.size())
 
-private[security] final class TokenBucket(nanoTime: () => Long, startFull: Boolean = true):
-  private var tokens = 0d
+private[security] final class TokenBucket(nanoTime: () => Long, startingTokens: Option[Double] = None):
+  private var tokens = startingTokens.getOrElse(0d)
   private var lastRefillNanos = nanoTime()
-  private var initialized = false
+  private var initialized = startingTokens.nonEmpty
 
   def reserve(bytes: Long, rate: Double, burst: Double, maxThrottleMillis: Long, rejectExcess: Boolean): QuotaDecision = synchronized {
     val now = nanoTime()
     val elapsed = math.max(0L, now - lastRefillNanos)
     if !initialized then
-      tokens = if startFull then burst else math.min(burst, elapsed.toDouble * rate / 1_000_000_000d)
+      tokens = burst
       initialized = true
     else tokens = math.min(burst, tokens + elapsed.toDouble * rate / 1_000_000_000d)
     lastRefillNanos = now
