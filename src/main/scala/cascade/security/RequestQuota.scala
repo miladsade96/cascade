@@ -18,7 +18,8 @@ final class RequestQuota(
     configuredBurstBytes: Long,
     maxThrottleMillis: Long,
     nanoTime: () => Long = () => System.nanoTime(),
-    clusterShareCount: () => Int = () => 1
+    clusterShareCount: () => Int = () => 1,
+    distributedReservation: (String, Int, Boolean) => Option[QuotaDecision] = (_, _, _) => None
 ):
   require(bytesPerSecond >= 0L, "request quota cannot be negative")
   require(configuredBurstBytes >= 0L, "request quota burst cannot be negative")
@@ -32,12 +33,15 @@ final class RequestQuota(
   def evaluate(principal: String, bytes: Int, rejectExcess: Boolean = true): QuotaDecision =
     if bytesPerSecond == 0L || bytes <= 0 then QuotaDecision.Allowed
     else
-      val shares = math.max(1, clusterShareCount())
-      val localRate = bytesPerSecond.toDouble / shares.toDouble
-      val globalBurst = if configuredBurstBytes > 0L then configuredBurstBytes else bytesPerSecond
-      val localBurst = globalBurst.toDouble / shares.toDouble
-      val bucket = buckets.computeIfAbsent(principal, _ => TokenBucket(nanoTime))
-      bucket.reserve(bytes.toLong, localRate, localBurst, maxThrottleMillis, rejectExcess) match
+      val decision = distributedReservation(principal, bytes, rejectExcess).getOrElse {
+        val shares = math.max(1, clusterShareCount())
+        val localRate = bytesPerSecond.toDouble / shares.toDouble
+        val globalBurst = if configuredBurstBytes > 0L then configuredBurstBytes else bytesPerSecond
+        val localBurst = globalBurst.toDouble / shares.toDouble
+        val bucket = buckets.computeIfAbsent(principal, _ => TokenBucket(nanoTime))
+        bucket.reserve(bytes.toLong, localRate, localBurst, maxThrottleMillis, rejectExcess)
+      }
+      decision match
         case decision @ QuotaDecision.Throttle(delay) =>
           throttled.incrementAndGet(): Unit
           totalThrottleMillis.addAndGet(delay): Unit
@@ -50,7 +54,7 @@ final class RequestQuota(
   def snapshot: RequestQuotaSnapshot =
     RequestQuotaSnapshot(throttled.get(), rejected.get(), totalThrottleMillis.get(), buckets.size())
 
-private final class TokenBucket(nanoTime: () => Long):
+private[security] final class TokenBucket(nanoTime: () => Long, startFull: Boolean = true):
   private var tokens = 0d
   private var lastRefillNanos = nanoTime()
   private var initialized = false
@@ -59,7 +63,7 @@ private final class TokenBucket(nanoTime: () => Long):
     val now = nanoTime()
     val elapsed = math.max(0L, now - lastRefillNanos)
     if !initialized then
-      tokens = burst
+      tokens = if startFull then burst else math.min(burst, elapsed.toDouble * rate / 1_000_000_000d)
       initialized = true
     else tokens = math.min(burst, tokens + elapsed.toDouble * rate / 1_000_000_000d)
     lastRefillNanos = now
@@ -67,8 +71,8 @@ private final class TokenBucket(nanoTime: () => Long):
     if tokens >= 0d then QuotaDecision.Allowed
     else
       val requiredMillis = math.max(1L, math.ceil((-tokens * 1000d) / rate).toLong)
-      if requiredMillis > maxThrottleMillis && rejectExcess then
+      if rejectExcess && requiredMillis > maxThrottleMillis then
         tokens += bytes.toDouble
         QuotaDecision.Rejected(requiredMillis)
-      else QuotaDecision.Throttle(math.min(requiredMillis, maxThrottleMillis))
+      else QuotaDecision.Throttle(requiredMillis)
   }
