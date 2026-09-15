@@ -1,6 +1,8 @@
 package cascade.fault
 
-import cascade.security.{QuotaDecision, QuotaKind, ResourceLimits}
+import cascade.cluster.{InternalApi, PeerClient}
+import cascade.protocol.Errors
+import cascade.security.{ClusterQuotaReservation, DistributedQuotaCodec, QuotaDecision, QuotaKind, QuotaLimit, ResourceLimits}
 import munit.FunSuite
 
 final class DistributedQuotaFaultSuite extends FunSuite:
@@ -57,6 +59,39 @@ final class DistributedQuotaFaultSuite extends FunSuite:
 
       assert(decision.isInstanceOf[QuotaDecision.Throttle])
       assert(cluster.broker(nextController).distributedQuotaSnapshot.controllerTerm > previousTerm)
+    finally cluster.close()
+  }
+
+  test("the controller rejects inconsistent broker quota configuration") {
+    val resources = ResourceLimits(requestBytesPerSecond = 3000, requestBurstBytes = 3000, maxThrottleMillis = 5000)
+    val cluster = FaultCluster(3, resources = resources)
+    try
+      cluster.startAll()
+      awaitDistributedQuotas(cluster)
+      val controllerId = cluster.broker(1).metricsSnapshot.controllerId
+      val controller = cluster.nodes(controllerId - 1)
+      val term = cluster.broker(controllerId).distributedQuotaSnapshot.controllerTerm
+      val request = ClusterQuotaReservation(
+        QuotaKind.Request,
+        "User:misconfigured-tenant",
+        100,
+        rejectExcess = true,
+        QuotaLimit(2999, 3000, 5000),
+        term
+      )
+      val peer = PeerClient()
+      try
+        val response = peer.call(
+          controller,
+          InternalApi.QuotaReserve,
+          DistributedQuotaCodec.encodeReservation(request),
+          3000
+        )
+        val result = DistributedQuotaCodec.decodeResult(response)
+        assertEquals(result.errorCode, Errors.InvalidConfiguration)
+        assertEquals(result.decision, None)
+      finally peer.close()
+      assertEquals(cluster.broker(controllerId).distributedQuotaSnapshot.configurationMismatches, 1L)
     finally cluster.close()
   }
 
