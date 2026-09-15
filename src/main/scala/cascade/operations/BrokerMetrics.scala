@@ -1,6 +1,6 @@
 package cascade.operations
 
-import cascade.security.{RequestQuotaSnapshot, TlsReloadSnapshot}
+import cascade.security.{DistributedQuotaSnapshot, RequestQuotaSnapshot, TlsReloadSnapshot}
 import cascade.coordinator.{CoordinatorMetricsSnapshot, CoordinatorPublicationSnapshot, CoordinatorQuorumSnapshot, CoordinatorReadSnapshot}
 import cascade.cluster.{MetadataJournalSnapshot, MetadataTransferSnapshot, ShardObjectSnapshot}
 import java.util.concurrent.atomic.AtomicLong
@@ -100,7 +100,8 @@ final case class BrokerMetricsSnapshot(
     shardObjects: ShardObjectSnapshot = ShardObjectSnapshot(),
     offsetBatch: cascade.group.OffsetBatchSnapshot = cascade.group.OffsetBatchSnapshot(),
     coordinatorReads: CoordinatorReadSnapshot = CoordinatorReadSnapshot(),
-    coordinatorQuorum: CoordinatorQuorumSnapshot = CoordinatorQuorumSnapshot()
+    coordinatorQuorum: CoordinatorQuorumSnapshot = CoordinatorQuorumSnapshot(),
+    distributedQuota: DistributedQuotaSnapshot = DistributedQuotaSnapshot()
 )
 
 object PrometheusMetrics:
@@ -242,6 +243,16 @@ object PrometheusMetrics:
       counter(builder, "cascade_traffic_quota_rejected_total", "Traffic quota reservations rejected.", value.rejected.toDouble, quotaLabels)
       counter(builder, "cascade_traffic_quota_throttle_seconds_total", "Cumulative traffic quota delay.", value.throttleMillis / 1000d, quotaLabels)
     }
+    gauge(builder, "cascade_distributed_quota_controller_term", "Controller term owning the exact cluster quota ledger.", snapshot.distributedQuota.controllerTerm.toDouble, labels)
+    gauge(builder, "cascade_distributed_quota_principals", "Distinct principals held by the active cluster quota ledger.", snapshot.distributedQuota.principals.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_reservations_total", "Exact cluster quota reservations evaluated by this broker.", snapshot.distributedQuota.reservations.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_allowed_total", "Cluster quota reservations admitted without delay.", snapshot.distributedQuota.allowed.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_throttled_total", "Cluster quota reservations assigned a delay.", snapshot.distributedQuota.throttled.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_rejected_total", "Cluster quota reservations rejected before client work.", snapshot.distributedQuota.rejected.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_configuration_mismatches_total", "Peer quota reservations rejected because broker limits differed.", snapshot.distributedQuota.configurationMismatches.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_epoch_resets_total", "Cold-started quota ledgers created for newer controller terms.", snapshot.distributedQuota.epochResets.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_forwarded_total", "Quota reservations forwarded to the active controller.", snapshot.distributedQuota.forwarded.toDouble, labels)
+    counter(builder, "cascade_distributed_quota_failures_total", "Quota reservations failed closed because coordination was unavailable or invalid.", snapshot.distributedQuota.failures.toDouble, labels)
     counter(builder, "cascade_flush_operations_total", "Completed storage force operations.", snapshot.flushOperations.toDouble, labels)
     counter(builder, "cascade_flush_bytes_total", "Bytes covered by completed force operations.", snapshot.flushBytes.toDouble, labels)
     counter(builder, "cascade_flush_seconds_total", "Cumulative storage force duration.", snapshot.flushNanos / 1_000_000_000d, labels)
