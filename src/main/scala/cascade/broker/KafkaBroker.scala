@@ -375,9 +375,10 @@ final class KafkaBroker(
           val frame = new Array[Byte](size)
           input.readFully(frame)
           val apiKey = requestApiKey(frame)
-          connected = applyIngressQuota(requestQuota, session, size + Integer.BYTES) &&
-            (apiKey != ApiKey.Produce || applyIngressQuota(produceQuota, session, size + Integer.BYTES)) &&
-            handleAdmitted(frame, apiKey, session, output)
+          val clientTraffic = !cascade.cluster.InternalApi.contains(apiKey)
+          connected = (!clientTraffic || applyIngressQuota(requestQuota, session, size + Integer.BYTES)) &&
+            (!clientTraffic || apiKey != ApiKey.Produce || applyIngressQuota(produceQuota, session, size + Integer.BYTES)) &&
+            handleAdmitted(frame, apiKey, session, output, clientTraffic)
         catch
           case _: EOFException => connected = false
     catch
@@ -390,7 +391,8 @@ final class KafkaBroker(
       frame: Array[Byte],
       apiKey: Short,
       session: ConnectionSession,
-      output: DataOutputStream
+      output: DataOutputStream,
+      enforceTrafficQuota: Boolean
   ): Boolean =
     requestAdmission.tryAcquire() match
       case None => false
@@ -404,8 +406,10 @@ final class KafkaBroker(
           barrier.lock()
           try currentHandler.handle(frame, session).foreach { response =>
             val ingressDelay = session.consumeThrottleMillis().toLong
-            val responseDelay = egressDelay(responseQuota, session.principal, response.length)
-            val fetchDelay = if apiKey == ApiKey.Fetch then egressDelay(fetchQuota, session.principal, response.length) else 0L
+            val responseDelay = if enforceTrafficQuota then egressDelay(responseQuota, session.principal, response.length) else 0L
+            val fetchDelay =
+              if enforceTrafficQuota && apiKey == ApiKey.Fetch then egressDelay(fetchQuota, session.principal, response.length)
+              else 0L
             val egressThrottle = Math.addExact(responseDelay, fetchDelay)
             ProtocolThrottle.add(response, apiKey, Math.addExact(ingressDelay, egressThrottle))
             if egressThrottle > 0L then Thread.sleep(egressThrottle)
