@@ -204,6 +204,10 @@ object ClusterFeature:
   val DistributedQuotas = "distributed-quotas"
   val IndependentCoordinator = "independent-coordinator"
 
+  /** Exact quota activation cannot overlap with a lagging broker's conservative local-share buckets. */
+  def requiresFullVoterCommit(current: Map[String, Short], candidate: Map[String, Short]): Boolean =
+    current.getOrElse(DistributedQuotas, 0.toShort) < 2 && candidate.getOrElse(DistributedQuotas, 0.toShort) >= 2
+
 final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
   def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
   def supports(name: String, minimumLevel: Short = 1): Boolean = featureLevel(name) >= minimumLevel

@@ -70,4 +70,6 @@ final class CoordinatorFormatSuite extends FunSuite:
     val upgraded = NegotiatedCapabilities.across(Vector(current, current, current)).toOption.get
     assertEquals(upgraded.featureLevel(ClusterFeature.DistributedQuotas), 2.toShort)
     assert(upgraded.supports(ClusterFeature.DistributedQuotas, 2))
+    assert(ClusterFeature.requiresFullVoterCommit(mixed.featureLevels, upgraded.featureLevels))
+    assert(!ClusterFeature.requiresFullVoterCommit(upgraded.featureLevels, upgraded.featureLevels))
   }

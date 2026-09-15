@@ -1288,7 +1288,10 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
         val committedNodeIds = committed.collect {
           case (node, (responseTerm, true)) if responseTerm == term => node.id
         }.toSet ++ Option.when(quorum.contains(config.nodeId))(config.nodeId)
-        if quorum.hasQuorum(committedNodeIds) && synchronized {
+        val fullVoterBarrierSatisfied =
+          !ClusterFeature.requiresFullVoterCommit(current.featureLevels, candidate.featureLevels) ||
+            quorum.voterIds.subsetOf(committedNodeIds)
+        if quorum.hasQuorum(committedNodeIds) && fullVoterBarrierSatisfied && synchronized {
             role == ControllerRole.Leader && currentTerm == term
           }
         then
