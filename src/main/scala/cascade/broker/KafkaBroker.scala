@@ -230,6 +230,16 @@ final class KafkaBroker(
 
   def fetchQuotaSnapshot: RequestQuotaSnapshot = fetchQuota.snapshot
 
+  def distributedQuotaSnapshot: cascade.security.DistributedQuotaSnapshot =
+    Option(clusterManager).map(_.distributedQuotaSnapshot).getOrElse(cascade.security.DistributedQuotaSnapshot())
+
+  private[cascade] def reserveClusterQuota(
+      kind: QuotaKind,
+      principal: String,
+      bytes: Int,
+      rejectExcess: Boolean = true
+  ): Option[QuotaDecision] = distributedQuotaReservation(kind, principal, bytes, rejectExcess)
+
   /** Creates a checksummed, restore-compatible snapshot while the broker remains online. */
   def createOnlineSnapshot(targetDirectory: Path): BackupManifest =
     if !running.get() then throw IllegalStateException("broker must be running for an online snapshot")
