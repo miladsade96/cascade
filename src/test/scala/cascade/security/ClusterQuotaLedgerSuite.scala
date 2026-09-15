@@ -73,7 +73,9 @@ final class ClusterQuotaLedgerSuite extends FunSuite:
     now = 1_000_000_000L
     val executor = Executors.newVirtualThreadPerTaskExecutor()
     try
-      val tasks = Vector.fill(20)(Callable(() => reserve(ledger, "tenant", 100).decision.get))
+      val tasks = Vector.fill(20)(new Callable[QuotaDecision]:
+        override def call(): QuotaDecision = reserve(ledger, "tenant", 100).decision.get
+      )
       val decisions = executor.invokeAll(tasks.asJava).asScala.map(_.get()).toVector
       assertEquals(decisions.count(_ == QuotaDecision.Allowed), 10)
       assertEquals(decisions.count(_.isInstanceOf[QuotaDecision.Throttle]), 10)
