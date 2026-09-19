@@ -343,12 +343,13 @@ final class RequestHandler(
     val coordinator =
       if clusterManager.isEnabled then clusterManager.coordinatorNode(typedKey)
       else Some(ClusterNode(config.nodeId, config.advertisedHost, advertisedPort))
-    val available = supported && authorized && coordinator.nonEmpty
+    val clientCoordinator = coordinator.map(config.clientNode)
+    val available = supported && authorized && clientCoordinator.nonEmpty
     val error =
       if !supported then Errors.CoordinatorNotAvailable
       else if !authorized && coordinatorType == 0.toByte then Errors.GroupAuthorizationFailed
       else if !authorized then Errors.TransactionalIdAuthorizationFailed
-      else if coordinator.isEmpty then Errors.CoordinatorNotAvailable
+      else if clientCoordinator.isEmpty then Errors.CoordinatorNotAvailable
       else Errors.None
     val writer = ByteWriter()
     writer.writeInt(0)
@@ -356,12 +357,12 @@ final class RequestHandler(
     writer.writeNullableString(
       if !supported then Some("unsupported coordinator type")
       else if !authorized then Some("coordinator authorization failed")
-      else if coordinator.isEmpty then Some("controller election is in progress")
+      else if clientCoordinator.isEmpty then Some("controller election is in progress")
       else None
     )
-    writer.writeInt(coordinator.filter(_ => available).map(_.id).getOrElse(-1))
-    writer.writeString(coordinator.filter(_ => available).map(_.host).getOrElse(""))
-    writer.writeInt(coordinator.filter(_ => available).map(_.port).getOrElse(-1))
+    writer.writeInt(clientCoordinator.filter(_ => available).map(_.id).getOrElse(-1))
+    writer.writeString(clientCoordinator.filter(_ => available).map(_.host).getOrElse(""))
+    writer.writeInt(clientCoordinator.filter(_ => available).map(_.port).getOrElse(-1))
     Some(writer.result())
 
   private def joinGroup(header: RequestHeader, cursor: ByteCursor): Option[Array[Byte]] =
@@ -928,7 +929,7 @@ final class RequestHandler(
         }
     }
     val topicNames = requestedTopics.getOrElse(clusterManager.topicNames)
-    val brokers = clusterManager.clusterNodes
+    val brokers = clusterManager.clusterNodes.map(config.clientNode)
     if version >= 9 then return Some(flexibleMetadata(version, requestedTopics, session))
     val writer = ByteWriter()
     writer.writeInt(0) // throttle_time_ms
@@ -984,7 +985,7 @@ final class RequestHandler(
 
   private def flexibleMetadata(version: Short, requestedTopics: Option[Vector[String]], session: ConnectionSession): Array[Byte] =
     val topicNames = requestedTopics.getOrElse(clusterManager.topicNames).filter(_.nonEmpty)
-    val brokers = clusterManager.clusterNodes
+    val brokers = clusterManager.clusterNodes.map(config.clientNode)
     val writer = ByteWriter().writeInt(0)
     writer.writeCompactArray(brokers) { broker =>
       writer.writeInt(broker.id).writeCompactString(broker.host).writeInt(broker.port)
@@ -1531,7 +1532,7 @@ final class RequestHandler(
     if version >= 2 then
       writer.writeCompactArray(voters) { voter =>
         writer.writeInt(voter.id)
-        writer.writeCompactArray(Vector(voter.node)) { node =>
+        writer.writeCompactArray(Vector(config.clientNode(voter.node))) { node =>
           writer.writeCompactString("CONTROLLER")
           writer.writeCompactString(node.host)
           writer.writeShort(node.port)

@@ -23,6 +23,7 @@ final case class BrokerConfig(
     flushBytes: Long = 64L * 1024 * 1024,
     nodeId: Int = 1,
     clusterNodes: Vector[ClusterNode] = Vector.empty,
+    advertisedClusterNodes: Vector[ClusterNode] = Vector.empty,
     controllerId: Int = 1,
     defaultReplicationFactor: Int = 1,
     minInSyncReplicas: Int = 1,
@@ -58,6 +59,14 @@ final case class BrokerConfig(
     "controller election timeout must be at least three heartbeat intervals"
   )
   require(clusterNodes.map(_.id).distinct.size == clusterNodes.size, "cluster node IDs must be unique")
+  require(
+    advertisedClusterNodes.map(_.id).distinct.size == advertisedClusterNodes.size,
+    "advertised cluster node IDs must be unique"
+  )
+  require(
+    advertisedClusterNodes.isEmpty || advertisedClusterNodes.map(_.id).toSet == clusterNodes.map(_.id).toSet,
+    "advertised cluster nodes must match the internal cluster node IDs"
+  )
   require(clusterNodes.isEmpty || clusterNodes.exists(_.id == controllerId), "cluster nodes must contain the controller ID")
   require(
     clusterNodes.isEmpty || defaultReplicationFactor <= clusterNodes.size,
@@ -67,6 +76,10 @@ final case class BrokerConfig(
     minInSyncReplicas <= defaultReplicationFactor,
     "minimum in-sync replicas cannot exceed default replication factor"
   )
+
+  private val advertisedClusterNodesById = advertisedClusterNodes.map(node => node.id -> node).toMap
+
+  def clientNode(node: ClusterNode): ClusterNode = advertisedClusterNodesById.getOrElse(node.id, node)
 
 object BrokerConfig:
   def parse(arguments: Array[String]): BrokerConfig =
@@ -86,6 +99,8 @@ object BrokerConfig:
       case "--node-id" :: value :: tail => loop(tail, config.copy(nodeId = value.toInt))
       case "--cluster-nodes" :: value :: tail =>
         loop(tail, config.copy(clusterNodes = value.split(',').toVector.map(ClusterNode.parse)))
+      case "--advertised-cluster-nodes" :: value :: tail =>
+        loop(tail, config.copy(advertisedClusterNodes = value.split(',').toVector.map(ClusterNode.parse)))
       case "--controller-id" :: value :: tail => loop(tail, config.copy(controllerId = value.toInt))
       case "--default-replication-factor" :: value :: tail =>
         loop(tail, config.copy(defaultReplicationFactor = value.toInt))

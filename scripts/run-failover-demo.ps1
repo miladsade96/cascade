@@ -4,6 +4,7 @@ param(
     [ValidateRange(2, 10000000)][int]$Records = 100000,
     [string]$Java = 'java',
     [string]$Project = 'cascade-failover-demo',
+    [string]$ClusterHost,
     [string]$Output
 )
 
@@ -24,7 +25,17 @@ if (-not $Output.StartsWith($artifactRoot + [IO.Path]::DirectorySeparatorChar, [
 
 & docker image inspect $Image *> $null
 if ($LASTEXITCODE -ne 0) { throw "Build the requested image first: $Image" }
+if ([string]::IsNullOrWhiteSpace($ClusterHost)) {
+    $routeProbe = [Net.Sockets.UdpClient]::new()
+    try {
+        $routeProbe.Connect('8.8.8.8', 53)
+        $ClusterHost = ([Net.IPEndPoint]$routeProbe.Client.LocalEndPoint).Address.ToString()
+    } finally {
+        $routeProbe.Dispose()
+    }
+}
 $env:CASCADE_IMAGE = $Image
+$env:CASCADE_CLUSTER_HOST = $ClusterHost
 $compose = @('compose', '-p', $Project, '-f', (Join-Path $repository 'compose.cluster.yaml'))
 try {
     & docker @compose up --detach --no-build
@@ -49,5 +60,5 @@ try {
 finally {
     & docker @compose down --volumes --remove-orphans
     Remove-Item Env:CASCADE_IMAGE -ErrorAction SilentlyContinue
+    Remove-Item Env:CASCADE_CLUSTER_HOST -ErrorAction SilentlyContinue
 }
-

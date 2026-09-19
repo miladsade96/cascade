@@ -15,6 +15,8 @@ x-cascade-common: &cascade-common
     - ALL
   security_opt:
     - no-new-privileges:true
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   environment:
     JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
   tmpfs:
@@ -30,8 +32,6 @@ services:
     <<: *cascade-common
     ports:
       - "19092:19092"
-      - "19093:19093"
-      - "19094:19094"
     environment:
       JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
       CASCADE_OPERATIONS_PORT: "19401"
@@ -41,7 +41,7 @@ services:
       - --port
       - "19092"
       - --advertised-host
-      - localhost
+      - ${CASCADE_CLUSTER_HOST:-host.docker.internal}
       - --advertised-port
       - "19092"
       - --node-id
@@ -49,7 +49,9 @@ services:
       - --data-dir
       - /var/lib/cascade
       - --cluster-nodes
-      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - 1@cascade-1:19092,2@cascade-2:19093,3@cascade-3:19094
+      - --advertised-cluster-nodes
+      - 1@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19092,2@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19093,3@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19094
       - --controller-id
       - "1"
       - --default-replication-factor
@@ -63,10 +65,8 @@ services:
 
   cascade-2:
     <<: *cascade-common
-    network_mode: service:cascade-1
-    depends_on:
-      cascade-1:
-        condition: service_started
+    ports:
+      - "19093:19093"
     environment:
       JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
       CASCADE_OPERATIONS_PORT: "19402"
@@ -76,7 +76,7 @@ services:
       - --port
       - "19093"
       - --advertised-host
-      - localhost
+      - ${CASCADE_CLUSTER_HOST:-host.docker.internal}
       - --advertised-port
       - "19093"
       - --node-id
@@ -84,7 +84,9 @@ services:
       - --data-dir
       - /var/lib/cascade
       - --cluster-nodes
-      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - 1@cascade-1:19092,2@cascade-2:19093,3@cascade-3:19094
+      - --advertised-cluster-nodes
+      - 1@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19092,2@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19093,3@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19094
       - --controller-id
       - "1"
       - --default-replication-factor
@@ -98,10 +100,8 @@ services:
 
   cascade-3:
     <<: *cascade-common
-    network_mode: service:cascade-1
-    depends_on:
-      cascade-1:
-        condition: service_started
+    ports:
+      - "19094:19094"
     environment:
       JAVA_TOOL_OPTIONS: ${CASCADE_JAVA_TOOL_OPTIONS:--XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8}
       CASCADE_OPERATIONS_PORT: "19403"
@@ -111,7 +111,7 @@ services:
       - --port
       - "19094"
       - --advertised-host
-      - localhost
+      - ${CASCADE_CLUSTER_HOST:-host.docker.internal}
       - --advertised-port
       - "19094"
       - --node-id
@@ -119,7 +119,9 @@ services:
       - --data-dir
       - /var/lib/cascade
       - --cluster-nodes
-      - 1@localhost:19092,2@localhost:19093,3@localhost:19094
+      - 1@cascade-1:19092,2@cascade-2:19093,3@cascade-3:19094
+      - --advertised-cluster-nodes
+      - 1@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19092,2@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19093,3@${CASCADE_CLUSTER_HOST:-host.docker.internal}:19094
       - --controller-id
       - "1"
       - --default-replication-factor

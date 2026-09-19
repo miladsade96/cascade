@@ -79,6 +79,8 @@ final class BrokerConfigSuite extends FunSuite:
         "2",
         "--cluster-nodes",
         "1@node-a:9092,2@node-b:9092,3@node-c:9092",
+        "--advertised-cluster-nodes",
+        "1@public.example:19092,2@public.example:19093,3@public.example:19094",
         "--controller-id",
         "1",
         "--default-replication-factor",
@@ -100,6 +102,11 @@ final class BrokerConfigSuite extends FunSuite:
 
     assertEquals(config.nodeId, 2)
     assertEquals(config.clusterNodes.map(_.id), Vector(1, 2, 3))
+    assertEquals(config.advertisedClusterNodes.map(_.port), Vector(19092, 19093, 19094))
+    assertEquals(
+      config.clientNode(config.clusterNodes(1)),
+      cascade.cluster.ClusterNode(2, "public.example", 19093)
+    )
     assertEquals(config.defaultReplicationFactor, 3)
     assertEquals(config.minInSyncReplicas, 2)
     assertEquals(config.peerTimeoutMillis, 1500)
@@ -107,6 +114,15 @@ final class BrokerConfigSuite extends FunSuite:
     assertEquals(config.replicaRecoveryChunkBytes, 4_194_304)
     assertEquals(config.controllerHeartbeatMillis, 200)
     assertEquals(config.controllerElectionTimeoutMillis, 1000)
+  }
+
+  test("requires advertised client endpoints to cover the internal cluster") {
+    intercept[IllegalArgumentException] {
+      BrokerConfig.parse(Array(
+        "--cluster-nodes", "1@node-a:9092,2@node-b:9092",
+        "--advertised-cluster-nodes", "1@public.example:19092"
+      ))
+    }
   }
 
   test("allows a new observer to discover a quorum before it becomes a voter") {
