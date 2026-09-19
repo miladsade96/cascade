@@ -5,6 +5,7 @@ import cascade.coordinator.CoordinatorKey
 import cascade.delivery.*
 import cascade.group.*
 import cascade.protocol.*
+import cascade.protocol.handler.*
 import cascade.security.*
 import cascade.operations.{AuthenticationMetrics, PeerSecurityMetrics}
 import cascade.storage.TopicRegistry
@@ -42,6 +43,60 @@ final class RequestHandler(
   private val offsetBatcher = Option.when(clusterManager.isEnabled) {
     OffsetCommitBatcher(config.offsetBatch, groupCoordinator.commitOffsetBatch, isGroupCoordinatorFor)
   }
+
+  private lazy val handlerRegistry = ApiHandlerRegistry(Vector(
+    MetadataApiHandler(Map(
+      ApiKey.ApiVersions -> ((header, body, _) => apiVersions(header.apiVersion, body)),
+      ApiKey.Metadata -> ((header, body, session) => metadata(header.apiVersion, body, session))
+    )),
+    SecurityApiHandler(Map(
+      ApiKey.SaslHandshake -> ((_, body, session) => saslHandshake(body, session)),
+      ApiKey.SaslAuthenticate -> ((_, body, session) => saslAuthenticate(body, session))
+    )),
+    GroupApiHandler(Map(
+      ApiKey.OffsetCommit -> ((header, body, session) => offsetCommit(header.apiVersion, body, session)),
+      ApiKey.OffsetFetch -> ((header, body, session) => offsetFetch(header.apiVersion, body, session)),
+      ApiKey.FindCoordinator -> ((_, body, session) => findCoordinator(body, session)),
+      ApiKey.JoinGroup -> ((header, body, _) => joinGroup(header, body)),
+      ApiKey.Heartbeat -> ((_, body, _) => heartbeat(body)),
+      ApiKey.LeaveGroup -> ((_, body, _) => leaveGroup(body)),
+      ApiKey.SyncGroup -> ((_, body, _) => syncGroup(body)),
+      ApiKey.ListGroups -> ((header, body, session) => listGroups(header.apiVersion, body, session)),
+      ApiKey.DescribeGroups -> ((header, body, session) => describeGroups(header.apiVersion, body, session)),
+      ApiKey.DeleteGroups -> ((header, body, session) => deleteGroups(header.apiVersion, body, session)),
+      ApiKey.OffsetDelete -> ((_, body, _) => offsetDelete(body)),
+      ApiKey.ConsumerGroupHeartbeat -> ((header, body, session) => consumerGroupHeartbeat(header, body, session)),
+      ApiKey.ConsumerGroupDescribe -> ((header, body, session) => consumerGroupDescribe(header.apiVersion, body, session))
+    )),
+    AdminApiHandler(Map(
+      ApiKey.CreateTopics -> ((_, body, session) => createTopics(body, session)),
+      ApiKey.DescribeAcls -> ((_, body, session) => describeAcls(body, session)),
+      ApiKey.CreateAcls -> ((_, body, session) => createAcls(body, session)),
+      ApiKey.DeleteAcls -> ((_, body, session) => deleteAcls(body, session)),
+      ApiKey.DescribeConfigs -> ((_, body, _) => describeConfigs(body)),
+      ApiKey.IncrementalAlterConfigs -> ((_, body, session) => incrementalAlterConfigs(body, session)),
+      ApiKey.AlterPartitionReassignments -> ((_, body, _) => alterPartitionReassignments(body)),
+      ApiKey.ListPartitionReassignments -> ((_, body, _) => listPartitionReassignments(body)),
+      ApiKey.DescribeQuorum -> ((header, body, _) => describeQuorum(header.apiVersion, body)),
+      ApiKey.AddRaftVoter -> ((header, body, _) => addRaftVoter(header.apiVersion, body)),
+      ApiKey.RemoveRaftVoter -> ((_, body, _) => removeRaftVoter(body))
+    )),
+    TransactionApiHandler(Map(
+      ApiKey.InitProducerId -> ((header, body, _) => initProducerId(header.apiVersion, body)),
+      ApiKey.AddPartitionsToTxn -> ((header, body, _) => addPartitionsToTxn(header.apiVersion, body)),
+      ApiKey.AddOffsetsToTxn -> ((header, body, _) => addOffsetsToTxn(header.apiVersion, body)),
+      ApiKey.EndTxn -> ((header, body, _) => endTxn(header.apiVersion, body)),
+      ApiKey.TxnOffsetCommit -> ((header, body, _) => txnOffsetCommit(header.apiVersion, body)),
+      ApiKey.DescribeTransactions -> ((_, body, session) => describeTransactions(body, session)),
+      ApiKey.ListTransactions -> ((header, body, session) => listTransactions(header.apiVersion, body, session)),
+      ApiKey.DescribeProducers -> ((_, body, session) => describeProducers(body, session))
+    )),
+    ProduceApiHandler((_, body, session) => produce(body, session)),
+    FetchApiHandler(Map(
+      ApiKey.Fetch -> ((_, body, session) => fetch(body, session)),
+      ApiKey.ListOffsets -> ((_, body, session) => listOffsets(body, session))
+    ))
+  ))
 
   def auditTransport(session: ConnectionSession): Unit =
     if session.secure then
@@ -106,47 +161,9 @@ final class RequestHandler(
     then throw ProtocolException("Kafka request received before SASL authentication")
     authorizeControlRequest(header.apiKey, frame, session)
 
-    val response = header.apiKey match
-      case ApiKey.ApiVersions  => apiVersions(header.apiVersion, body)
-      case ApiKey.SaslHandshake => saslHandshake(body, session)
-      case ApiKey.SaslAuthenticate => saslAuthenticate(body, session)
-      case ApiKey.Metadata     => metadata(header.apiVersion, body, session)
-      case ApiKey.OffsetCommit => offsetCommit(header.apiVersion, body, session)
-      case ApiKey.OffsetFetch  => offsetFetch(header.apiVersion, body, session)
-      case ApiKey.FindCoordinator => findCoordinator(body, session)
-      case ApiKey.JoinGroup    => joinGroup(header, body)
-      case ApiKey.Heartbeat    => heartbeat(body)
-      case ApiKey.LeaveGroup   => leaveGroup(body)
-      case ApiKey.SyncGroup    => syncGroup(body)
-      case ApiKey.ListGroups   => listGroups(header.apiVersion, body, session)
-      case ApiKey.DescribeGroups => describeGroups(header.apiVersion, body, session)
-      case ApiKey.DeleteGroups => deleteGroups(header.apiVersion, body, session)
-      case ApiKey.OffsetDelete => offsetDelete(body)
-      case ApiKey.ConsumerGroupHeartbeat => consumerGroupHeartbeat(header, body, session)
-      case ApiKey.ConsumerGroupDescribe => consumerGroupDescribe(header.apiVersion, body, session)
-      case ApiKey.CreateTopics => createTopics(body, session)
-      case ApiKey.DescribeAcls => describeAcls(body, session)
-      case ApiKey.CreateAcls => createAcls(body, session)
-      case ApiKey.DeleteAcls => deleteAcls(body, session)
-      case ApiKey.DescribeConfigs => describeConfigs(body)
-      case ApiKey.IncrementalAlterConfigs => incrementalAlterConfigs(body, session)
-      case ApiKey.AlterPartitionReassignments => alterPartitionReassignments(body)
-      case ApiKey.ListPartitionReassignments => listPartitionReassignments(body)
-      case ApiKey.DescribeQuorum => describeQuorum(header.apiVersion, body)
-      case ApiKey.AddRaftVoter => addRaftVoter(header.apiVersion, body)
-      case ApiKey.RemoveRaftVoter => removeRaftVoter(body)
-      case ApiKey.InitProducerId => initProducerId(header.apiVersion, body)
-      case ApiKey.AddPartitionsToTxn => addPartitionsToTxn(header.apiVersion, body)
-      case ApiKey.AddOffsetsToTxn => addOffsetsToTxn(header.apiVersion, body)
-      case ApiKey.EndTxn => endTxn(header.apiVersion, body)
-      case ApiKey.TxnOffsetCommit => txnOffsetCommit(header.apiVersion, body)
-      case ApiKey.DescribeTransactions => describeTransactions(body, session)
-      case ApiKey.ListTransactions => listTransactions(header.apiVersion, body, session)
-      case ApiKey.DescribeProducers => describeProducers(body, session)
-      case ApiKey.Produce      => produce(body, session)
-      case ApiKey.Fetch        => fetch(body, session)
-      case ApiKey.ListOffsets  => listOffsets(body, session)
-      case other               => throw ProtocolException(s"unsupported API key: $other")
+    val response = handlerRegistry.handlerFor(header.apiKey)
+      .getOrElse(throw ProtocolException(s"unsupported API key: ${header.apiKey}"))
+      .handle(header.apiKey, header, body, session)
     response.map(ResponseFrame.encode(header, _))
 
   private def unsupportedApiVersions(): Array[Byte] =
