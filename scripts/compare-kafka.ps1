@@ -35,6 +35,14 @@ function Wait-Port([int]$Port) {
     throw "Port $Port did not become available."
 }
 
+function Ensure-Image([string]$Image) {
+    & docker image inspect $Image *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & docker pull $Image
+        if ($LASTEXITCODE -ne 0) { throw "Could not pull image $Image." }
+    }
+}
+
 function Run-Benchmark([string]$Engine, [string]$Output) {
     & $Java '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp $classpath cascade.performance.KafkaComparisonBenchmark `
         --engine $Engine --bootstrap '127.0.0.1:19092' --records $Records --warmup-records $WarmupRecords `
@@ -52,6 +60,8 @@ function Get-VolumeBytes([string]$Volume) {
 }
 
 try {
+    Ensure-Image $CascadeImage
+    Ensure-Image $KafkaImage
     New-Item -ItemType Directory -Path $artifactDirectory | Out-Null
     & docker volume create $cascadeVolume | Out-Null
     $cascadeStarted = [Diagnostics.Stopwatch]::StartNew()
@@ -72,13 +82,14 @@ try {
     & docker volume create $kafkaVolume | Out-Null
     $kafkaStarted = [Diagnostics.Stopwatch]::StartNew()
     & docker run --detach --name $kafkaName --memory 4g --cpus 4 --publish '127.0.0.1:19092:19092' `
-        --mount "type=volume,source=$kafkaVolume,target=/tmp/kraft-combined-logs" `
+        --mount "type=volume,source=$kafkaVolume,target=/var/lib/kafka/data" `
         --env KAFKA_NODE_ID=1 --env 'KAFKA_PROCESS_ROLES=broker,controller' `
         --env 'KAFKA_LISTENERS=PLAINTEXT://:19092,CONTROLLER://:19093' `
         --env 'KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:19092' `
         --env 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT' `
         --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER `
         --env 'KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:19093' `
+        --env 'KAFKA_LOG_DIRS=/var/lib/kafka/data' `
         --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 `
         --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 `
         $KafkaImage | Out-Null
