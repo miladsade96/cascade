@@ -10,6 +10,8 @@ Cascade accepts real Kafka protocol frames over TCP. Existing Java, JavaScript, 
 
 I built the broker itself with Scala 3 and the JDK. Apache Kafka's Java client is a test-only dependency that verifies compatibility from outside the implementation.
 
+The current release is `1.8.0`. The source, deployment manifests, compatibility package, and container metadata use that version. I keep Docker Hub publication separate until the exact image passes every release gate and its registry digest is recorded.
+
 ## What this project demonstrates
 
 | Capability | Implemented evidence |
@@ -284,4 +286,3 @@ The [production-readiness document](docs/production-readiness.md) maps capabilit
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Cascade is licensed under [Apache License 2.0](LICENSE).
-
