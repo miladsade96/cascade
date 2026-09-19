@@ -32,3 +32,4 @@ The script requires the exact image locally, uses an isolated Compose project, w
 
 The measured `failover_ms` is the interval from `docker kill` invocation to the first successful callback for a post-failure record. It includes client metadata refresh and retry. It is not the controller's internal election duration.
 
+The latest recorded run killed broker 1 at 50,000 acknowledgements, elected broker 2, acknowledged 100,000 records, and consumed all 100,000 with zero loss and zero unexpected duplicates. Its measured recovery was 9,395 ms. I recorded the exact candidate image and limitations in [the dated failover report](performance/2026-09-19-failover-demo.md).

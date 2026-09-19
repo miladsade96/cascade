@@ -25,7 +25,7 @@ The current release is `1.8.0`. The source, deployment manifests, compatibility 
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **577/577** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **156 seconds**. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
+The latest complete source qualification passed **593/593** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **189 seconds**. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
 
 > [!IMPORTANT]
 > Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, cross-version-image, and dedicated-host gates explicit.
@@ -76,8 +76,10 @@ enable.idempotence=true
 For a local three-broker RF=3 cluster:
 
 ```bash
-docker compose -f compose.cluster.yaml up --build
+CASCADE_CLUSTER_HOST=192.168.1.20 docker compose -f compose.cluster.yaml up --build
 ```
+
+`CASCADE_CLUSTER_HOST` is the client-reachable address advertised in Kafka metadata. Peer replication uses Compose service DNS, so client and internal endpoints do not need to be the same.
 
 I use named volumes for broker data. I stop brokers gracefully before removing containers, and I do not treat a container volume as a backup.
 
@@ -99,10 +101,10 @@ Acknowledged before failure: 50000
 Killed leader: broker-1
 New leader: broker-2
 Acknowledged after recovery: 100000
-FAILOVER_RESULT { ... "lost":0,"unexpected_duplicates":0,"failover_ms":... }
+FAILOVER_RESULT {"old_leader":1,"new_leader":2,"produced":100000,"consumed":100000,"lost":0,"unexpected_duplicates":0,"failover_ms":9395,"elapsed_ms":10945}
 ```
 
-I do not put sample throughput or failover numbers in this section until the exact release image produces them.
+This 2026-09-19 candidate run used one Docker Desktop host, so it proves the broker/container failure path rather than machine or availability-zone failure. The [dated failover report](docs/performance/2026-09-19-failover-demo.md) records the exact image, method, result, and boundary.
 
 ## Kafka compatibility
 
@@ -211,6 +213,18 @@ For a same-client, same-container-limit, same-payload comparison against the off
 ```
 
 The harness uses the same Java client code, record count, warm-up, payload, partitions, replication factor, producers, compression, `acks`, container CPU, and memory limit. I publish both results even when Kafka wins.
+
+| 2026-09-19 RF=1 comparison | Cascade | Apache Kafka 4.3.1 |
+| --- | ---: | ---: |
+| Produce | 132,767 records/s | 118,596 records/s |
+| Consume | 95,712 records/s | 113,533 records/s |
+| End to end | 55,617 records/s | 58,005 records/s |
+| Ack p99 | 896.734 ms | 441.928 ms |
+| Broker memory after run | 357.7 MiB | 564.2 MiB |
+| Persisted bytes | 284,102,656 | 284,278,784 |
+| Exactness | 250,000; 0 lost; 0 duplicates | 250,000; 0 lost; 0 duplicates |
+
+Kafka was about 4.3% faster end to end and had much lower acknowledgement latency; Cascade produced faster and used less broker memory in this single run. The [dated comparison report](docs/performance/2026-09-19-kafka-comparison.md) includes the full workload, host, startup, client heap, caveats, and reproducible command. This is development-host RF=1 evidence, not production sizing.
 
 ## Failure and recovery testing
 

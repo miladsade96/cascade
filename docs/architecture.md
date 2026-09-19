@@ -109,8 +109,8 @@ An `acks=all` response is sent only after the configured minimum ISR is present 
 ## Important boundaries
 
 - Public Kafka traffic and authenticated peer RPCs use different API ranges and authorization paths.
+- Internal `--cluster-nodes` drive quorum and replication traffic; optional `--advertised-cluster-nodes` map those same broker IDs to client-reachable Kafka metadata and coordinator endpoints.
 - Immutable acknowledged views serve reads while mutations prepare and commit.
 - Group and transaction shards lock in sorted order for atomic multi-shard changes.
 - Quota-limited requests reserve against the active controller's fenced cluster ledger; zero limits bypass that path.
 - Storage acknowledgements, replication acknowledgements, and physical disk forcing are distinct concepts and are documented separately.
-

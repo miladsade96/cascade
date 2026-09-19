@@ -35,4 +35,6 @@ I record hardware and runtime versions; every workload and durability option; th
 
 A shared Docker Desktop development host is useful for regression and implementation comparisons, but it is not production capacity qualification. RF=1 results cannot be generalized to RF=3 synchronous durability.
 
+The latest matched run is [the 2026-09-19 Cascade/Kafka comparison](performance/2026-09-19-kafka-comparison.md). I keep both the metrics where Cascade leads and the metrics where Kafka leads.
+
 `cascade.performance.LoadTest` remains the high-record-count Cascade regression. Its historical results and limitations are in [the heavy-load report](performance/2026-08-05-heavy-load.md).
