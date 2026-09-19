@@ -6,7 +6,7 @@ I ran both brokers sequentially with the same Java client code, workload, host p
 
 | Setting | Value |
 | --- | --- |
-| Cascade candidate | `sha256:975dd1cf77f74c0b4fc6d2a6ce447ea67fb665e1df272b82982f52d52976432e` from `7e307bb` |
+| Cascade image | `sha256:e212128215726b8280fed0e142ba92496c52b663e20c3df4bb5819d15746448d` from `e9a6060` |
 | Apache Kafka image | `apache/kafka:4.3.1` (`sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837`) |
 | Kafka client | Apache Kafka Java 4.3.1 |
 | Measured / warm-up | 250,000 / 25,000 records |
@@ -21,27 +21,27 @@ I ran both brokers sequentially with the same Java client code, workload, host p
 
 | Measurement | Cascade | Apache Kafka 4.3.1 |
 | --- | ---: | ---: |
-| Startup to open TCP port | 420 ms | 389 ms |
-| Warm-up | 530 ms | 896 ms |
-| Produce time | 1,883 ms | 2,108 ms |
-| Produce throughput | 132,766.861 records/s | 118,595.825 records/s |
-| Consume time | 2,612 ms | 2,202 ms |
-| Consume throughput | 95,712.098 records/s | 113,533.152 records/s |
-| End-to-end throughput | 55,617.353 records/s | 58,004.640 records/s |
-| Ack p50 | 665.462 ms | 267.691 ms |
-| Ack p95 | 854.053 ms | 422.762 ms |
-| Ack p99 | 896.734 ms | 441.928 ms |
+| Startup to open TCP port | 409 ms | 408 ms |
+| Warm-up | 528 ms | 713 ms |
+| Produce time | 1,903 ms | 2,449 ms |
+| Produce throughput | 131,371.519 records/s | 102,082.483 records/s |
+| Consume time | 2,981 ms | 2,402 ms |
+| Consume throughput | 83,864.475 records/s | 104,079.933 records/s |
+| End-to-end throughput | 51,187.551 records/s | 51,535.766 records/s |
+| Ack p50 | 697.986 ms | 265.226 ms |
+| Ack p95 | 915.771 ms | 638.016 ms |
+| Ack p99 | 949.107 ms | 710.202 ms |
 | Consumed / lost / unexpected duplicates | 250,000 / 0 / 0 | 250,000 / 0 / 0 |
-| Client heap after verification | 464.498 MiB | 280.913 MiB |
-| Broker memory after run | 357.7 MiB | 564.2 MiB |
-| Post-run CPU snapshot | 0.55% | 2.11% |
-| Persisted volume bytes | 284,102,656 | 284,278,784 |
+| Client heap after verification | 270.086 MiB | 258.893 MiB |
+| Broker memory after run | 349.6 MiB | 559.8 MiB |
+| Post-run CPU snapshot | 0.54% | 3.46% |
+| Persisted volume bytes | 284,094,464 | 284,295,168 |
 
-Cascade produced about 12% faster and used about 37% less broker memory in this run. Kafka consumed about 19% faster, finished end to end about 4.3% faster, and had substantially lower acknowledgement latency and lower client heap after verification. Both products preserved every measured sequence number exactly once.
+Cascade produced about 29% faster and used about 38% less broker memory in this run. Kafka consumed about 24% faster, finished end to end about 0.7% faster, and had lower acknowledgement latency and slightly lower client heap after verification. Both products preserved every measured sequence number exactly once.
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.8.0-candidate -KafkaImage apache/kafka:4.3.1 -Records 250000 -WarmupRecords 25000 -PayloadBytes 1024 -Partitions 8 -Producers 4 -Java "$env:JAVA_HOME\bin\java.exe"
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.8.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -WarmupRecords 25000 -PayloadBytes 1024 -Partitions 8 -Producers 4 -Java "$env:JAVA_HOME\bin\java.exe"
 ```
 
 ## Host and limitations

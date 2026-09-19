@@ -6,8 +6,8 @@ I recorded this run to make the leader-loss path visible and reproducible. It is
 
 | Measurement | Value |
 | --- | ---: |
-| Candidate commit | `7e307bb` |
-| Candidate image ID | `sha256:975dd1cf77f74c0b4fc6d2a6ce447ea67fb665e1df272b82982f52d52976432e` |
+| Release commit | `e9a6060` |
+| Local image ID | `sha256:e212128215726b8280fed0e142ba92496c52b663e20c3df4bb5819d15746448d` |
 | Brokers | 3 independent containers |
 | Topic | 1 partition, replication factor 3, minimum ISR 2 |
 | Producer | Apache Kafka Java 4.3.1, idempotence, `acks=all` |
@@ -18,14 +18,14 @@ I recorded this run to make the leader-loss path visible and reproducible. It is
 | Total consumed | 100,000 unique |
 | Lost | 0 |
 | Unexpected duplicates | 0 |
-| First post-kill acknowledgement | 9,395 ms |
-| Total create/produce/kill/recover/verify time | 10,945 ms |
+| First post-kill acknowledgement | 9,493 ms |
+| Total create/produce/kill/recover/verify time | 10,899 ms |
 
 The verifier encoded one 64-bit sequence number per record, discovered the actual leader through Kafka metadata, waited for brokers 1–3 to enter ISR, disabled the leader container's restart policy, and issued `docker kill`. It kept the same producer instance, waited for a different leader, then consumed from offset zero and checked the complete sequence space.
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.8.0-candidate -Records 100000 -Java "$env:JAVA_HOME\bin\java.exe"
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.8.0 -Records 100000 -Java "$env:JAVA_HOME\bin\java.exe"
 ```
 
 ## Host and boundary

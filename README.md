@@ -101,7 +101,7 @@ Acknowledged before failure: 50000
 Killed leader: broker-1
 New leader: broker-2
 Acknowledged after recovery: 100000
-FAILOVER_RESULT {"old_leader":1,"new_leader":2,"produced":100000,"consumed":100000,"lost":0,"unexpected_duplicates":0,"failover_ms":9395,"elapsed_ms":10945}
+FAILOVER_RESULT {"old_leader":1,"new_leader":2,"produced":100000,"consumed":100000,"lost":0,"unexpected_duplicates":0,"failover_ms":9493,"elapsed_ms":10899}
 ```
 
 This 2026-09-19 candidate run used one Docker Desktop host, so it proves the broker/container failure path rather than machine or availability-zone failure. The [dated failover report](docs/performance/2026-09-19-failover-demo.md) records the exact image, method, result, and boundary.
@@ -216,15 +216,15 @@ The harness uses the same Java client code, record count, warm-up, payload, part
 
 | 2026-09-19 RF=1 comparison | Cascade | Apache Kafka 4.3.1 |
 | --- | ---: | ---: |
-| Produce | 132,767 records/s | 118,596 records/s |
-| Consume | 95,712 records/s | 113,533 records/s |
-| End to end | 55,617 records/s | 58,005 records/s |
-| Ack p99 | 896.734 ms | 441.928 ms |
-| Broker memory after run | 357.7 MiB | 564.2 MiB |
-| Persisted bytes | 284,102,656 | 284,278,784 |
+| Produce | 131,372 records/s | 102,082 records/s |
+| Consume | 83,864 records/s | 104,080 records/s |
+| End to end | 51,188 records/s | 51,536 records/s |
+| Ack p99 | 949.107 ms | 710.202 ms |
+| Broker memory after run | 349.6 MiB | 559.8 MiB |
+| Persisted bytes | 284,094,464 | 284,295,168 |
 | Exactness | 250,000; 0 lost; 0 duplicates | 250,000; 0 lost; 0 duplicates |
 
-Kafka was about 4.3% faster end to end and had much lower acknowledgement latency; Cascade produced faster and used less broker memory in this single run. The [dated comparison report](docs/performance/2026-09-19-kafka-comparison.md) includes the full workload, host, startup, client heap, caveats, and reproducible command. This is development-host RF=1 evidence, not production sizing.
+Kafka was about 0.7% faster end to end and had lower acknowledgement latency; Cascade produced faster and used less broker memory in this single run. The [dated comparison report](docs/performance/2026-09-19-kafka-comparison.md) includes the full workload, host, startup, client heap, caveats, and reproducible command. This is development-host RF=1 evidence, not production sizing.
 
 ## Failure and recovery testing
 
