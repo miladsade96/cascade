@@ -58,8 +58,13 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     extends AutoCloseable:
   private val enabled = config.clusterNodes.nonEmpty
   private val bootstrapNodes = if enabled then config.clusterNodes.sortBy(_.id) else Vector(localNode)
-  private val bootstrapMembership = Option.when(enabled)(QuorumMembership.bootstrap(bootstrapNodes))
-  private val bootstrapNodeById = bootstrapNodes.map(node => node.id -> node).toMap
+  private val brokerMembership = BrokerMembership(bootstrapNodes, localNode)
+  private val controllerElection = ControllerElection(
+    config.nodeId,
+    config.controllerId,
+    config.controllerHeartbeatMillis,
+    config.controllerElectionTimeoutMillis
+  )
   private val closed = AtomicBoolean(false)
   private val metadataMutationLock = Object()
   private val peerExecutor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
@@ -180,7 +185,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
   def isEnabled: Boolean = enabled
 
   def clusterNodes: Vector[ClusterNode] =
-    if enabled then effectiveMembership.currentVoters.map(_.node).sortBy(_.id) else Vector(localNode)
+    if enabled then brokerMembership.nodes(current) else Vector(localNode)
 
   def controllerNode: Option[ClusterNode] = knownNode(electedControllerId)
 
@@ -189,14 +194,16 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     coordinatorNode(CoordinatorKey.group(key))
 
   def coordinatorNode(key: CoordinatorKey): Option[ClusterNode] =
-    if !enabled then Some(localNode)
-    else if
-      current.featureLevels.getOrElse(ClusterFeature.CoordinatorSharding, 0.toShort) < 1 ||
-        current.featureLevels.getOrElse(ClusterFeature.CoordinatorFailover, 0.toShort) < 1
-    then controllerNode
-    else
-      val available = effectiveMembership.currentVoters.map(_.node).filterNot(node => current.unavailableBrokerIds.contains(node.id))
-      CoordinatorRouting.owner(key.routingKey, available).orElse(controllerNode)
+    CoordinatorRouter.owner(
+      key,
+      enabled,
+      localNode,
+      controllerNode,
+      effectiveMembership,
+      current.unavailableBrokerIds,
+      supportsFeature(ClusterFeature.CoordinatorSharding),
+      supportsFeature(ClusterFeature.CoordinatorFailover)
+    )
 
   def supportsFeature(name: String, minimumLevel: Short = 1): Boolean =
     !enabled || current.featureLevels.getOrElse(name, 0.toShort) >= minimumLevel
@@ -991,19 +998,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     if !isActiveController then return
     val changedTopics = current.topics.map { topic =>
       topic.copy(partitions = topic.partitions.map { partition =>
-        val target = partition.targetReplicas
-        if partition.isReassigning && target.nonEmpty && target.forall(partition.inSyncReplicas.contains) then
-          val inSync = target.filter(partition.inSyncReplicas.contains)
-          val leader = if target.contains(partition.leaderId) then partition.leaderId else inSync.head
-          partition.copy(
-            leaderId = leader,
-            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
-            replicas = target,
-            inSyncReplicas = inSync,
-            addingReplicas = Vector.empty,
-            removingReplicas = Vector.empty
-          )
-        else partition
+        PartitionLeadership.finalizeReassignment(partition)
       })
     }
     if changedTopics != current.topics then
@@ -1202,7 +1197,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     val coordinator =
       if next.coordinator.version >= current.coordinator.version then next.coordinator else current.coordinator
     val baseCandidate = next.copy(
-      membership = next.membership.orElse(current.membership).orElse(bootstrapMembership),
+      membership = next.membership.orElse(current.membership).orElse(Option.when(enabled)(brokerMembership.effective(current))),
       coordinator = coordinator
     )
     val leadership = synchronized {
@@ -1551,15 +1546,7 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     if !isActiveController then return
     val changedTopics = current.topics.map { topic =>
       val changedPartitions = topic.partitions.map { partition =>
-        if partition.inSyncReplicas.contains(nodeId) then
-          val remaining = partition.inSyncReplicas.filterNot(_ == nodeId)
-          val leader = if partition.leaderId == nodeId then remaining.headOption.getOrElse(-1) else partition.leaderId
-          partition.copy(
-            leaderId = leader,
-            leaderEpoch = Math.addExact(partition.leaderEpoch, 1),
-            inSyncReplicas = remaining
-          )
-        else partition
+        PartitionLeadership.removeFailedReplica(partition, nodeId)
       }
       topic.copy(partitions = changedPartitions)
     }
@@ -1730,32 +1717,22 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
     resetElectionDeadlineLocked(System.nanoTime(), initial = false)
 
   private def resetElectionDeadlineLocked(now: Long, initial: Boolean): Unit =
-    val base = config.controllerElectionTimeoutMillis.toLong
-    val delayMillis =
-      if initial && config.nodeId == config.controllerId then config.controllerHeartbeatMillis.toLong * 2L
-      else if initial then
-        val rank = effectiveMembership.voters.indexWhere(_.id == config.nodeId).max(0)
-        base + rank.toLong * config.controllerHeartbeatMillis.toLong
-      else
-        val jitterRange = math.max(1L, base / 2L)
-        val jitter = Math.floorMod(config.nodeId.toLong * 1_103_515_245L + currentTerm * 12_345L, jitterRange)
-        base + jitter
-    electionDeadlineNanos = now + delayMillis * 1_000_000L
+    electionDeadlineNanos = controllerElection.deadlineNanos(now, initial, currentTerm, effectiveMembership)
 
-  private def hasQuorumLeaseLocked(): Boolean = !leaseExpired(lastQuorumContactNanos, System.nanoTime())
+  private def hasQuorumLeaseLocked(): Boolean = controllerElection.hasLease(lastQuorumContactNanos, System.nanoTime())
 
   private def leaseExpired(contactNanos: Long, nowNanos: Long): Boolean =
-    contactNanos == 0L || nowNanos - contactNanos >= config.controllerElectionTimeoutMillis.toLong * 1_000_000L
+    !controllerElection.hasLease(contactNanos, nowNanos)
 
   private def metadataPosition: MetadataPosition = MetadataPosition(current.controllerTerm, current.version)
 
   private def effectiveMembership: QuorumMembership =
-    current.membership.orElse(bootstrapMembership).getOrElse(QuorumMembership.bootstrap(Vector(localNode)))
+    brokerMembership.effective(current)
 
-  private def activeNodeIds: Set[Int] = effectiveMembership.currentVoters.map(_.id).toSet
+  private def activeNodeIds: Set[Int] = brokerMembership.activeNodeIds(current)
 
   private def knownNode(nodeId: Int): Option[ClusterNode] =
-    effectiveMembership.voters.find(_.id == nodeId).map(_.node).orElse(bootstrapNodeById.get(nodeId))
+    brokerMembership.knownNode(current, nodeId)
 
   private def callPeers[A](
       targets: Vector[ClusterNode],
