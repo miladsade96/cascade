@@ -28,15 +28,16 @@ final class KafkaComparisonBenchmarkSuite extends FunSuite:
 
   test("comparison result records exactness and environment") {
     val result = KafkaComparisonResult(
-      "cascade", 1000, 100, 1024, 8, 1, 4, "lz4", "all", 100, 200, 300,
-      5000.0, 3333.333, 100, 200, 300, 1000, 0, 0, 64.5, "21", "3.3.8", "test-os", 8
+      "cascade", 1000, 100, 1024, 8, 1, 4, 1, "lz4", "all", 100, 200, 300,
+      5000.0, 3333.333, 2000.0, 100, 200, 300, 1000, 0, 0, 64.5, "21", "3.3.8", "test-os", 8
     )
     assert(result.json.contains("\"lost\":0"))
     assert(result.json.contains("\"unexpected_duplicates\":0"))
     assert(result.json.contains("\"replication_factor\":1"))
+    assert(result.json.contains("\"consumers\":1"))
+    assert(result.json.contains("\"end_to_end_records_per_second\":2000.000"))
   }
 
   test("comparison requires engine and bootstrap first") {
     intercept[IllegalArgumentException](KafkaComparisonConfig.parse(Array("--records", "10")))
   }
-

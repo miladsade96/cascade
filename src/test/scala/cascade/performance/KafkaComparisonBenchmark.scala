@@ -5,7 +5,7 @@ import java.nio.ByteBuffer
 import java.nio.file.{Files, Path}
 import java.time.Duration
 import java.util.{Arrays, Properties}
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{Callable, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
@@ -64,6 +64,7 @@ final case class KafkaComparisonResult(
     partitions: Int,
     replicationFactor: Short,
     producers: Int,
+    consumers: Int,
     compression: String,
     acks: String,
     warmupMillis: Long,
@@ -71,6 +72,7 @@ final case class KafkaComparisonResult(
     consumeMillis: Long,
     produceRecordsPerSecond: Double,
     consumeRecordsPerSecond: Double,
+    endToEndRecordsPerSecond: Double,
     p50Micros: Long,
     p95Micros: Long,
     p99Micros: Long,
@@ -84,7 +86,7 @@ final case class KafkaComparisonResult(
     processors: Int
 ):
   def json: String =
-    s"""{"engine":"$engine","records":$records,"warmup_records":$warmupRecords,"payload_bytes":$payloadBytes,"partitions":$partitions,"replication_factor":$replicationFactor,"producers":$producers,"compression":"$compression","acks":"$acks","warmup_ms":$warmupMillis,"produce_ms":$produceMillis,"consume_ms":$consumeMillis,"produce_records_per_second":${format(produceRecordsPerSecond)},"consume_records_per_second":${format(consumeRecordsPerSecond)},"ack_p50_us":$p50Micros,"ack_p95_us":$p95Micros,"ack_p99_us":$p99Micros,"consumed":$consumed,"lost":$lost,"unexpected_duplicates":$unexpectedDuplicates,"client_heap_mib":${format(clientHeapMebibytes)},"jdk":"$jdk","scala":"$scala","os":"$os","processors":$processors}"""
+    s"""{"engine":"$engine","records":$records,"warmup_records":$warmupRecords,"payload_bytes":$payloadBytes,"partitions":$partitions,"replication_factor":$replicationFactor,"producers":$producers,"consumers":$consumers,"compression":"$compression","acks":"$acks","warmup_ms":$warmupMillis,"produce_ms":$produceMillis,"consume_ms":$consumeMillis,"produce_records_per_second":${format(produceRecordsPerSecond)},"consume_records_per_second":${format(consumeRecordsPerSecond)},"end_to_end_records_per_second":${format(endToEndRecordsPerSecond)},"ack_p50_us":$p50Micros,"ack_p95_us":$p95Micros,"ack_p99_us":$p99Micros,"consumed":$consumed,"lost":$lost,"unexpected_duplicates":$unexpectedDuplicates,"client_heap_mib":${format(clientHeapMebibytes)},"jdk":"$jdk","scala":"$scala","os":"$os","processors":$processors}"""
 
   private def format(value: Double): String = java.lang.String.format(java.util.Locale.ROOT, "%.3f", value)
 
@@ -122,6 +124,7 @@ object KafkaComparisonBenchmark:
       config.partitions,
       config.replicationFactor,
       config.producers,
+      1,
       config.compression,
       config.acks,
       warmupMillis,
@@ -129,6 +132,7 @@ object KafkaComparisonBenchmark:
       consumed._3,
       perSecond(config.records, produced.elapsedMillis),
       perSecond(config.records, consumed._3),
+      perSecond(config.records, produced.elapsedMillis + consumed._3),
       percentile(produced.latenciesMicros, 0.50),
       percentile(produced.latenciesMicros, 0.95),
       percentile(produced.latenciesMicros, 0.99),
@@ -146,33 +150,42 @@ object KafkaComparisonBenchmark:
 
   private def produce(config: KafkaComparisonConfig, records: Int, measureLatency: Boolean): ProduceMeasurement =
     if records == 0 then return ProduceMeasurement(0L, Array.emptyLongArray)
-    val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(config))
-    val latch = CountDownLatch(records)
     val failure = AtomicReference[Throwable]()
     val latencies = if measureLatency then Array.ofDim[Long](records) else Array.emptyLongArray
     val latencyIndex = AtomicInteger(0)
+    val executor = Executors.newFixedThreadPool(config.producers)
     val started = System.nanoTime()
     try
-      var index = 0
-      while index < records do
-        val recordIndex = if measureLatency then index.toLong else -index.toLong - 1L
-        val payload = payloadFor(recordIndex, config.payloadBytes)
-        val sentAt = System.nanoTime()
-        producer.send(
-          new ProducerRecord[Array[Byte], Array[Byte]](config.topic, index % config.partitions, null, payload),
-          (_, error) =>
-            if error != null then failure.compareAndSet(null, error): Unit
-            else if measureLatency then
-              val slot = latencyIndex.getAndIncrement()
-              latencies(slot) = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - sentAt)
-            latch.countDown()
-        )
-        index += 1
-      producer.flush()
-      if !latch.await(60, TimeUnit.SECONDS) then throw IllegalStateException(s"timed out with ${latch.getCount} unacknowledged records")
+      val tasks = (0 until config.producers).map { producerIndex =>
+        new Callable[Unit]:
+          override def call(): Unit =
+            val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(config))
+            try
+              var index = producerIndex
+              while index < records do
+                val recordIndex = if measureLatency then index.toLong else -index.toLong - 1L
+                val payload = payloadFor(recordIndex, config.payloadBytes)
+                val sentAt = System.nanoTime()
+                producer.send(
+                  new ProducerRecord[Array[Byte], Array[Byte]](config.topic, index % config.partitions, null, payload),
+                  (_, error) =>
+                    if error != null then failure.compareAndSet(null, error): Unit
+                    else if measureLatency then
+                      val slot = latencyIndex.getAndIncrement()
+                      latencies(slot) = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - sentAt)
+                )
+                index += config.producers
+              producer.flush()
+            finally producer.close(Duration.ofSeconds(30))
+      }
+      executor.invokeAll(tasks.asJava).asScala.foreach(_.get())
       Option(failure.get()).foreach(throw _)
+      if measureLatency && latencyIndex.get() != records then
+        throw IllegalStateException(s"recorded ${latencyIndex.get()} acknowledgements for $records records")
       ProduceMeasurement(nanosToMillis(System.nanoTime() - started), latencies)
-    finally producer.close(Duration.ofSeconds(30))
+    finally
+      executor.shutdownNow(): Unit
+      executor.awaitTermination(30L, TimeUnit.SECONDS): Unit
 
   private def consume(config: KafkaComparisonConfig): (Int, Int, Long) =
     val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(config.bootstrapServers))
@@ -253,4 +266,3 @@ object KafkaComparisonBenchmark:
     properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
     properties.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, (64 * 1024 * 1024).toString)
     properties
-

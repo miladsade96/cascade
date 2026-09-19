@@ -43,6 +43,14 @@ function Run-Benchmark([string]$Engine, [string]$Output) {
     if ($LASTEXITCODE -ne 0) { throw "$Engine benchmark failed." }
 }
 
+function Get-VolumeBytes([string]$Volume) {
+    $usage = & docker run --rm --mount "type=volume,source=$Volume,target=/data,readonly" `
+        busybox:1.37.0 du -sk /data
+    if ($LASTEXITCODE -ne 0) { throw "Could not measure Docker volume $Volume." }
+    $kibibytes = [long](($usage -split '\s+')[0])
+    return $kibibytes * 1024L
+}
+
 try {
     New-Item -ItemType Directory -Path $artifactDirectory | Out-Null
     & docker volume create $cascadeVolume | Out-Null
@@ -59,6 +67,7 @@ try {
     $cascadeStats = & docker stats --no-stream --format '{{.MemUsage}}|{{.CPUPerc}}' $cascadeName
     & docker stop --time 120 $cascadeName | Out-Null
     & docker rm $cascadeName | Out-Null
+    $cascadeDiskBytes = Get-VolumeBytes $cascadeVolume
 
     & docker volume create $kafkaVolume | Out-Null
     $kafkaStarted = [Diagnostics.Stopwatch]::StartNew()
@@ -78,10 +87,13 @@ try {
     $kafkaStarted.Stop()
     Run-Benchmark 'apache-kafka' (Join-Path $artifactDirectory 'apache-kafka.json')
     $kafkaStats = & docker stats --no-stream --format '{{.MemUsage}}|{{.CPUPerc}}' $kafkaName
+    & docker stop --time 120 $kafkaName | Out-Null
+    & docker rm $kafkaName | Out-Null
+    $kafkaDiskBytes = Get-VolumeBytes $kafkaVolume
 
     Write-Output "COMPARISON_RESULT directory=$artifactDirectory"
-    Write-Output "COMPARISON_SERVER engine=cascade startup_ms=$($cascadeStarted.ElapsedMilliseconds) stats=$cascadeStats"
-    Write-Output "COMPARISON_SERVER engine=apache-kafka startup_ms=$($kafkaStarted.ElapsedMilliseconds) stats=$kafkaStats"
+    Write-Output "COMPARISON_SERVER engine=cascade startup_ms=$($cascadeStarted.ElapsedMilliseconds) disk_bytes=$cascadeDiskBytes stats=$cascadeStats"
+    Write-Output "COMPARISON_SERVER engine=apache-kafka startup_ms=$($kafkaStarted.ElapsedMilliseconds) disk_bytes=$kafkaDiskBytes stats=$kafkaStats"
 }
 finally {
     foreach ($container in @($cascadeName, $kafkaName)) {
@@ -91,4 +103,3 @@ finally {
         if (& docker volume ls --quiet --filter "name=^$volume`$") { & docker volume rm $volume | Out-Null }
     }
 }
-
