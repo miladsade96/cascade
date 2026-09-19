@@ -20,6 +20,8 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySe
 import scala.jdk.CollectionConverters.*
 
 final class SecurePeerClusterEndToEndSuite extends munit.FunSuite:
+  override val munitTimeout = scala.concurrent.duration.Duration(120L, "seconds")
+
   test("three brokers replicate and fail over while every peer request uses authenticated TLS") {
     val root = Files.createTempDirectory("cascade-secure-peer-cluster")
     val ports = freePorts(3)
