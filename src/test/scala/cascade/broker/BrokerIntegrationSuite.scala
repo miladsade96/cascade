@@ -1,6 +1,7 @@
 package cascade.broker
 
 import cascade.TestRecordBatch
+import cascade.cluster.ClusterFeature
 import cascade.protocol.*
 import cascade.security.ResourceLimits
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
@@ -197,7 +198,35 @@ final class BrokerIntegrationSuite extends FunSuite:
         assert(apis.exists(api => api.apiKey == ApiKey.AddRaftVoter && api.maxVersion == 1))
         assert(apis.exists(api => api.apiKey == ApiKey.RemoveRaftVoter && api.maxVersion == 0))
         versions.readInt()
-        versions.skipTaggedFields()
+        assertEquals(versions.readUnsignedVarInt(), 3)
+        assertEquals(versions.readUnsignedVarInt(), 0)
+        val supportedFeatures = ByteCursor(versions.readBytes(versions.readUnsignedVarInt()))
+        assertEquals(supportedFeatures.readCompactArray {
+          val feature = (
+            supportedFeatures.readCompactString(),
+            supportedFeatures.readShort(),
+            supportedFeatures.readShort()
+          )
+          supportedFeatures.skipTaggedFields()
+          feature
+        }, Vector((ClusterFeature.TransactionVersion, 0.toShort, 2.toShort)))
+        supportedFeatures.ensureFullyRead()
+        assertEquals(versions.readUnsignedVarInt(), 1)
+        val featureEpoch = ByteCursor(versions.readBytes(versions.readUnsignedVarInt()))
+        assert(featureEpoch.readLong() >= 0L)
+        featureEpoch.ensureFullyRead()
+        assertEquals(versions.readUnsignedVarInt(), 2)
+        val finalizedFeatures = ByteCursor(versions.readBytes(versions.readUnsignedVarInt()))
+        assertEquals(finalizedFeatures.readCompactArray {
+          val feature = (
+            finalizedFeatures.readCompactString(),
+            finalizedFeatures.readShort(),
+            finalizedFeatures.readShort()
+          )
+          finalizedFeatures.skipTaggedFields()
+          feature
+        }, Vector((ClusterFeature.TransactionVersion, 2.toShort, 2.toShort)))
+        finalizedFeatures.ensureFullyRead()
         versions.ensureFullyRead()
 
         val metadata = request(output, input, metadataRequest("events", correlationId = 2))
