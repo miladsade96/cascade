@@ -567,6 +567,63 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("active transactions reject mixed v1 and v2 mutation paths") {
+    val directory = Files.createTempDirectory("cascade-delivery-transaction-version-mixing")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("version-mixing"), 30_000)
+        val active = ActiveTransaction(
+          "version-mixing",
+          producer.producerId,
+          producer.producerEpoch,
+          30_000,
+          System.currentTimeMillis(),
+          Vector(TopicPartition("events", 0)),
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          TransactionProtocol.Version2
+        )
+        delivery.installSnapshot(DeliveryCodec.encode(delivery.image.copy(activeTransactions = Vector(active))).toVector)
+
+        assertEquals(
+          delivery.addPartitions(
+            "version-mixing",
+            producer.producerId,
+            producer.producerEpoch,
+            Vector(TopicPartition("events", 0))
+          ),
+          Errors.InvalidTxnState
+        )
+        assertEquals(
+          delivery.addOffsets("version-mixing", producer.producerId, producer.producerEpoch, "workers"),
+          Errors.InvalidTxnState
+        )
+        assertEquals(
+          delivery.stageOffsets(
+            "version-mixing",
+            producer.producerId,
+            producer.producerEpoch,
+            "workers",
+            Vector.empty,
+            TransactionProtocol.Version1
+          ),
+          Errors.InvalidTxnState
+        )
+        assertEquals(
+          delivery.endTransaction(
+            "version-mixing",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = false,
+            TransactionProtocol.Version1
+          ).errorCode,
+          Errors.InvalidTxnState
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("startup completes only an interrupted transactional-offset application") {
     val directory = Files.createTempDirectory("cascade-delivery-offset-replay")
     val key = GroupOffsetKey("workers", "events", 0)

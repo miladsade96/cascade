@@ -162,6 +162,7 @@ final class DeliveryCoordinator(
         current.activeByTransactionalId.get(transactionalId) match
           case Some(active) if active.producerId != producerId || active.producerEpoch != producerEpoch =>
             Errors.ProducerFenced
+          case Some(active) if active.protocolVersion != TransactionProtocol.Version1 => Errors.InvalidTxnState
           case existing =>
             val registration = current.producerById(producerId)
             val active = existing.getOrElse(
@@ -210,6 +211,7 @@ final class DeliveryCoordinator(
     activeFor(transactionalId, producerId, producerEpoch) match
       case Left(error) => error
       case Right(active) if groupId.isEmpty => Errors.InvalidGroupId
+      case Right(active) if active.protocolVersion != TransactionProtocol.Version1 => Errors.InvalidTxnState
       case Right(active) =>
         val next = active.copy(groups = (active.groups :+ groupId).distinct)
         if replaceActive(next) then Errors.None else Errors.CoordinatorNotAvailable
