@@ -720,6 +720,93 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("TxnOffsetCommit v5 enrolls and atomically commits a consumer group") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("tv2-offsets", correlationId = 130))
+
+        val init = requestHeader(ApiKey.InitProducerId, 5, 131, flexible = true)
+          .writeCompactNullableString(Some("tv2-offset-producer"))
+          .writeInt(30_000)
+          .writeLong(-1L)
+          .writeShort(-1)
+          .writeEmptyTaggedFields()
+        val initialized = request(output, input, init.result())
+        initialized.readInt()
+        initialized.skipTaggedFields()
+        initialized.readInt()
+        assertEquals(initialized.readShort(), Errors.None)
+        val producerId = initialized.readLong()
+        val producerEpoch = initialized.readShort()
+        initialized.skipTaggedFields()
+        initialized.ensureFullyRead()
+
+        val commit = requestHeader(ApiKey.TxnOffsetCommit, 5, 132, flexible = true)
+          .writeCompactString("tv2-offset-producer")
+          .writeCompactString("tv2-offset-workers")
+          .writeLong(producerId)
+          .writeShort(producerEpoch)
+          .writeInt(-1)
+          .writeCompactString("")
+          .writeCompactNullableString(None)
+        commit.writeCompactArray(Vector("tv2-offsets")) { topic =>
+          commit.writeCompactString(topic)
+          commit.writeCompactArray(Vector(0)) { partition =>
+            commit.writeInt(partition).writeLong(42L).writeInt(-1).writeCompactNullableString(None)
+            commit.writeEmptyTaggedFields(): Unit
+          }
+          commit.writeEmptyTaggedFields(): Unit
+        }
+        commit.writeEmptyTaggedFields()
+        val committed = request(output, input, commit.result())
+        assertEquals(committed.readInt(), 132)
+        committed.skipTaggedFields()
+        committed.readInt()
+        assertEquals(committed.readUnsignedVarInt(), 2)
+        assertEquals(committed.readCompactString(), "tv2-offsets")
+        assertEquals(committed.readUnsignedVarInt(), 2)
+        assertEquals(committed.readInt(), 0)
+        assertEquals(committed.readShort(), Errors.None)
+        committed.skipTaggedFields()
+        committed.skipTaggedFields()
+        committed.skipTaggedFields()
+        committed.ensureFullyRead()
+
+        val end = requestHeader(ApiKey.EndTxn, 5, 133, flexible = true)
+          .writeCompactString("tv2-offset-producer")
+          .writeLong(producerId)
+          .writeShort(producerEpoch)
+          .writeBoolean(true)
+          .writeEmptyTaggedFields()
+        val ended = request(output, input, end.result())
+        assertEquals(ended.readInt(), 133)
+        ended.skipTaggedFields()
+        ended.readInt()
+        assertEquals(ended.readShort(), Errors.None)
+        assertEquals(ended.readLong(), producerId)
+        assertEquals(ended.readShort(), (producerEpoch + 1).toShort)
+        ended.skipTaggedFields()
+        ended.ensureFullyRead()
+
+        val fetched = request(output, input, offsetFetchV4Request("tv2-offset-workers", "tv2-offsets", 134))
+        assertEquals(fetched.readInt(), 134)
+        fetched.readInt()
+        assertEquals(fetched.readInt(), 1)
+        assertEquals(fetched.readString(), "tv2-offsets")
+        assertEquals(fetched.readInt(), 1)
+        assertEquals(fetched.readInt(), 0)
+        assertEquals(fetched.readLong(), 42L)
+        assertEquals(fetched.readNullableString(), None)
+        assertEquals(fetched.readShort(), Errors.None)
+        assertEquals(fetched.readShort(), Errors.None)
+        fetched.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("applies response, Produce, and Fetch quotas and reports Kafka throttle fields") {
     val directory = Files.createTempDirectory("cascade-traffic-quotas")
     val broker = KafkaBroker(
