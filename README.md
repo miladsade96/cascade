@@ -112,7 +112,7 @@ Cascade advertises only versions it implements and tests. It does not pretend to
 
 | API | Key | Versions | Coverage |
 | --- | ---: | ---: | --- |
-| Produce | 0 | 3 | `acks` 0/1/all, idempotence, transactional batches |
+| Produce | 0 | 3-12 | `acks` 0/1/all, flexible schemas, idempotence, transaction V2 enrollment |
 | Fetch | 1 | 6 | High watermark, last stable offset, `read_committed` |
 | ListOffsets | 2 | 2 | Earliest/latest offsets |
 | Metadata | 3 | 4 | Broker/topic/partition discovery |
@@ -126,7 +126,7 @@ Cascade advertises only versions it implements and tests. It does not pretend to
 | CreateTopics | 19 | 2 | Quorum-committed topic creation |
 | InitProducerId | 22 | 0-5 | Durable IDs, retries, and fencing |
 | AddPartitionsToTxn | 24 | 0-5 | Enrollment and verify-only admission |
-| AddOffsetsToTxn / EndTxn / TxnOffsetCommit | 25 / 26 / 28 | 0-4 | Transactional consumer offsets and outcomes |
+| AddOffsetsToTxn / EndTxn / TxnOffsetCommit | 25 / 26 / 28 | 0-4 / 0-5 / 0-5 | Transactional offsets, V2 epoch bumps, and retry-stable outcomes |
 | DescribeAcls / CreateAcls / DeleteAcls | 29-31 | 1 | Kafka ACL administration |
 | DescribeConfigs | 32 | 2 | Non-sensitive broker/topic configuration |
 | DeleteGroups | 42 | 0-2 | Empty-group and offset deletion |
@@ -179,7 +179,7 @@ See [consumer group administration](docs/group-administration.md) and the [consu
 
 ## Transactions and delivery semantics
 
-Producer IDs, epochs, duplicate windows, sequence state, active ranges, outcomes, transaction timeouts, and transactional offsets are durable. A successor coordinator can resolve a certified in-doubt decision. Fetch computes last stable offsets and filters aborted/open data for `read_committed` consumers.
+Producer IDs, epochs, duplicate windows, sequence state, active ranges, outcomes, transaction timeouts, and transactional offsets are durable. Kafka transaction protocol V2 is negotiated through finalized `transaction.version=2`: Produce v12 enrolls partitions, TxnOffsetCommit v5 enrolls groups, and EndTxn v5 atomically returns the next producer identity. A successor coordinator can resolve a certified in-doubt decision. Fetch computes last stable offsets and filters aborted/open data for `read_committed` consumers.
 
 See [delivery semantics](docs/delivery-semantics.md) and its [qualification report](docs/performance/2026-09-14-delivery-semantics.md).
 

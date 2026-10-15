@@ -12,6 +12,7 @@ I use ADRs to preserve why Cascade works the way it does, including options I re
 | [0006](0006-consumer-group-coordination.md) | Shard coordination and serve acknowledged immutable views |
 | [0007](0007-transactions.md) | Certify transaction outcomes across coordinator shards |
 | [0008](0008-virtual-thread-networking.md) | Pair virtual-thread simplicity with strict admission limits |
+| [0009](0009-kafka-transaction-v2.md) | Activate Kafka transaction V2 only through a durable cluster feature |
 
 When a decision changes materially, I add a superseding ADR instead of rewriting the historical reason.
 
