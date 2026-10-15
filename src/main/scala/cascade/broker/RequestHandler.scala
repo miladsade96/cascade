@@ -91,7 +91,7 @@ final class RequestHandler(
       ApiKey.ListTransactions -> ((header, body, session) => listTransactions(header.apiVersion, body, session)),
       ApiKey.DescribeProducers -> ((_, body, session) => describeProducers(body, session))
     )),
-    ProduceApiHandler((_, body, session) => produce(body, session)),
+    ProduceApiHandler((header, body, session) => produce(header.apiVersion, body, session)),
     FetchApiHandler(Map(
       ApiKey.Fetch -> ((_, body, session) => fetch(body, session)),
       ApiKey.ListOffsets -> ((_, body, session) => listOffsets(body, session))
@@ -1606,19 +1606,23 @@ final class RequestHandler(
       .writeEmptyTaggedFields()
       .result()
 
-  private def produce(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
-    val transactionalId = cursor.readNullableString()
+  private def produce(version: Short, cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
+    val flexible = version >= 9
+    val transactionalId = if flexible then cursor.readCompactNullableString() else cursor.readNullableString()
     val acknowledgements = cursor.readShort()
     val timeoutMillis = cursor.readInt()
-    val requests = cursor.readArray {
-      val topic = cursor.readString()
-      val partitions = cursor.readArray {
+    def readTopic(): (String, Vector[(Int, Option[Array[Byte]])]) =
+      val topic = if flexible then cursor.readCompactString() else cursor.readString()
+      def readPartition(): (Int, Option[Array[Byte]]) =
         val index = cursor.readInt()
-        val records = cursor.readNullableBytes()
-        (index, records)
-      }
-      (topic, partitions)
-    }
+        val records = if flexible then cursor.readCompactNullableBytes() else cursor.readNullableBytes()
+        if flexible then cursor.skipTaggedFields()
+        index -> records
+      val partitions = if flexible then cursor.readCompactArray(readPartition()) else cursor.readArray(readPartition())
+      if flexible then cursor.skipTaggedFields()
+      topic -> partitions
+    val requests = if flexible then cursor.readCompactArray(readTopic()) else cursor.readArray(readTopic())
+    if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
 
     val results = requests.map { case (topic, partitions) =>
