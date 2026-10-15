@@ -1661,13 +1661,24 @@ final class RequestHandler(
       None
     else
       val writer = ByteWriter()
-      writer.writeArray(results) { case (topic, partitions) =>
-        writer.writeString(topic)
-        writer.writeArray(partitions) { case (index, error, baseOffset) =>
-          writer.writeInt(index).writeShort(error).writeLong(baseOffset).writeLong(-1L): Unit
-        }
-      }
+      def writeTopic(result: (String, Vector[(Int, Short, Long)])): Unit = result match
+        case (topic, partitions) =>
+          if flexible then writer.writeCompactString(topic) else writer.writeString(topic)
+          def writePartition(result: (Int, Short, Long)): Unit = result match
+            case (index, error, baseOffset) =>
+              writer.writeInt(index).writeShort(error).writeLong(baseOffset).writeLong(-1L)
+              if version >= 5 then writer.writeLong(-1L)
+              if version >= 8 then
+                if flexible then writer.writeCompactArray(Vector.empty[Unit])(_ => ())
+                else writer.writeArray(Vector.empty[Unit])(_ => ())
+                if flexible then writer.writeCompactNullableString(None) else writer.writeNullableString(None)
+              if flexible then writer.writeEmptyTaggedFields()
+          if flexible then writer.writeCompactArray(partitions)(writePartition)
+          else writer.writeArray(partitions)(writePartition)
+          if flexible then writer.writeEmptyTaggedFields()
+      if flexible then writer.writeCompactArray(results)(writeTopic) else writer.writeArray(results)(writeTopic)
       writer.writeInt(session.consumeThrottleMillis())
+      if flexible then writer.writeEmptyTaggedFields()
       Some(writer.result())
 
   private def fetch(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
