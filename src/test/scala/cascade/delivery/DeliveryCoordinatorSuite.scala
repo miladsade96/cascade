@@ -181,6 +181,54 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 rotates the producer id before the epoch is exhausted") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-overflow")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("tv2-overflow"), 30_000)
+        val exhaustedEpoch = (Short.MaxValue - 1).toShort
+        val registration = delivery.image.producerByTransactionalId("tv2-overflow").copy(producerEpoch = exhaustedEpoch)
+        val active = ActiveTransaction(
+          "tv2-overflow",
+          producer.producerId,
+          exhaustedEpoch,
+          30_000,
+          System.currentTimeMillis(),
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          TransactionProtocol.Version2
+        )
+        delivery.installSnapshot(
+          DeliveryCodec.encode(delivery.image.copy(producers = Vector(registration), activeTransactions = Vector(active))).toVector
+        )
+        val nextProducerId = delivery.image.nextProducerId
+
+        val ended = delivery.endTransaction(
+          "tv2-overflow",
+          producer.producerId,
+          exhaustedEpoch,
+          committed = false,
+          TransactionProtocol.Version2
+        )
+        assertEquals(ended, EndTransactionResult(Errors.None, nextProducerId, 0))
+        assertEquals(delivery.image.nextProducerId, nextProducerId + 1L)
+        assertEquals(delivery.image.producerByTransactionalId("tv2-overflow").producerId, nextProducerId)
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-overflow",
+            producer.producerId,
+            exhaustedEpoch,
+            committed = false,
+            TransactionProtocol.Version2
+          ),
+          ended
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("expected producer epochs make initialization retries stable") {
     val directory = Files.createTempDirectory("cascade-delivery-init-retry")
     try
