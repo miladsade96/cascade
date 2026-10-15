@@ -229,6 +229,52 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 timeout aborts and fences the expired epoch") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-timeout")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("tv2-timeout"), 30_000)
+        val active = ActiveTransaction(
+          "tv2-timeout",
+          producer.producerId,
+          producer.producerEpoch,
+          1,
+          0L,
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          TransactionProtocol.Version2
+        )
+        delivery.installSnapshot(DeliveryCodec.encode(delivery.image.copy(activeTransactions = Vector(active))).toVector)
+        delivery.expireNow()
+
+        assertEquals(delivery.image.activeTransactions, Vector.empty)
+        assertEquals(delivery.image.producerByTransactionalId("tv2-timeout").producerEpoch, 1.toShort)
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-timeout",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = false,
+            TransactionProtocol.Version2
+          ),
+          EndTransactionResult(Errors.None, producer.producerId, 1)
+        )
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-timeout",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = true,
+            TransactionProtocol.Version2
+          ).errorCode,
+          Errors.InvalidTxnState
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("expected producer epochs make initialization retries stable") {
     val directory = Files.createTempDirectory("cascade-delivery-init-retry")
     try

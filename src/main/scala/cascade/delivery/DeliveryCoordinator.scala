@@ -269,7 +269,7 @@ final class DeliveryCoordinator(
         val useAtomicSnapshot = !durableLocal && committed && active.pendingOffsets.nonEmpty
         val registration = current.producerById(producerId)
         val (resultingRegistration, resultingNextProducerId) =
-          if protocolVersion == TransactionProtocol.Version2 then bumpProducerIdentity(registration)
+          if protocolVersion == TransactionProtocol.Version2 then bumpProducerIdentity(registration, current.nextProducerId)
           else registration -> current.nextProducerId
         val completed = CompletedTransaction(
           transactionalId,
@@ -627,15 +627,15 @@ final class DeliveryCoordinator(
       case Some(producer) if producer.producerEpoch != producerEpoch => Errors.ProducerFenced
       case Some(_) => Errors.None
 
-  private def bumpProducerIdentity(registration: ProducerRegistration): (ProducerRegistration, Long) =
+  private def bumpProducerIdentity(registration: ProducerRegistration, availableProducerId: Long): (ProducerRegistration, Long) =
     if registration.producerEpoch >= Short.MaxValue - 1 then
       ProducerRegistration(
-        current.nextProducerId,
+        availableProducerId,
         0,
         registration.transactionalId,
         registration.transactionTimeoutMillis
-      ) -> Math.addExact(current.nextProducerId, 1L)
-    else registration.copy(producerEpoch = (registration.producerEpoch + 1).toShort) -> current.nextProducerId
+      ) -> Math.addExact(availableProducerId, 1L)
+    else registration.copy(producerEpoch = (registration.producerEpoch + 1).toShort) -> availableProducerId
 
   private def activeFor(
       transactionalId: String,
@@ -684,21 +684,44 @@ final class DeliveryCoordinator(
       nowMillis - active.startedAtMillis >= active.timeoutMillis.toLong
     }
     if expired.nonEmpty then
-      val completed = expired.map { active =>
-        CompletedTransaction(
-          active.transactionalId,
-          active.producerId,
-          active.producerEpoch,
-          committed = false,
-          offsetsApplied = true,
-          active.ranges,
-          Vector.empty
-        )
+      val (producers, nextProducerId, completed) = expired.foldLeft(
+        (current.producers, current.nextProducerId, Vector.empty[CompletedTransaction])
+      ) { case ((registrations, availableProducerId, completions), active) =>
+        if active.protocolVersion == TransactionProtocol.Version2 then
+          val registration = registrations.find(_.producerId == active.producerId).get
+          val (bumped, nextAvailable) = bumpProducerIdentity(registration, availableProducerId)
+          val updated = registrations.filterNot(_.transactionalId == Some(active.transactionalId)) :+ bumped
+          val completion = CompletedTransaction(
+            active.transactionalId,
+            active.producerId,
+            active.producerEpoch,
+            committed = false,
+            offsetsApplied = true,
+            active.ranges,
+            Vector.empty,
+            TransactionProtocol.Version2,
+            bumped.producerId,
+            bumped.producerEpoch
+          )
+          (updated, nextAvailable, completions :+ completion)
+        else
+          val completion = CompletedTransaction(
+            active.transactionalId,
+            active.producerId,
+            active.producerEpoch,
+            committed = false,
+            offsetsApplied = true,
+            active.ranges,
+            Vector.empty
+          )
+          (registrations, availableProducerId, completions :+ completion)
       }
       val ids = expired.map(_.transactionalId).toSet
       commit(
         current.copy(
           version = current.version + 1L,
+          nextProducerId = nextProducerId,
+          producers = producers,
           activeTransactions = current.activeTransactions.filterNot(value => ids(value.transactionalId)),
           completedTransactions = current.completedTransactions ++ completed
         )
