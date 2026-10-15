@@ -40,6 +40,15 @@ I run the complete wire/coordinator/client regression and a configurable exact t
 
 I require exact committed and uncommitted value sets, no duplicates or omissions, and the same committed set after broker restart. The 2026-09-14 development-host run passed with 256 transactional IDs, 16 concurrent workers, 256 committed records, 512 uncommitted records, 256 recovered committed records, and zero mismatches. The [dated report](performance/2026-09-14-delivery-semantics.md) keeps the scope and remaining limits.
 
+For transaction protocol V2 I also require feature negotiation, flexible Produce v12, implicit partition and group enrollment, retry-stable EndTxn v5 identities, epoch rollover, protocol-mixing rejection, restart recovery, and coordinator failover:
+
+```powershell
+.\sbt.bat "testOnly cascade.protocol.BinaryCodecSuite cascade.protocol.CompatibilityContractSuite cascade.coordinator.CoordinatorFormatSuite cascade.delivery.DeliveryStoreSuite cascade.delivery.DeliveryCoordinatorSuite cascade.broker.BrokerIntegrationSuite cascade.e2e.KafkaClientEndToEndSuite"
+.\sbt.bat clean test
+```
+
+On 2026-10-16 the clean release tree passed 612/612 tests in 273 seconds with no failures or errors. The [transaction V2 report](performance/2026-10-16-transaction-v2.md) records the coverage and remaining limits.
+
 ## Distributed quotas
 
 I run the local bucket, peer-codec, exact ledger, metric, rolling-activation, and three-broker fault tests together:

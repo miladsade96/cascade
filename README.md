@@ -25,7 +25,7 @@ The current release is `1.9.0`. The source, deployment manifests, compatibility 
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **593/593** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **189 seconds**. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
+The latest complete source qualification passed **612/612** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **273 seconds**. It includes Kafka transaction protocol V2 recovery and failover coverage. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
 
 > [!IMPORTANT]
 > Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, cross-version-image, and dedicated-host gates explicit.

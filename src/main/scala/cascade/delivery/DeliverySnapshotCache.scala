@@ -20,6 +20,8 @@ private[cascade] final class DeliverySnapshotCache:
   }
 
 private[cascade] object DeliverySnapshotCache:
+  private val EmptyImageBytes = DeliveryCodec.encode(DeliveryImage.Empty).length.toLong
+
   def fullImageBytes(payloads: Vector[Vector[Byte]]): Long =
     require(payloads.size == CoordinatorShard.Buckets + 1, "invalid delivery payload count")
-    28L + payloads.init.iterator.map(_.size.toLong - 28L).sum
+    EmptyImageBytes + payloads.init.iterator.map(_.size.toLong - EmptyImageBytes).sum
