@@ -21,6 +21,12 @@ final case class PendingOffset(
     metadata: Option[String]
 )
 
+object TransactionProtocol:
+  val Version1: Short = 1
+  val Version2: Short = 2
+
+  def supported(version: Short): Boolean = version == Version1 || version == Version2
+
 final case class ActiveTransaction(
     transactionalId: String,
     producerId: Long,
@@ -30,8 +36,10 @@ final case class ActiveTransaction(
     partitions: Vector[TopicPartition],
     ranges: Vector[TransactionRange],
     groups: Vector[String],
-    pendingOffsets: Vector[PendingOffset]
-)
+    pendingOffsets: Vector[PendingOffset],
+    protocolVersion: Short = TransactionProtocol.Version1
+):
+  require(TransactionProtocol.supported(protocolVersion), s"unsupported transaction protocol version: $protocolVersion")
 
 final case class CompletedTransaction(
     transactionalId: String,
@@ -90,7 +98,7 @@ object DeliveryImage:
 
 object DeliveryCodec:
   private val Magic = 0xca5cade2
-  private val CurrentFormat: Short = 1
+  private val CurrentFormat: Short = 2
 
   def encode(image: DeliveryImage): Array[Byte] =
     val writer = ByteWriter()
@@ -115,15 +123,15 @@ object DeliveryCodec:
       if probe.readInt() == Magic then (probe, probe.readShort())
       else (ByteCursor(bytes), 0.toShort)
     if format < 0 || format > CurrentFormat then throw cascade.protocol.ProtocolException(s"unsupported delivery format: $format")
-    readBody(cursor)
+    readBody(cursor, format)
 
-  private def readBody(cursor: ByteCursor): DeliveryImage =
+  private def readBody(cursor: ByteCursor, format: Short): DeliveryImage =
     val version = cursor.readLong()
     val nextProducerId = cursor.readLong()
     val producers = cursor.readArray {
       ProducerRegistration(cursor.readLong(), cursor.readShort(), cursor.readNullableString(), cursor.readInt())
     }
-    val active = cursor.readArray(readActive(cursor))
+    val active = cursor.readArray(readActive(cursor, format))
     val completed = cursor.readArray(readCompleted(cursor))
     cursor.ensureFullyRead()
     DeliveryImage(version, nextProducerId, producers, active, completed)
@@ -167,9 +175,10 @@ object DeliveryCodec:
     writer.writeArray(value.partitions)(writeTopicPartition(writer, _))
     writer.writeArray(value.ranges)(writeRange(writer, _))
     writer.writeArray(value.groups)(writer.writeString)
-    writer.writeArray(value.pendingOffsets)(writeOffset(writer, _)): Unit
+    writer.writeArray(value.pendingOffsets)(writeOffset(writer, _))
+    writer.writeShort(value.protocolVersion): Unit
 
-  private def readActive(cursor: ByteCursor): ActiveTransaction =
+  private def readActive(cursor: ByteCursor, format: Short): ActiveTransaction =
     ActiveTransaction(
       cursor.readString(),
       cursor.readLong(),
@@ -179,7 +188,8 @@ object DeliveryCodec:
       cursor.readArray(readTopicPartition(cursor)),
       cursor.readArray(readRange(cursor)),
       cursor.readArray(cursor.readString()),
-      cursor.readArray(readOffset(cursor))
+      cursor.readArray(readOffset(cursor)),
+      if format >= 2 then cursor.readShort() else TransactionProtocol.Version1
     )
 
   private def writeCompleted(writer: ByteWriter, value: CompletedTransaction): Unit =
