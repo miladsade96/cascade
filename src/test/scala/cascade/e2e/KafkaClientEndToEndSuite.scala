@@ -753,7 +753,7 @@ final class KafkaClientEndToEndSuite extends FunSuite:
       directories.foreach(deleteTree)
   }
 
-  test("an open Kafka transaction commits with its offsets after coordinator failover") {
+  test("an open Kafka transaction v2 commits with its offsets after coordinator failover") {
     val ports = freePorts(3)
     val nodes = ports.zipWithIndex.map { case (port, index) => ClusterNode(index + 1, "127.0.0.1", port) }
     val directories = nodes.map(node => Files.createTempDirectory(s"cascade-transaction-failover-${node.id}"))
@@ -830,6 +830,11 @@ final class KafkaClientEndToEndSuite extends FunSuite:
             .get(15, TimeUnit.SECONDS)
           assertEquals(appended.offset(), 1L)
           successor.commitTransaction()
+          successor.beginTransaction()
+          val aborted = successor.send(ProducerRecord(topic, "aborted-after-failover".getBytes(StandardCharsets.UTF_8)))
+            .get(15, TimeUnit.SECONDS)
+          assertEquals(aborted.offset(), 2L)
+          successor.abortTransaction()
         finally successor.close(Duration.ofSeconds(5))
       finally
         producer.close(Duration.ofSeconds(5))
@@ -841,6 +846,16 @@ final class KafkaClientEndToEndSuite extends FunSuite:
         verifier.seekToBeginning(java.util.List.of(partition))
         assertEquals(pollValues(verifier, expected = 2), Vector("spans-failover", "after-failover"))
       finally verifier.close()
+
+      val uncommitted = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrapServers, readCommitted = false))
+      try
+        uncommitted.assign(java.util.List.of(partition))
+        uncommitted.seekToBeginning(java.util.List.of(partition))
+        assertEquals(
+          pollValues(uncommitted, expected = 3),
+          Vector("spans-failover", "after-failover", "aborted-after-failover")
+        )
+      finally uncommitted.close()
     finally
       brokers.foreach(_.close())
       directories.foreach(deleteTree)
