@@ -1943,10 +1943,20 @@ final class RequestHandler(
     val committed = cursor.readBoolean()
     if flexible then cursor.skipTaggedFields()
     cursor.ensureFullyRead()
-    val error =
-      if isTransactionCoordinatorFor(transactionalId) then deliveryCoordinator.endTransaction(transactionalId, producerId, producerEpoch, committed)
-      else Errors.NotCoordinator
-    val writer = ByteWriter().writeInt(0).writeShort(error)
+    val result =
+      if isTransactionCoordinatorFor(transactionalId) then
+        deliveryCoordinator.endTransaction(
+          transactionalId,
+          producerId,
+          producerEpoch,
+          committed,
+          if version >= 5 && clusterManager.supportsFeature(ClusterFeature.TransactionVersion, 2)
+          then TransactionProtocol.Version2
+          else TransactionProtocol.Version1
+        )
+      else EndTransactionResult(Errors.NotCoordinator)
+    val writer = ByteWriter().writeInt(0).writeShort(result.errorCode)
+    if version >= 5 then writer.writeLong(result.producerId).writeShort(result.producerEpoch): Unit
     if flexible then writer.writeEmptyTaggedFields()
     Some(writer.result())
 

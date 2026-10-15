@@ -2,6 +2,7 @@ package cascade.broker
 
 import cascade.TestRecordBatch
 import cascade.cluster.ClusterFeature
+import cascade.delivery.EndTransactionResult
 import cascade.protocol.*
 import cascade.security.ResourceLimits
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream}
@@ -54,6 +55,7 @@ final class BrokerIntegrationSuite extends FunSuite:
         response.skipTaggedFields()
         response.skipTaggedFields()
         response.ensureFullyRead()
+
       finally socket.close()
     }
   }
@@ -694,6 +696,26 @@ final class BrokerIntegrationSuite extends FunSuite:
         assertEquals(response.readInt(), 0)
         response.skipTaggedFields()
         response.ensureFullyRead()
+
+        def endTransaction(correlationId: Int): EndTransactionResult =
+          val end = requestHeader(ApiKey.EndTxn, 5, correlationId, flexible = true)
+            .writeCompactString("tv2-producer")
+            .writeLong(producerId)
+            .writeShort(producerEpoch)
+            .writeBoolean(true)
+            .writeEmptyTaggedFields()
+          val ended = request(output, input, end.result())
+          assertEquals(ended.readInt(), correlationId)
+          ended.skipTaggedFields()
+          ended.readInt()
+          val result = EndTransactionResult(ended.readShort(), ended.readLong(), ended.readShort())
+          ended.skipTaggedFields()
+          ended.ensureFullyRead()
+          result
+
+        val ended = endTransaction(123)
+        assertEquals(ended, EndTransactionResult(Errors.None, producerId, (producerEpoch + 1).toShort))
+        assertEquals(endTransaction(124), ended)
       finally socket.close()
     }
   }
