@@ -192,8 +192,32 @@ final class RequestHandler(
         writer.writeShort(api.apiKey).writeShort(api.minVersion).writeShort(api.maxVersion): Unit
       }
     if version >= 1 then writer.writeInt(0)
-    if version >= 3 then writer.writeEmptyTaggedFields()
+    if version >= 3 then writer.writeTaggedFields(apiVersionsFeatureTags(version))
     Some(writer.result())
+
+  private def apiVersionsFeatureTags(version: Short): Vector[(Int, Array[Byte])] =
+    val supported =
+      if version >= 4 then
+        val payload = ByteWriter()
+        payload.writeCompactArray(Vector(ClusterFeature.TransactionVersion)) { name =>
+          payload.writeCompactString(name)
+          payload.writeShort(0)
+          payload.writeShort(2)
+          payload.writeEmptyTaggedFields(): Unit
+        }
+        Vector(0 -> payload.result())
+      else Vector.empty
+    if clusterManager.supportsFeature(ClusterFeature.TransactionVersion, 2) then
+      val epoch = ByteWriter().writeLong(clusterManager.metadataVersion).result()
+      val finalized = ByteWriter()
+      finalized.writeCompactArray(Vector(ClusterFeature.TransactionVersion)) { name =>
+        finalized.writeCompactString(name)
+        finalized.writeShort(2)
+        finalized.writeShort(2)
+        finalized.writeEmptyTaggedFields(): Unit
+      }
+      supported ++ Vector(1 -> epoch, 2 -> finalized.result())
+    else supported
 
   private def saslHandshake(cursor: ByteCursor, session: ConnectionSession): Option[Array[Byte]] =
     val mechanism = cursor.readString()
