@@ -16,7 +16,6 @@ final case class EndTransactionResult(errorCode: Short, producerId: Long = -1L, 
 private final case class TransactionReservation(
     transactionalId: String,
     topicPartition: TopicPartition,
-    previousRange: Option[TransactionRange],
     firstOffset: Long
 )
 
@@ -369,12 +368,7 @@ final class DeliveryCoordinator(
           ).map { _ =>
             transactionalId.map { id =>
               val firstOffset = log.get.logEndOffset
-              val reservation = reserveTransactionalAppend(
-                id,
-                topicPartition,
-                firstOffset,
-                Math.addExact(firstOffset, span)
-              )
+              val reservation = reserveTransactionalAppend(id, topicPartition, firstOffset)
               inFlightTransactionalAppends.update(id, inFlightTransactionalAppends.getOrElse(id, 0) + 1)
               reservation
             }
@@ -397,12 +391,19 @@ final class DeliveryCoordinator(
               val appended = replication.append(topic, partition, records, acknowledgements, timeoutMillis)
               var coordinatorCommitted = true
               reservation.foreach { reserved =>
-                if appended.baseOffset < 0L then rollbackTransactionalAppend(reserved)
-                else if appended.baseOffset != reserved.firstOffset then
+                if appended.baseOffset >= 0L && appended.baseOffset != reserved.firstOffset then
                   throw ProtocolException(
                     s"transactional append offset changed after reservation: reserved=${reserved.firstOffset}, appended=${appended.baseOffset}"
                   )
-                else coordinatorCommitted = commitTransactionalAppend()
+                else if appended.baseOffset >= 0L then
+                  coordinatorCommitted = stateLock.synchronized {
+                    recordTransactionalRange(
+                      reserved.transactionalId,
+                      reserved.topicPartition,
+                      appended.baseOffset,
+                      Math.addExact(appended.baseOffset, span)
+                    )
+                  }
               }
               if coordinatorCommitted then fromReplication(appended)
               else DeliveryAppendResult(Errors.CoordinatorNotAvailable, -1L)
@@ -616,42 +617,10 @@ final class DeliveryCoordinator(
   private def reserveTransactionalAppend(
       transactionalId: String,
       topicPartition: TopicPartition,
-      firstOffset: Long,
-      lastOffset: Long
+      firstOffset: Long
   ): TransactionReservation =
-    val active = current.activeByTransactionalId(transactionalId)
-    val existing = active.ranges.find(range => range.topic == topicPartition.topic && range.partition == topicPartition.partition)
-    val updated = existing.fold(TransactionRange(topicPartition.topic, topicPartition.partition, firstOffset, lastOffset)) { range =>
-      range.copy(firstOffset = math.min(range.firstOffset, firstOffset), lastOffset = math.max(range.lastOffset, lastOffset))
-    }
-    replaceActiveInMemory(
-      active.copy(
-        ranges = active.ranges.filterNot(range =>
-          range.topic == topicPartition.topic && range.partition == topicPartition.partition
-        ) :+ updated
-      )
-    )
-    TransactionReservation(transactionalId, topicPartition, existing, firstOffset)
-
-  private def rollbackTransactionalAppend(reservation: TransactionReservation): Unit = stateLock.synchronized {
-    current.activeByTransactionalId.get(reservation.transactionalId).foreach { active =>
-      val withoutReservation = active.ranges.filterNot(range =>
-        range.topic == reservation.topicPartition.topic && range.partition == reservation.topicPartition.partition
-      )
-      val restored = reservation.previousRange.fold(withoutReservation)(withoutReservation :+ _)
-      replaceActiveInMemory(active.copy(ranges = restored))
-    }
-  }
-
-  private def commitTransactionalAppend(): Boolean = stateLock.synchronized {
-    current = current.copy(version = Math.addExact(current.version, 1L))
-    val committed = checkpoint.commit()
-    if committed then
-      acknowledgedImage = current
-      acknowledged = DeliveryReadView.from(current)
-    else installCommittedImage(acknowledgedImage)
-    committed
-  }
+    current.activeByTransactionalId(transactionalId)
+    TransactionReservation(transactionalId, topicPartition, firstOffset)
 
   private def recordTransactionalRange(
       transactionalId: String,
@@ -674,9 +643,7 @@ final class DeliveryCoordinator(
           ) :+ updated
         )
         if next == active then true
-        else
-          replaceActiveInMemory(next)
-          commitTransactionalAppend()
+        else replaceActive(next)
 
   private def finishTransactionalAppend(transactionalId: String): Unit = stateLock.synchronized {
     val remaining = inFlightTransactionalAppends.getOrElse(transactionalId, 0) - 1
@@ -720,11 +687,6 @@ final class DeliveryCoordinator(
         version = current.version + 1L,
         activeTransactions = current.activeTransactions.filterNot(_.transactionalId == active.transactionalId) :+ active
       )
-    )
-
-  private def replaceActiveInMemory(active: ActiveTransaction): Unit =
-    current = current.copy(
-      activeTransactions = current.activeTransactions.filterNot(_.transactionalId == active.transactionalId) :+ active
     )
 
   private def commit(next: DeliveryImage, includeStagedGroupOffsets: Boolean = false): Boolean =

@@ -353,6 +353,41 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transactional range publication survives a concurrent coordinator image install") {
+    val directory = Files.createTempDirectory("cascade-delivery-range-install-race")
+    try
+      withCoordinator(directory) { (delivery, _, registry) =>
+        val producer = delivery.initProducerId(Some("range-race"), 30_000)
+        val appended = delivery.append(
+          Some("range-race"),
+          "events",
+          0,
+          TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true),
+          -1,
+          30_000,
+          new ReplicatedAppender:
+            override def append(
+                topic: String,
+                partition: Int,
+                records: Array[Byte],
+                acknowledgements: Short,
+                timeoutMillis: Int
+            ): ReplicatedAppendResult =
+              val concurrentlyInstalled = delivery.snapshotBytes.toVector
+              delivery.installSnapshot(concurrentlyInstalled)
+              val result = registry.partition(topic, partition).get.append(records)
+              ReplicatedAppendResult(Errors.None, result.baseOffset),
+          TransactionProtocol.Version2
+        )
+        assertEquals(appended, DeliveryAppendResult(Errors.None, 0L))
+        assertEquals(
+          delivery.image.activeByTransactionalId("range-race").ranges,
+          Vector(TransactionRange("events", 0, 0L, 0L))
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("transactional offsets commit once and are not replayed over a newer offset") {
     val directory = Files.createTempDirectory("cascade-delivery-offsets")
     val key = GroupOffsetKey("workers", "events", 0)
