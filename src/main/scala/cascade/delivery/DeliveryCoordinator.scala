@@ -98,14 +98,14 @@ final class DeliveryCoordinator(
                 if producerId == existing.producerId && producerEpoch.toInt + 1 == existing.producerEpoch.toInt =>
               return InitProducerIdResult(Errors.None, existing.producerId, existing.producerEpoch)
             case Some((producerId, producerEpoch))
-                if producerEpoch == Short.MaxValue && producerId < existing.producerId && existing.producerEpoch == 0 =>
+                if producerEpoch >= Short.MaxValue - 1 && producerId < existing.producerId && existing.producerEpoch == 0 =>
               return InitProducerIdResult(Errors.None, existing.producerId, existing.producerEpoch)
             case Some((producerId, producerEpoch))
                 if producerId != existing.producerId || producerEpoch != existing.producerEpoch =>
               return InitProducerIdResult(Errors.ProducerFenced, -1L, -1)
             case _ => ()
           val (producerId, epoch) =
-            if existing.producerEpoch == Short.MaxValue then (current.nextProducerId, 0.toShort)
+            if existing.producerEpoch >= Short.MaxValue - 1 then (current.nextProducerId, 0.toShort)
             else (existing.producerId, (existing.producerEpoch + 1).toShort)
           val completed = current.activeByTransactionalId.get(existing.transactionalId.get).toVector.map { active =>
             CompletedTransaction(
@@ -115,7 +115,10 @@ final class DeliveryCoordinator(
               committed = false,
               offsetsApplied = true,
               active.ranges,
-              Vector.empty
+              Vector.empty,
+              active.protocolVersion,
+              if active.protocolVersion == TransactionProtocol.Version2 then producerId else -1L,
+              if active.protocolVersion == TransactionProtocol.Version2 then epoch else -1
             )
           }
           val replacement = ProducerRegistration(producerId, epoch, transactionalId, timeoutMillis)

@@ -275,6 +275,54 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("producer reinitialization durably aborts an open transaction v2 epoch") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-reinitialize")
+    try
+      withCoordinator(directory) { (delivery, _, registry) =>
+        val producer = delivery.initProducerId(Some("tv2-reinitialize"), 30_000)
+        assertEquals(
+          delivery.append(
+            Some("tv2-reinitialize"),
+            "events",
+            0,
+            TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true),
+            -1,
+            30_000,
+            new ReplicatedAppender:
+              override def append(
+                  topic: String,
+                  partition: Int,
+                  records: Array[Byte],
+                  acknowledgements: Short,
+                  timeoutMillis: Int
+              ): ReplicatedAppendResult =
+                val result = registry.partition(topic, partition).get.append(records)
+                ReplicatedAppendResult(Errors.None, result.baseOffset),
+            TransactionProtocol.Version2
+          ).errorCode,
+          Errors.None
+        )
+
+        val replacement = delivery.initProducerId(Some("tv2-reinitialize"), 30_000)
+        assertEquals(replacement, InitProducerIdResult(Errors.None, producer.producerId, 1))
+        val completed = delivery.image.completedTransactions.last
+        assertEquals(completed.protocolVersion, TransactionProtocol.Version2)
+        assertEquals(completed.resultingProducerId, replacement.producerId)
+        assertEquals(completed.resultingProducerEpoch, replacement.producerEpoch)
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-reinitialize",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = false,
+            TransactionProtocol.Version2
+          ),
+          EndTransactionResult(Errors.None, replacement.producerId, replacement.producerEpoch)
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("expected producer epochs make initialization retries stable") {
     val directory = Files.createTempDirectory("cascade-delivery-init-retry")
     try
