@@ -1,6 +1,6 @@
 package cascade.delivery
 
-import cascade.protocol.ByteWriter
+import cascade.protocol.{ByteWriter, ProtocolException}
 import cascade.storage.TopicPartition
 import java.nio.file.{Files, StandardOpenOption}
 import munit.FunSuite
@@ -37,6 +37,13 @@ final class DeliveryStoreSuite extends FunSuite:
     assertEquals(legacy.protocolVersion, TransactionProtocol.Version1)
     assertEquals(legacy.resultingProducerId, -1L)
     assertEquals(legacy.resultingProducerEpoch, -1.toShort)
+  }
+
+  test("delivery codec upgrades every historical versioned format") {
+    val image = sampleImage(version = 10L, offsetsApplied = true)
+    assertEquals(DeliveryCodec.decode(versionedBytes(1, image)), image)
+    assertEquals(DeliveryCodec.decode(versionedBytes(2, image)), image)
+    intercept[ProtocolException](DeliveryCodec.decode(versionedBytes(99, image)))
   }
 
   test("recovery truncates a partial delivery-image tail") {
@@ -165,7 +172,16 @@ final class DeliveryStoreSuite extends FunSuite:
       )
     )
 
-  private def legacyBytes(image: DeliveryImage): Array[Byte] =
+  private def legacyBytes(image: DeliveryImage): Array[Byte] = imageBody(image, includeActiveProtocol = false)
+
+  private def versionedBytes(format: Short, image: DeliveryImage): Array[Byte] =
+    ByteWriter()
+      .writeInt(0xca5cade2)
+      .writeShort(format)
+      .writeBytes(imageBody(image, includeActiveProtocol = format >= 2))
+      .result()
+
+  private def imageBody(image: DeliveryImage, includeActiveProtocol: Boolean): Array[Byte] =
     val writer = ByteWriter().writeLong(image.version).writeLong(image.nextProducerId)
     def writeRange(value: TransactionRange): Unit =
       writer.writeString(value.topic).writeInt(value.partition).writeLong(value.firstOffset).writeLong(value.lastOffset): Unit
@@ -182,7 +198,9 @@ final class DeliveryStoreSuite extends FunSuite:
       writer.writeArray(transaction.partitions)(value => writer.writeString(value.topic).writeInt(value.partition): Unit)
       writer.writeArray(transaction.ranges)(writeRange)
       writer.writeArray(transaction.groups)(value => writer.writeString(value): Unit)
-      writer.writeArray(transaction.pendingOffsets)(writeOffset): Unit
+      writer.writeArray(transaction.pendingOffsets)(writeOffset)
+      if includeActiveProtocol then writer.writeShort(transaction.protocolVersion)
+      ()
     }
     writer.writeArray(image.completedTransactions) { transaction =>
       writer.writeString(transaction.transactionalId).writeLong(transaction.producerId).writeShort(transaction.producerEpoch)
