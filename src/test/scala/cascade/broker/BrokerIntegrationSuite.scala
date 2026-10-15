@@ -635,6 +635,69 @@ final class BrokerIntegrationSuite extends FunSuite:
     }
   }
 
+  test("produce v12 enrolls transaction partitions without an explicit coordinator request") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("tv2-produce", correlationId = 120))
+
+        val init = requestHeader(ApiKey.InitProducerId, 5, 121, flexible = true)
+          .writeCompactNullableString(Some("tv2-producer"))
+          .writeInt(30_000)
+          .writeLong(-1L)
+          .writeShort(-1)
+          .writeEmptyTaggedFields()
+        val initialized = request(output, input, init.result())
+        assertEquals(initialized.readInt(), 121)
+        initialized.skipTaggedFields()
+        initialized.readInt()
+        assertEquals(initialized.readShort(), Errors.None)
+        val producerId = initialized.readLong()
+        val producerEpoch = initialized.readShort()
+        initialized.skipTaggedFields()
+        initialized.ensureFullyRead()
+
+        val produce = requestHeader(ApiKey.Produce, 12, 122, flexible = true)
+          .writeCompactNullableString(Some("tv2-producer"))
+          .writeShort(-1)
+          .writeInt(30_000)
+        produce.writeCompactArray(Vector("tv2-produce")) { topic =>
+          produce.writeCompactString(topic)
+          produce.writeCompactArray(Vector(0)) { partition =>
+            produce.writeInt(partition)
+            produce.writeCompactNullableBytes(
+              Some(TestRecordBatch.producer(producerId, producerEpoch, 0, transactional = true))
+            )
+            produce.writeEmptyTaggedFields(): Unit
+          }
+          produce.writeEmptyTaggedFields(): Unit
+        }
+        produce.writeEmptyTaggedFields()
+
+        val response = request(output, input, produce.result())
+        assertEquals(response.readInt(), 122)
+        response.skipTaggedFields()
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readCompactString(), "tv2-produce")
+        assertEquals(response.readUnsignedVarInt(), 2)
+        assertEquals(response.readInt(), 0)
+        assertEquals(response.readShort(), Errors.None)
+        assertEquals(response.readLong(), 0L)
+        assertEquals(response.readLong(), -1L)
+        assertEquals(response.readLong(), -1L)
+        assertEquals(response.readCompactArray(response.readInt()), Vector.empty)
+        assertEquals(response.readCompactNullableString(), None)
+        response.skipTaggedFields()
+        response.skipTaggedFields()
+        assertEquals(response.readInt(), 0)
+        response.skipTaggedFields()
+        response.ensureFullyRead()
+      finally socket.close()
+    }
+  }
+
   test("applies response, Produce, and Fetch quotas and reports Kafka throttle fields") {
     val directory = Files.createTempDirectory("cascade-traffic-quotas")
     val broker = KafkaBroker(

@@ -1648,7 +1648,11 @@ final class RequestHandler(
               batch,
               acknowledgements,
               timeoutMillis,
-              replicationManager
+              replicationManager,
+              if transactionalId.nonEmpty && version >= 12 &&
+                  clusterManager.supportsFeature(ClusterFeature.TransactionVersion, 2)
+              then TransactionProtocol.Version2
+              else TransactionProtocol.Version1
             )
             (index, result.errorCode, result.baseOffset)
           case None => (index, Errors.InvalidRequest, -1L)
