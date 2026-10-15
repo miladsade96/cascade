@@ -257,11 +257,11 @@ final class DeliveryCoordinator(
       transaction.producerEpoch == producerEpoch &&
       transaction.protocolVersion == protocolVersion
     }
-    retried.foreach { transaction =>
-      if transaction.committed == committed then
+    retried match
+      case Some(transaction) if transaction.committed == committed =>
         return EndTransactionResult(Errors.None, transaction.resultingProducerId, transaction.resultingProducerEpoch)
-      return EndTransactionResult(Errors.InvalidTxnState)
-    }
+      case Some(_) => return EndTransactionResult(Errors.InvalidTxnState)
+      case None    => ()
     activeFor(transactionalId, producerId, producerEpoch) match
       case Left(error) => EndTransactionResult(error)
       case Right(active) if active.protocolVersion != protocolVersion => EndTransactionResult(Errors.InvalidTxnState)

@@ -129,6 +129,58 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 completion bumps the epoch and retries return the durable identity") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-end")
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        val producer = delivery.initProducerId(Some("tv2-end"), 30_000)
+        val active = ActiveTransaction(
+          "tv2-end",
+          producer.producerId,
+          producer.producerEpoch,
+          30_000,
+          System.currentTimeMillis(),
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          TransactionProtocol.Version2
+        )
+        delivery.installSnapshot(DeliveryCodec.encode(delivery.image.copy(activeTransactions = Vector(active))).toVector)
+
+        val ended = delivery.endTransaction(
+          "tv2-end",
+          producer.producerId,
+          producer.producerEpoch,
+          committed = true,
+          TransactionProtocol.Version2
+        )
+        assertEquals(ended, EndTransactionResult(Errors.None, producer.producerId, 1))
+        assertEquals(delivery.image.producerByTransactionalId("tv2-end").producerEpoch, 1.toShort)
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-end",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = true,
+            TransactionProtocol.Version2
+          ),
+          ended
+        )
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-end",
+            producer.producerId,
+            producer.producerEpoch,
+            committed = false,
+            TransactionProtocol.Version2
+          ).errorCode,
+          Errors.InvalidTxnState
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("expected producer epochs make initialization retries stable") {
     val directory = Files.createTempDirectory("cascade-delivery-init-retry")
     try
