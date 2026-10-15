@@ -188,7 +188,8 @@ object PeerCapabilities:
       ClusterFeature.OnlineSnapshot -> 1,
       ClusterFeature.AdvancedCompaction -> 1,
       ClusterFeature.DistributedQuotas -> 2,
-      ClusterFeature.IndependentCoordinator -> 1
+      ClusterFeature.IndependentCoordinator -> 1,
+      ClusterFeature.TransactionVersion -> 2
     )
   )
 
@@ -203,10 +204,15 @@ object ClusterFeature:
   val AdvancedCompaction = "advanced-compaction"
   val DistributedQuotas = "distributed-quotas"
   val IndependentCoordinator = "independent-coordinator"
+  val TransactionVersion = "transaction.version"
 
-  /** Exact quota activation cannot overlap with a lagging broker's conservative local-share buckets. */
+  /** Features that change shared wire/state semantics activate only after every voter commits them. */
   def requiresFullVoterCommit(current: Map[String, Short], candidate: Map[String, Short]): Boolean =
-    current.getOrElse(DistributedQuotas, 0.toShort) < 2 && candidate.getOrElse(DistributedQuotas, 0.toShort) >= 2
+    val distributedQuotaActivation =
+      current.getOrElse(DistributedQuotas, 0.toShort) < 2 && candidate.getOrElse(DistributedQuotas, 0.toShort) >= 2
+    val transactionV2Activation =
+      current.getOrElse(TransactionVersion, 0.toShort) < 2 && candidate.getOrElse(TransactionVersion, 0.toShort) >= 2
+    distributedQuotaActivation || transactionV2Activation
 
 final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
   def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)

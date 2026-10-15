@@ -73,3 +73,16 @@ final class CoordinatorFormatSuite extends FunSuite:
     assert(ClusterFeature.requiresFullVoterCommit(mixed.featureLevels, upgraded.featureLevels))
     assert(!ClusterFeature.requiresFullVoterCommit(upgraded.featureLevels, upgraded.featureLevels))
   }
+
+  test("transaction protocol v2 activates unanimously behind a full-voter commit barrier") {
+    val current = PeerCapabilities.Current
+    assertEquals(current.featureLevel(ClusterFeature.TransactionVersion), 2.toShort)
+    val previous = current.copy(featureLevels = current.featureLevels - ClusterFeature.TransactionVersion)
+    val mixed = NegotiatedCapabilities.across(Vector(current, previous)).toOption.get
+    assert(!mixed.supports(ClusterFeature.TransactionVersion, 2))
+
+    val upgraded = NegotiatedCapabilities.across(Vector(current, current)).toOption.get
+    assert(upgraded.supports(ClusterFeature.TransactionVersion, 2))
+    assert(ClusterFeature.requiresFullVoterCommit(mixed.featureLevels, upgraded.featureLevels))
+    assert(!ClusterFeature.requiresFullVoterCommit(upgraded.featureLevels, upgraded.featureLevels))
+  }
