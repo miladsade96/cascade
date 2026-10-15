@@ -12,6 +12,7 @@ import scala.collection.mutable
 
 final case class InitProducerIdResult(errorCode: Short, producerId: Long, producerEpoch: Short)
 final case class DeliveryAppendResult(errorCode: Short, baseOffset: Long)
+final case class EndTransactionResult(errorCode: Short, producerId: Long = -1L, producerEpoch: Short = -1)
 private final case class TransactionReservation(
     transactionalId: String,
     topicPartition: TopicPartition,
@@ -237,13 +238,39 @@ final class DeliveryCoordinator(
       producerId: Long,
       producerEpoch: Short,
       committed: Boolean
-  ): Short = stateLock.synchronized {
+  ): Short = endTransaction(transactionalId, producerId, producerEpoch, committed, TransactionProtocol.Version1).errorCode
+
+  def endTransaction(
+      transactionalId: String,
+      producerId: Long,
+      producerEpoch: Short,
+      committed: Boolean,
+      protocolVersion: Short
+  ): EndTransactionResult = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
+    if !TransactionProtocol.supported(protocolVersion) then
+      return EndTransactionResult(Errors.UnsupportedVersion)
+    val retried = current.completedTransactions.reverseIterator.find { transaction =>
+      transaction.transactionalId == transactionalId &&
+      transaction.producerId == producerId &&
+      transaction.producerEpoch == producerEpoch &&
+      transaction.protocolVersion == protocolVersion
+    }
+    retried.foreach { transaction =>
+      if transaction.committed == committed then
+        return EndTransactionResult(Errors.None, transaction.resultingProducerId, transaction.resultingProducerEpoch)
+      return EndTransactionResult(Errors.InvalidTxnState)
+    }
     activeFor(transactionalId, producerId, producerEpoch) match
-      case Left(error) => error
+      case Left(error) => EndTransactionResult(error)
+      case Right(active) if active.protocolVersion != protocolVersion => EndTransactionResult(Errors.InvalidTxnState)
       case Right(active) =>
         val useAtomicSnapshot = !durableLocal && committed && active.pendingOffsets.nonEmpty
+        val registration = current.producerById(producerId)
+        val (resultingRegistration, resultingNextProducerId) =
+          if protocolVersion == TransactionProtocol.Version2 then bumpProducerIdentity(registration)
+          else registration -> current.nextProducerId
         val completed = CompletedTransaction(
           transactionalId,
           producerId,
@@ -251,10 +278,18 @@ final class DeliveryCoordinator(
           committed,
           offsetsApplied = !committed || active.pendingOffsets.isEmpty || useAtomicSnapshot,
           active.ranges,
-          if committed then active.pendingOffsets else Vector.empty
+          if committed then active.pendingOffsets else Vector.empty,
+          protocolVersion,
+          if protocolVersion == TransactionProtocol.Version2 then resultingRegistration.producerId else -1L,
+          if protocolVersion == TransactionProtocol.Version2 then resultingRegistration.producerEpoch else -1
         )
         val next = current.copy(
           version = current.version + 1L,
+          nextProducerId = resultingNextProducerId,
+          producers =
+            if protocolVersion == TransactionProtocol.Version2 then
+              current.producers.filterNot(_.transactionalId == Some(transactionalId)) :+ resultingRegistration
+            else current.producers,
           activeTransactions = current.activeTransactions.filterNot(_.transactionalId == transactionalId),
           completedTransactions = current.completedTransactions :+ completed
         )
@@ -264,11 +299,11 @@ final class DeliveryCoordinator(
               commit(next, includeStagedGroupOffsets = true)
             }
           else commit(next)
-        if !transitionCommitted then return Errors.CoordinatorNotAvailable
+        if !transitionCommitted then return EndTransactionResult(Errors.CoordinatorNotAvailable)
         if committed && completed.pendingOffsets.nonEmpty && !useAtomicSnapshot then
           applyOffsets(completed.pendingOffsets)
-          if !markOffsetsApplied(completed) then return Errors.CoordinatorNotAvailable
-        Errors.None
+          if !markOffsetsApplied(completed) then return EndTransactionResult(Errors.CoordinatorNotAvailable)
+        EndTransactionResult(Errors.None, completed.resultingProducerId, completed.resultingProducerEpoch)
   }
 
   def append(
@@ -591,6 +626,16 @@ final class DeliveryCoordinator(
       case Some(producer) if producer.transactionalId != Some(transactionalId) => Errors.InvalidProducerIdMapping
       case Some(producer) if producer.producerEpoch != producerEpoch => Errors.ProducerFenced
       case Some(_) => Errors.None
+
+  private def bumpProducerIdentity(registration: ProducerRegistration): (ProducerRegistration, Long) =
+    if registration.producerEpoch >= Short.MaxValue - 1 then
+      ProducerRegistration(
+        current.nextProducerId,
+        0,
+        registration.transactionalId,
+        registration.transactionTimeoutMillis
+      ) -> Math.addExact(current.nextProducerId, 1L)
+    else registration.copy(producerEpoch = (registration.producerEpoch + 1).toShort) -> current.nextProducerId
 
   private def activeFor(
       transactionalId: String,
