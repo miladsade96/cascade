@@ -24,6 +24,21 @@ final class DeliveryStoreSuite extends FunSuite:
     assertEquals(DeliveryCodec.decode(legacyBytes(base)).activeTransactions.head.protocolVersion, TransactionProtocol.Version1)
   }
 
+  test("delivery codec persists transaction v2 completion identities") {
+    val base = sampleImage(version = 9L, offsetsApplied = true)
+    val completed = base.completedTransactions.head.copy(
+      protocolVersion = TransactionProtocol.Version2,
+      resultingProducerId = 7L,
+      resultingProducerEpoch = 2
+    )
+    val v2 = base.copy(completedTransactions = Vector(completed))
+    assertEquals(DeliveryCodec.decode(DeliveryCodec.encode(v2)), v2)
+    val legacy = DeliveryCodec.decode(legacyBytes(base)).completedTransactions.head
+    assertEquals(legacy.protocolVersion, TransactionProtocol.Version1)
+    assertEquals(legacy.resultingProducerId, -1L)
+    assertEquals(legacy.resultingProducerEpoch, -1.toShort)
+  }
+
   test("recovery truncates a partial delivery-image tail") {
     val directory = Files.createTempDirectory("cascade-delivery-partial")
     val path = directory.resolve("delivery.log")

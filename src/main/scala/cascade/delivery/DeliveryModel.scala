@@ -48,8 +48,16 @@ final case class CompletedTransaction(
     committed: Boolean,
     offsetsApplied: Boolean,
     ranges: Vector[TransactionRange],
-    pendingOffsets: Vector[PendingOffset]
-)
+    pendingOffsets: Vector[PendingOffset],
+    protocolVersion: Short = TransactionProtocol.Version1,
+    resultingProducerId: Long = -1L,
+    resultingProducerEpoch: Short = -1
+):
+  require(TransactionProtocol.supported(protocolVersion), s"unsupported transaction protocol version: $protocolVersion")
+  require(
+    protocolVersion != TransactionProtocol.Version2 || (resultingProducerId >= 0L && resultingProducerEpoch >= 0),
+    "transaction protocol v2 completion requires the resulting producer identity"
+  )
 
 enum TransactionState(val wireName: String):
   case Empty extends TransactionState("Empty")
@@ -98,7 +106,7 @@ object DeliveryImage:
 
 object DeliveryCodec:
   private val Magic = 0xca5cade2
-  private val CurrentFormat: Short = 2
+  private val CurrentFormat: Short = 3
 
   def encode(image: DeliveryImage): Array[Byte] =
     val writer = ByteWriter()
@@ -132,7 +140,7 @@ object DeliveryCodec:
       ProducerRegistration(cursor.readLong(), cursor.readShort(), cursor.readNullableString(), cursor.readInt())
     }
     val active = cursor.readArray(readActive(cursor, format))
-    val completed = cursor.readArray(readCompleted(cursor))
+    val completed = cursor.readArray(readCompleted(cursor, format))
     cursor.ensureFullyRead()
     DeliveryImage(version, nextProducerId, producers, active, completed)
 
@@ -199,9 +207,12 @@ object DeliveryCodec:
     writer.writeBoolean(value.committed)
     writer.writeBoolean(value.offsetsApplied)
     writer.writeArray(value.ranges)(writeRange(writer, _))
-    writer.writeArray(value.pendingOffsets)(writeOffset(writer, _)): Unit
+    writer.writeArray(value.pendingOffsets)(writeOffset(writer, _))
+    writer.writeShort(value.protocolVersion)
+    writer.writeLong(value.resultingProducerId)
+    writer.writeShort(value.resultingProducerEpoch): Unit
 
-  private def readCompleted(cursor: ByteCursor): CompletedTransaction =
+  private def readCompleted(cursor: ByteCursor, format: Short): CompletedTransaction =
     CompletedTransaction(
       cursor.readString(),
       cursor.readLong(),
@@ -209,5 +220,8 @@ object DeliveryCodec:
       cursor.readBoolean(),
       cursor.readBoolean(),
       cursor.readArray(readRange(cursor)),
-      cursor.readArray(readOffset(cursor))
+      cursor.readArray(readOffset(cursor)),
+      if format >= 3 then cursor.readShort() else TransactionProtocol.Version1,
+      if format >= 3 then cursor.readLong() else -1L,
+      if format >= 3 then cursor.readShort() else -1.toShort
     )
