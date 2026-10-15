@@ -320,6 +320,39 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 produce enrolls its partition without AddPartitionsToTxn") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-implicit-partition")
+    try
+      withCoordinator(directory) { (delivery, _, registry) =>
+        val producer = delivery.initProducerId(Some("tv2-implicit"), 30_000)
+        val appended = delivery.append(
+          Some("tv2-implicit"),
+          "events",
+          0,
+          TestRecordBatch.producer(producer.producerId, producer.producerEpoch, 0, transactional = true),
+          -1,
+          30_000,
+          new ReplicatedAppender:
+            override def append(
+                topic: String,
+                partition: Int,
+                records: Array[Byte],
+                acknowledgements: Short,
+                timeoutMillis: Int
+            ): ReplicatedAppendResult =
+              val result = registry.partition(topic, partition).get.append(records)
+              ReplicatedAppendResult(Errors.None, result.baseOffset),
+          TransactionProtocol.Version2
+        )
+        assertEquals(appended, DeliveryAppendResult(Errors.None, 0L))
+        val active = delivery.image.activeByTransactionalId("tv2-implicit")
+        assertEquals(active.protocolVersion, TransactionProtocol.Version2)
+        assertEquals(active.partitions, Vector(TopicPartition("events", 0)))
+        assertEquals(active.ranges, Vector(TransactionRange("events", 0, 0L, 0L)))
+      }
+    finally deleteTree(directory)
+  }
+
   test("transactional offsets commit once and are not replayed over a newer offset") {
     val directory = Files.createTempDirectory("cascade-delivery-offsets")
     val key = GroupOffsetKey("workers", "events", 0)

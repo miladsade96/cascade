@@ -313,7 +313,8 @@ final class DeliveryCoordinator(
       records: Array[Byte],
       acknowledgements: Short,
       timeoutMillis: Int,
-      replication: ReplicatedAppender
+      replication: ReplicatedAppender,
+      transactionProtocolVersion: Short = TransactionProtocol.Version1
   ): DeliveryAppendResult =
     val topicPartition = TopicPartition(topic, partition)
     val lock = partitionLocks.computeIfAbsent(topicPartition, _ => Object())
@@ -334,7 +335,13 @@ final class DeliveryCoordinator(
         val span = batches.last.lastOffset - batches.head.baseOffset
         val validation = stateLock.synchronized {
           expireTransactionsLocked(System.currentTimeMillis())
-          validateBatchSequence(transactionalId, topicPartition, batches, log.get.recentBatches(producerId)).map { _ =>
+          validateBatchSequence(
+            transactionalId,
+            topicPartition,
+            batches,
+            log.get.recentBatches(producerId),
+            transactionProtocolVersion
+          ).map { _ =>
             transactionalId.map { id =>
               val firstOffset = log.get.logEndOffset
               val reservation = reserveTransactionalAppend(
@@ -485,7 +492,8 @@ final class DeliveryCoordinator(
       transactionalId: Option[String],
       topicPartition: TopicPartition,
       batches: Vector[RecordBatchMetadata],
-      existing: Vector[RecordBatchMetadata]
+      existing: Vector[RecordBatchMetadata],
+      transactionProtocolVersion: Short
   ): Either[DeliveryAppendResult, Unit] =
     val first = batches.head
     val registration = current.producerById.get(first.producerId)
@@ -511,8 +519,14 @@ final class DeliveryCoordinator(
 
     transactionalId match
       case Some(id) =>
+        if transactionProtocolVersion == TransactionProtocol.Version2 then
+          ensureTransactionPartition(id, first.producerId, first.producerEpoch, topicPartition) match
+            case error if error != Errors.None => return Left(DeliveryAppendResult(error, -1L))
+            case _                             => ()
         activeFor(id, first.producerId, first.producerEpoch) match
           case Left(error) => Left(DeliveryAppendResult(error, -1L))
+          case Right(active) if active.protocolVersion != transactionProtocolVersion =>
+            Left(DeliveryAppendResult(Errors.InvalidTxnState, -1L))
           case Right(active) if !active.partitions.contains(topicPartition) =>
             Left(DeliveryAppendResult(Errors.InvalidTxnState, -1L))
           case Right(_) if batches.exists(!_.transactional) =>
@@ -520,6 +534,35 @@ final class DeliveryCoordinator(
           case Right(_) => Right(())
       case None if batches.exists(_.transactional) => Left(DeliveryAppendResult(Errors.InvalidTxnState, -1L))
       case None => Right(())
+
+  private def ensureTransactionPartition(
+      transactionalId: String,
+      producerId: Long,
+      producerEpoch: Short,
+      topicPartition: TopicPartition
+  ): Short =
+    current.activeByTransactionalId.get(transactionalId) match
+      case Some(active) if active.producerId != producerId || active.producerEpoch != producerEpoch => Errors.ProducerFenced
+      case Some(active) if active.protocolVersion != TransactionProtocol.Version2 => Errors.InvalidTxnState
+      case Some(active) if active.partitions.contains(topicPartition) => Errors.None
+      case existing =>
+        val registration = current.producerById(producerId)
+        val active = existing.getOrElse(
+          ActiveTransaction(
+            transactionalId,
+            producerId,
+            producerEpoch,
+            registration.transactionTimeoutMillis,
+            System.currentTimeMillis(),
+            Vector.empty,
+            Vector.empty,
+            Vector.empty,
+            Vector.empty,
+            TransactionProtocol.Version2
+          )
+        )
+        val next = active.copy(partitions = (active.partitions :+ topicPartition).distinct)
+        if replaceActive(next) then Errors.None else Errors.CoordinatorNotAvailable
 
   private def duplicateBaseOffset(
       batches: Vector[RecordBatchMetadata],
