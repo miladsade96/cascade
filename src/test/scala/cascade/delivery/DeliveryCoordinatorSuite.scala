@@ -399,6 +399,42 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 offset commit enrolls its consumer group implicitly") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-implicit-group")
+    val key = GroupOffsetKey("tv2-workers", "events", 0)
+    try
+      withCoordinator(directory) { (delivery, groups, _) =>
+        val producer = delivery.initProducerId(Some("tv2-offsets"), 30_000)
+        val offset = PendingOffset("tv2-workers", "events", 0, 17L, 4, Some("v2"))
+        assertEquals(
+          delivery.stageOffsets(
+            "tv2-offsets",
+            producer.producerId,
+            producer.producerEpoch,
+            "tv2-workers",
+            Vector(offset),
+            TransactionProtocol.Version2
+          ),
+          Errors.None
+        )
+        val active = delivery.image.activeByTransactionalId("tv2-offsets")
+        assertEquals(active.protocolVersion, TransactionProtocol.Version2)
+        assertEquals(active.groups, Vector("tv2-workers"))
+        assertEquals(active.pendingOffsets, Vector(offset))
+
+        val ended = delivery.endTransaction(
+          "tv2-offsets",
+          producer.producerId,
+          producer.producerEpoch,
+          committed = true,
+          TransactionProtocol.Version2
+        )
+        assertEquals(ended.errorCode, Errors.None)
+        assertEquals(groups.fetchOffset(key).map(_.offset), Some(17L))
+      }
+    finally deleteTree(directory)
+  }
+
   test("startup completes only an interrupted transactional-offset application") {
     val directory = Files.createTempDirectory("cascade-delivery-offset-replay")
     val key = GroupOffsetKey("workers", "events", 0)

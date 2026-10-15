@@ -218,16 +218,41 @@ final class DeliveryCoordinator(
       producerId: Long,
       producerEpoch: Short,
       groupId: String,
-      offsets: Vector[PendingOffset]
+      offsets: Vector[PendingOffset],
+      protocolVersion: Short = TransactionProtocol.Version1
   ): Short = stateLock.synchronized {
     awaitTransactionalAppends(transactionalId)
     expireTransactionsLocked(System.currentTimeMillis())
-    activeFor(transactionalId, producerId, producerEpoch) match
-      case Left(error) => error
-      case Right(active) if !active.groups.contains(groupId) => Errors.InvalidTxnState
-      case Right(active) =>
+    if groupId.isEmpty then return Errors.InvalidGroupId
+    validateProducer(transactionalId, producerId, producerEpoch) match
+      case error if error != Errors.None => error
+      case _ =>
+        val existing = current.activeByTransactionalId.get(transactionalId)
+        if existing.exists(active => active.producerId != producerId || active.producerEpoch != producerEpoch) then
+          return Errors.ProducerFenced
+        if existing.exists(_.protocolVersion != protocolVersion) then return Errors.InvalidTxnState
+        if protocolVersion == TransactionProtocol.Version1 && existing.forall(!_.groups.contains(groupId)) then
+          return Errors.InvalidTxnState
+        if protocolVersion != TransactionProtocol.Version1 && protocolVersion != TransactionProtocol.Version2 then
+          return Errors.UnsupportedVersion
+        val registration = current.producerById(producerId)
+        val active = existing.getOrElse(
+          ActiveTransaction(
+            transactionalId,
+            producerId,
+            producerEpoch,
+            registration.transactionTimeoutMillis,
+            System.currentTimeMillis(),
+            Vector.empty,
+            Vector.empty,
+            Vector.empty,
+            Vector.empty,
+            protocolVersion
+          )
+        )
         val keys = offsets.map(value => (value.groupId, value.topic, value.partition)).toSet
         val next = active.copy(
+          groups = if protocolVersion == TransactionProtocol.Version2 then (active.groups :+ groupId).distinct else active.groups,
           pendingOffsets = active.pendingOffsets.filterNot(value => keys((value.groupId, value.topic, value.partition))) ++ offsets
         )
         if replaceActive(next) then Errors.None else Errors.CoordinatorNotAvailable
