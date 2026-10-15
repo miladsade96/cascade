@@ -13,6 +13,8 @@ final class BinaryCodecSuite extends FunSuite:
     writer.writeNullableString(None)
     writer.writeCompactString("Scala")
     writer.writeCompactNullableString(Some("wire"))
+    writer.writeCompactNullableBytes(Some(Array[Byte](1, 2, 3)))
+    writer.writeCompactNullableBytes(None)
     writer.writeArray(Vector(1, 2, 3))(writer.writeInt)
     writer.writeEmptyTaggedFields()
 
@@ -25,6 +27,8 @@ final class BinaryCodecSuite extends FunSuite:
     assertEquals(cursor.readNullableString(), None)
     assertEquals(cursor.readCompactString(), "Scala")
     assertEquals(cursor.readCompactNullableString(), Some("wire"))
+    assertEquals(cursor.readCompactNullableBytes().map(_.toVector), Some(Vector[Byte](1, 2, 3)))
+    assertEquals(cursor.readCompactNullableBytes(), None)
     assertEquals(cursor.readArray(cursor.readInt()), Vector(1, 2, 3))
     cursor.skipTaggedFields()
     cursor.ensureFullyRead()
@@ -51,6 +55,26 @@ final class BinaryCodecSuite extends FunSuite:
     writer.writeUnsignedVarInt(3).writeUnsignedVarInt(0)
     writer.writeUnsignedVarInt(2).writeUnsignedVarInt(0)
     intercept[ProtocolException](ByteCursor(writer.result()).skipTaggedFields())
+  }
+
+  test("writes sorted non-empty flexible tagged fields") {
+    val bytes = ByteWriter().writeTaggedFields(Vector(3 -> Array[Byte](9), 1 -> Array[Byte](7, 8))).result()
+    val cursor = ByteCursor(bytes)
+    assertEquals(cursor.readUnsignedVarInt(), 2)
+    assertEquals(cursor.readUnsignedVarInt(), 1)
+    assertEquals(cursor.readUnsignedVarInt(), 2)
+    assertEquals(cursor.readBytes(2).toVector, Vector[Byte](7, 8))
+    assertEquals(cursor.readUnsignedVarInt(), 3)
+    assertEquals(cursor.readUnsignedVarInt(), 1)
+    assertEquals(cursor.readBytes(1).toVector, Vector[Byte](9))
+    cursor.ensureFullyRead()
+  }
+
+  test("rejects duplicate and negative tagged field IDs") {
+    intercept[IllegalArgumentException](
+      ByteWriter().writeTaggedFields(Vector(1 -> Array.emptyByteArray, 1 -> Array.emptyByteArray))
+    )
+    intercept[IllegalArgumentException](ByteWriter().writeTaggedFields(Vector(-1 -> Array.emptyByteArray)))
   }
 
   test("request header v2 retains a nullable non-compact client id") {

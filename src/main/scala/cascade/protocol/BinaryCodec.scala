@@ -95,6 +95,10 @@ final class ByteCursor(private val bytes: Array[Byte]):
     else if length < -1 then throw ProtocolException(s"invalid nullable bytes length: $length")
     else Some(readBytes(length))
 
+  def readCompactNullableBytes(): Option[Array[Byte]] =
+    val encodedLength = readUnsignedVarInt()
+    if encodedLength == 0 then None else Some(readBytes(encodedLength - 1))
+
   def readByteArray(): Array[Byte] =
     val length = readInt()
     if length < 0 then throw ProtocolException("non-null byte array has a negative length")
@@ -238,6 +242,12 @@ final class ByteWriter(initialCapacity: Int = 256):
       writeInt(payload.length)
       writeBytes(payload)
 
+  def writeCompactNullableBytes(value: Option[Array[Byte]]): this.type = value match
+    case None => writeUnsignedVarInt(0)
+    case Some(payload) =>
+      writeUnsignedVarInt(payload.length + 1)
+      writeBytes(payload)
+
   def writeByteArray(value: Array[Byte]): this.type =
     writeInt(value.length)
     writeBytes(value)
@@ -259,6 +269,18 @@ final class ByteWriter(initialCapacity: Int = 256):
   def writeCompactNullableArray[A](values: Option[Iterable[A]])(writeElement: A => Unit): this.type = values match
     case None => writeUnsignedVarInt(0)
     case Some(items) => writeCompactArray(items)(writeElement)
+
+  def writeTaggedFields(values: Iterable[(Int, Array[Byte])]): this.type =
+    val fields = values.toVector.sortBy(_._1)
+    if fields.exists(_._1 < 0) then throw IllegalArgumentException("tagged field IDs must be non-negative")
+    if fields.map(_._1).distinct.size != fields.size then throw IllegalArgumentException("tagged field IDs must be unique")
+    writeUnsignedVarInt(fields.size)
+    fields.foreach { case (tag, payload) =>
+      writeUnsignedVarInt(tag)
+      writeUnsignedVarInt(payload.length)
+      writeBytes(payload): Unit
+    }
+    this
 
   def writeEmptyTaggedFields(): this.type = writeUnsignedVarInt(0)
 
