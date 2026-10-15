@@ -112,7 +112,7 @@ final case class ApiVersion(apiKey: Short, minVersion: Short, maxVersion: Short)
 
 object Compatibility:
   val supported: Vector[ApiVersion] = Vector(
-    ApiVersion(ApiKey.Produce, 3, 3),
+    ApiVersion(ApiKey.Produce, 3, 12),
     ApiVersion(ApiKey.Fetch, 6, 6),
     ApiVersion(ApiKey.ListOffsets, 2, 2),
     ApiVersion(ApiKey.Metadata, 4, 12),
@@ -131,8 +131,8 @@ object Compatibility:
     ApiVersion(ApiKey.InitProducerId, 0, 5),
     ApiVersion(ApiKey.AddPartitionsToTxn, 0, 5),
     ApiVersion(ApiKey.AddOffsetsToTxn, 0, 4),
-    ApiVersion(ApiKey.EndTxn, 0, 4),
-    ApiVersion(ApiKey.TxnOffsetCommit, 0, 4),
+    ApiVersion(ApiKey.EndTxn, 0, 5),
+    ApiVersion(ApiKey.TxnOffsetCommit, 0, 5),
     ApiVersion(ApiKey.DescribeAcls, 1, 1),
     ApiVersion(ApiKey.CreateAcls, 1, 1),
     ApiVersion(ApiKey.DeleteAcls, 1, 1),
@@ -160,6 +160,7 @@ object Compatibility:
 
   def isFlexibleRequest(apiKey: Short, version: Short): Boolean =
     (apiKey == ApiKey.ApiVersions && version >= 3) ||
+      (apiKey == ApiKey.Produce && version >= 9) ||
       (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
@@ -177,7 +178,8 @@ object Compatibility:
   // ApiVersions deliberately retains response header v0 even for flexible body versions.
   // All other flexible APIs use response header v1.
   def isFlexibleResponseHeader(apiKey: Short, version: Short): Boolean =
-    (apiKey == ApiKey.Metadata && version >= 9) ||
+    (apiKey == ApiKey.Produce && version >= 9) ||
+      (apiKey == ApiKey.Metadata && version >= 9) ||
       (apiKey == ApiKey.ListGroups && version >= 3) ||
       (apiKey == ApiKey.DeleteGroups && version >= 2) ||
       (apiKey == ApiKey.OffsetFetch && version >= 6) ||
