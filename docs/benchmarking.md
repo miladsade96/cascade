@@ -24,7 +24,7 @@ Both brokers receive identical producer properties. The consumer uses explicit a
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.8.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -WarmupRecords 25000 -PayloadBytes 1024 -Partitions 8 -Producers 4
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.9.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -WarmupRecords 25000 -PayloadBytes 1024 -Partitions 8 -Producers 4
 ```
 
 Each JSON file records the complete workload, warm-up and measurement durations, produce/consume/end-to-end throughput, p50/p95/p99 acknowledgement latency, exactness, client heap, JDK, Scala, OS, and visible processors. The wrapper also reports container startup time, persisted volume bytes, and a post-run memory/CPU snapshot.

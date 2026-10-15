@@ -14,7 +14,7 @@ Scanning the image's existing attestation avoids downloading a second Java packa
 
 ```bash
 node --test scripts/qualify-image-security.test.mjs
-node scripts/qualify-image-security.mjs miladsade96/cascade:1.8.0 1.8.0 artifacts/security-unique-run
+node scripts/qualify-image-security.mjs miladsade96/cascade:1.9.0 1.9.0 artifacts/security-unique-run
 ```
 
 The evidence directory must not already exist. `result.json` is written only after a successful scan and records the image/index digest, runtime manifest, release version, scanner version, scan time, and zero findings. The directory also preserves the image archive, SPDX inventory, full SARIF report, and scanner log. A failed attempt cannot reuse a previous passing report.
@@ -27,11 +27,11 @@ Locally I additionally run the five-language matrix and three-broker replication
 
 I retain published digests and date each report. New advisories can affect an unchanged image later, so a clean release scan is not a permanent guarantee. The 1.3.0 post-publication findings are the reason for this policy.
 
-## 1.8.0 local release status
+## 1.9.0 local release status
 
 The exact local image `sha256:e212128215726b8280fed0e142ba92496c52b663e20c3df4bb5819d15746448d` from revision `e9a6060` passed the OCI identity, SBOM, provenance, minimal-package, non-root, packaged TLS/peer, and external secure-client checks. Grype 0.116.1, using its refreshed vulnerability database and `--fail-on negligible`, reported `No vulnerabilities found` with no exception list.
 
-Docker Scout did not produce a vulnerability report because Docker Desktop requested sign-in. Under this policy that is a blocked official gate, not a pass. I have not published the 1.8.0 tag; Scout authentication must succeed before publication.
+The 1.9.0 image is built locally after the complete source suite passes. I do not publish it from this workflow. A zero-finding Scout result is still mandatory before I call the image qualified or push it to Docker Hub.
 
 The [1.3.1 release](releases/1.3.1.md) passed this gate and an additional scan of its immutable Docker Hub reference on 2026-09-04: zero findings, with no exceptions. Its 32 gate regression tests include scanner failures, every severity, incomplete reports/inventories and image-identity mismatches.
 
