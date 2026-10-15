@@ -323,6 +323,55 @@ final class DeliveryCoordinatorSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("transaction v2 completion identity survives coordinator restart") {
+    val directory = Files.createTempDirectory("cascade-delivery-tv2-restart")
+    var originalProducer = InitProducerIdResult(Errors.None, -1L, -1)
+    var originalResult = EndTransactionResult(Errors.None)
+    try
+      withCoordinator(directory) { (delivery, _, _) =>
+        originalProducer = delivery.initProducerId(Some("tv2-restart"), 30_000)
+        val active = ActiveTransaction(
+          "tv2-restart",
+          originalProducer.producerId,
+          originalProducer.producerEpoch,
+          30_000,
+          System.currentTimeMillis(),
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          Vector.empty,
+          TransactionProtocol.Version2
+        )
+        delivery.installSnapshot(DeliveryCodec.encode(delivery.image.copy(activeTransactions = Vector(active))).toVector)
+        originalResult = delivery.endTransaction(
+          "tv2-restart",
+          originalProducer.producerId,
+          originalProducer.producerEpoch,
+          committed = true,
+          TransactionProtocol.Version2
+        )
+        assertEquals(originalResult.errorCode, Errors.None)
+      }
+
+      withCoordinator(directory) { (delivery, _, _) =>
+        assertEquals(
+          delivery.image.producerByTransactionalId("tv2-restart").producerEpoch,
+          originalResult.producerEpoch
+        )
+        assertEquals(
+          delivery.endTransaction(
+            "tv2-restart",
+            originalProducer.producerId,
+            originalProducer.producerEpoch,
+            committed = true,
+            TransactionProtocol.Version2
+          ),
+          originalResult
+        )
+      }
+    finally deleteTree(directory)
+  }
+
   test("expected producer epochs make initialization retries stable") {
     val directory = Files.createTempDirectory("cascade-delivery-init-retry")
     try
