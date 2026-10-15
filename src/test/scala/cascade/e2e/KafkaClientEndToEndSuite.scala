@@ -1427,6 +1427,51 @@ final class KafkaClientEndToEndSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("Kafka 4.3 transaction v2 resets producer sequences across repeated epoch bumps") {
+    val directory = Files.createTempDirectory("cascade-transactions-v2-epochs-e2e")
+    val broker = testBroker(directory)
+    try
+      broker.start()
+      val topic = "transaction-v2-epochs"
+      val admin = Admin.create(adminProperties(broker.bootstrapServers))
+      try admin.createTopics(java.util.List.of(new NewTopic(topic, 1, 1.toShort))).all().get()
+      finally admin.close(Duration.ofSeconds(5))
+
+      val producer = KafkaProducer[Array[Byte], Array[Byte]](
+        transactionalProducerProperties(broker.bootstrapServers, "transaction-v2-epoch-producer")
+      )
+      try
+        producer.initTransactions()
+        (0 until 20).foreach { index =>
+          producer.beginTransaction()
+          producer.send(ProducerRecord(topic, s"value-$index".getBytes(StandardCharsets.UTF_8))).get()
+          if index % 2 == 0 then producer.commitTransaction() else producer.abortTransaction()
+        }
+      finally producer.close(Duration.ofSeconds(5))
+
+      val partition = TopicPartition(topic, 0)
+      val committed = KafkaConsumer[Array[Byte], Array[Byte]](
+        consumerProperties(broker.bootstrapServers, readCommitted = true)
+      )
+      try
+        committed.assign(java.util.List.of(partition))
+        committed.seekToBeginning(java.util.List.of(partition))
+        assertEquals(pollValues(committed, expected = 10), (0 until 20 by 2).map(index => s"value-$index").toVector)
+      finally committed.close()
+
+      val uncommitted = KafkaConsumer[Array[Byte], Array[Byte]](
+        consumerProperties(broker.bootstrapServers, readCommitted = false)
+      )
+      try
+        uncommitted.assign(java.util.List.of(partition))
+        uncommitted.seekToBeginning(java.util.List.of(partition))
+        assertEquals(pollValues(uncommitted, expected = 20), (0 until 20).map(index => s"value-$index").toVector)
+      finally uncommitted.close()
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   test("Kafka transactions gate the last stable offset and atomically commit consumer offsets") {
     val directory = Files.createTempDirectory("cascade-exactly-once-e2e")
     val broker = testBroker(directory)
