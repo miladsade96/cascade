@@ -1985,7 +1985,17 @@ final class RequestHandler(
     val transactionError =
       if !isGroupCoordinatorFor(groupId) then Errors.NotCoordinator
       else if membershipError != Errors.None then membershipError
-      else deliveryCoordinator.stageOffsets(transactionalId, producerId, producerEpoch, groupId, values)
+      else
+        deliveryCoordinator.stageOffsets(
+          transactionalId,
+          producerId,
+          producerEpoch,
+          groupId,
+          values,
+          if version >= 5 && clusterManager.supportsFeature(ClusterFeature.TransactionVersion, 2)
+          then TransactionProtocol.Version2
+          else TransactionProtocol.Version1
+        )
     val writer = ByteWriter().writeInt(0)
     def writeTopic(value: (String, Vector[RequestedOffset])): Unit = value match
       case (topic, offsets) =>
