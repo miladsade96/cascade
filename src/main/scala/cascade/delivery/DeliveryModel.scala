@@ -89,8 +89,16 @@ object DeliveryImage:
   val Empty: DeliveryImage = DeliveryImage(0L, 1L, Vector.empty, Vector.empty, Vector.empty)
 
 object DeliveryCodec:
+  private val Magic = 0xca5cade2
+  private val CurrentFormat: Short = 1
+
   def encode(image: DeliveryImage): Array[Byte] =
     val writer = ByteWriter()
+    writer.writeInt(Magic).writeShort(CurrentFormat)
+    writeBody(writer, image)
+    writer.result()
+
+  private def writeBody(writer: ByteWriter, image: DeliveryImage): Unit =
     writer.writeLong(image.version).writeLong(image.nextProducerId)
     writer.writeArray(image.producers) { producer =>
       writer.writeLong(producer.producerId)
@@ -99,11 +107,17 @@ object DeliveryCodec:
       writer.writeInt(producer.transactionTimeoutMillis): Unit
     }
     writer.writeArray(image.activeTransactions)(writeActive(writer, _))
-    writer.writeArray(image.completedTransactions)(writeCompleted(writer, _))
-    writer.result()
+    writer.writeArray(image.completedTransactions)(writeCompleted(writer, _)): Unit
 
   def decode(bytes: Array[Byte]): DeliveryImage =
-    val cursor = ByteCursor(bytes)
+    val probe = ByteCursor(bytes)
+    val (cursor, format) =
+      if probe.readInt() == Magic then (probe, probe.readShort())
+      else (ByteCursor(bytes), 0.toShort)
+    if format < 0 || format > CurrentFormat then throw cascade.protocol.ProtocolException(s"unsupported delivery format: $format")
+    readBody(cursor)
+
+  private def readBody(cursor: ByteCursor): DeliveryImage =
     val version = cursor.readLong()
     val nextProducerId = cursor.readLong()
     val producers = cursor.readArray {

@@ -1,5 +1,6 @@
 package cascade.delivery
 
+import cascade.protocol.ByteWriter
 import cascade.storage.TopicPartition
 import java.nio.file.{Files, StandardOpenOption}
 import munit.FunSuite
@@ -9,6 +10,11 @@ final class DeliveryStoreSuite extends FunSuite:
   test("delivery images round-trip every producer and transaction field") {
     val image = sampleImage(version = 7L, offsetsApplied = false)
     assertEquals(DeliveryCodec.decode(DeliveryCodec.encode(image)), image)
+  }
+
+  test("delivery codec reads headerless images written by previous releases") {
+    val image = sampleImage(version = 6L, offsetsApplied = true)
+    assertEquals(DeliveryCodec.decode(legacyBytes(image)), image)
   }
 
   test("recovery truncates a partial delivery-image tail") {
@@ -136,6 +142,33 @@ final class DeliveryStoreSuite extends FunSuite:
         )
       )
     )
+
+  private def legacyBytes(image: DeliveryImage): Array[Byte] =
+    val writer = ByteWriter().writeLong(image.version).writeLong(image.nextProducerId)
+    def writeRange(value: TransactionRange): Unit =
+      writer.writeString(value.topic).writeInt(value.partition).writeLong(value.firstOffset).writeLong(value.lastOffset): Unit
+    def writeOffset(value: PendingOffset): Unit =
+      writer.writeString(value.groupId).writeString(value.topic).writeInt(value.partition)
+      writer.writeLong(value.offset).writeInt(value.leaderEpoch).writeNullableString(value.metadata): Unit
+    writer.writeArray(image.producers) { producer =>
+      writer.writeLong(producer.producerId).writeShort(producer.producerEpoch)
+      writer.writeNullableString(producer.transactionalId).writeInt(producer.transactionTimeoutMillis): Unit
+    }
+    writer.writeArray(image.activeTransactions) { transaction =>
+      writer.writeString(transaction.transactionalId).writeLong(transaction.producerId).writeShort(transaction.producerEpoch)
+      writer.writeInt(transaction.timeoutMillis).writeLong(transaction.startedAtMillis)
+      writer.writeArray(transaction.partitions)(value => writer.writeString(value.topic).writeInt(value.partition): Unit)
+      writer.writeArray(transaction.ranges)(writeRange)
+      writer.writeArray(transaction.groups)(value => writer.writeString(value): Unit)
+      writer.writeArray(transaction.pendingOffsets)(writeOffset): Unit
+    }
+    writer.writeArray(image.completedTransactions) { transaction =>
+      writer.writeString(transaction.transactionalId).writeLong(transaction.producerId).writeShort(transaction.producerEpoch)
+      writer.writeBoolean(transaction.committed).writeBoolean(transaction.offsetsApplied)
+      writer.writeArray(transaction.ranges)(writeRange)
+      writer.writeArray(transaction.pendingOffsets)(writeOffset): Unit
+    }
+    writer.result()
 
   private def deleteTree(root: java.nio.file.Path): Unit =
     val paths = Files.walk(root)
