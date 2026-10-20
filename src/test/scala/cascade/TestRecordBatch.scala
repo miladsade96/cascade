@@ -2,7 +2,8 @@ package cascade
 
 import java.nio.{ByteBuffer, ByteOrder}
 import java.io.{ByteArrayOutputStream, OutputStream}
-import java.util.zip.{CRC32C, GZIPOutputStream}
+import java.util.zip.GZIPOutputStream
+import cascade.storage.RecordBatch
 import org.xerial.snappy.SnappyOutputStream
 import net.jpountz.lz4.LZ4FrameOutputStream
 import com.github.luben.zstd.ZstdOutputStreamNoFinalizer
@@ -17,7 +18,7 @@ object TestRecordBatch:
     buffer.putInt(totalBytes - 12) // bytes after batchLength
     buffer.putInt(0) // partition leader epoch
     buffer.put(2.toByte)
-    buffer.putInt(0) // CRC is opaque to storage tests
+    buffer.putInt(0) // CRC is finalized after the complete batch is encoded
     buffer.putShort(0.toShort)
     buffer.putInt(0) // last offset delta
     buffer.putLong(0L)
@@ -26,7 +27,9 @@ object TestRecordBatch:
     buffer.putShort(-1.toShort)
     buffer.putInt(-1)
     buffer.putInt(1)
-    buffer.array()
+    val batch = buffer.array()
+    RecordBatch.rewriteCrc(batch)
+    batch
 
   def producer(
       producerId: Long,
@@ -45,6 +48,7 @@ object TestRecordBatch:
     buffer.putShort(51, producerEpoch)
     buffer.putInt(53, baseSequence)
     buffer.putInt(57, recordCount)
+    RecordBatch.rewriteCrc(batch)
     batch
 
   def keyed(records: Vector[Record], baseOffset: Long = 0L): Array[Byte] =
@@ -77,7 +81,9 @@ object TestRecordBatch:
     buffer.putInt(-1)
     buffer.putInt(records.size)
     buffer.put(encoded)
-    buffer.array()
+    val batch = buffer.array()
+    RecordBatch.rewriteCrc(batch)
+    batch
 
   def gzipKeyed(records: Vector[Record], baseOffset: Long = 0L): Array[Byte] =
     compressedKeyed(records, compressionType = 1, baseOffset = baseOffset)
@@ -99,9 +105,7 @@ object TestRecordBatch:
     val buffer = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
     buffer.putInt(8, batch.length - 12)
     buffer.putShort(21, (buffer.getShort(21) | compressionType).toShort)
-    val crc = CRC32C()
-    crc.update(batch, 21, batch.length - 21)
-    buffer.putInt(17, crc.getValue.toInt)
+    RecordBatch.rewriteCrc(batch)
     batch
 
   private def encodeNullableBytes(value: Option[Array[Byte]]): Vector[Byte] =
