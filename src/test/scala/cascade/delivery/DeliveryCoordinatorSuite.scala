@@ -5,7 +5,7 @@ import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
 import cascade.coordinator.CoordinatorCheckpoint
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
 import cascade.protocol.Errors
-import cascade.storage.{FlushPolicy, RecordBatch, TopicPartition, TopicRegistry}
+import cascade.storage.{CleanupPolicy, FlushPolicy, RecordBatch, StorageLifecycleConfig, TopicPartition, TopicRegistry}
 import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import munit.FunSuite
@@ -993,6 +993,98 @@ final class DeliveryCoordinatorSuite extends FunSuite:
       registry.close()
       deleteTree(directory)
   }
+
+  test("idempotent duplicate and sequence validation survives compaction restart") {
+    val directory = Files.createTempDirectory("cascade-idempotent-compaction-restart")
+    val dataDirectory = directory.resolve("data")
+    val value = Array.fill[Byte](700)(5)
+    var producer = InitProducerIdResult(Errors.None, -1L, -1)
+    try
+      val registry = TopicRegistry(
+        dataDirectory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(
+          cleanupPolicy = CleanupPolicy.Compact,
+          retentionMillis = -1L,
+          lifecycleIntervalMillis = 20L
+        )
+      )
+      val groups = GroupCoordinator(directory.resolve("offsets.log"))
+      val delivery = DeliveryCoordinator(directory.resolve("delivery.log"), registry, groups)
+      try
+        registry.getOrCreate("events")
+        producer = delivery.initProducerId(None, Int.MaxValue)
+        val appender = localAppender(registry)
+        val first = TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("shared".getBytes), Some(value), 1000L)),
+          producer.producerId,
+          producer.producerEpoch,
+          baseSequence = 0
+        )
+        assertEquals(delivery.append(None, "events", 0, first, -1, 30_000, appender), DeliveryAppendResult(Errors.None, 0L))
+        val log = registry.partition("events", 0).getOrElse(fail("missing partition"))
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("shared".getBytes), Some(value), 1001L))))
+        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("anchor".getBytes), Some(value), 1002L))))
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
+        while registry.lifecycleStatistics.compactedBatches == 0L && System.nanoTime() < deadline do Thread.sleep(5L)
+        assert(registry.lifecycleStatistics.compactedBatches > 0L)
+        assertEquals(log.logStartOffset, 1L)
+      finally
+        delivery.close()
+        groups.close()
+        registry.close()
+
+      val recoveredRegistry = TopicRegistry(dataDirectory, 1024, FlushPolicy.Sync)
+      val recoveredGroups = GroupCoordinator(directory.resolve("offsets.log"))
+      val recoveredDelivery = DeliveryCoordinator(directory.resolve("delivery.log"), recoveredRegistry, recoveredGroups)
+      try
+        val appender = localAppender(recoveredRegistry)
+        val duplicate = TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("shared".getBytes), Some(value), 1000L)),
+          producer.producerId,
+          producer.producerEpoch,
+          baseSequence = 0
+        )
+        assertEquals(
+          recoveredDelivery.append(None, "events", 0, duplicate, -1, 30_000, appender),
+          DeliveryAppendResult(Errors.None, 0L)
+        )
+        val next = TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("next".getBytes), Some(value), 1003L)),
+          producer.producerId,
+          producer.producerEpoch,
+          baseSequence = 1
+        )
+        assertEquals(
+          recoveredDelivery.append(None, "events", 0, next, -1, 30_000, appender),
+          DeliveryAppendResult(Errors.None, 3L)
+        )
+        val gap = TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("gap".getBytes), Some(value), 1004L)),
+          producer.producerId,
+          producer.producerEpoch,
+          baseSequence = 3
+        )
+        assertEquals(recoveredDelivery.append(None, "events", 0, gap, -1, 30_000, appender).errorCode, Errors.OutOfOrderSequenceNumber)
+      finally
+        recoveredDelivery.close()
+        recoveredGroups.close()
+        recoveredRegistry.close()
+    finally deleteTree(directory)
+  }
+
+  private def localAppender(registry: TopicRegistry): ReplicatedAppender = new ReplicatedAppender:
+    override def append(
+        topic: String,
+        partition: Int,
+        records: Array[Byte],
+        acknowledgements: Short,
+        timeoutMillis: Int
+    ): ReplicatedAppendResult =
+      val result = registry.partition(topic, partition).getOrElse(fail("missing partition")).append(records)
+      ReplicatedAppendResult(Errors.None, result.baseOffset)
 
   private def withCoordinator(directory: java.nio.file.Path)(
       test: (DeliveryCoordinator, GroupCoordinator, TopicRegistry) => Unit
