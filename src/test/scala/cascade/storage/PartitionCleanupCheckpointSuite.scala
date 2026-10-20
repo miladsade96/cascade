@@ -23,6 +23,19 @@ final class PartitionCleanupCheckpointSuite extends FunSuite:
     intercept[ProtocolException](prepared.markApplied(first))
   }
 
+  test("a newer prepare can coexist with the last committed and applied generation") {
+    val first = decision(epoch = 1, generation = 1, deleteBefore = 2L)
+    val second = decision(epoch = 1, generation = 2, deleteBefore = 3L)
+    val previous = PartitionCleanupState.Empty.prepare(first).commit(first).markApplied(first)
+    val prepared = previous.prepare(second)
+    assertEquals(prepared.committed, Some(first))
+    assertEquals(prepared.applied, Some(first))
+    val committed = prepared.commit(second)
+    assertEquals(committed.committed, Some(second))
+    assertEquals(committed.applied, Some(first))
+    assertEquals(committed.markApplied(second).applied, Some(second))
+  }
+
   test("cleanup checkpoint round trips prepared committed and applied state") {
     val directory = Files.createTempDirectory("cascade-cleanup-checkpoint")
     val path = directory.resolve("replicated-cleanup.checkpoint")

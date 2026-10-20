@@ -65,10 +65,13 @@ private[storage] final case class PartitionCleanupState(
     else copy(applied = Some(decision))
 
   private def validate(): Unit =
-    if committed.exists(value => prepared.exists(_ != value)) then
-      throw ProtocolException("cleanup checkpoint has conflicting prepared and committed decisions")
-    if applied.exists(value => !committed.contains(value)) then
-      throw ProtocolException("cleanup checkpoint applied decision is not committed")
+    if committed.exists(value => prepared.exists(preparedValue => !notAfter(value, preparedValue))) then
+      throw ProtocolException("cleanup checkpoint committed decision is newer than its prepared decision")
+    if applied.exists(value => committed.forall(committedValue => !notAfter(value, committedValue))) then
+      throw ProtocolException("cleanup checkpoint applied decision is newer than its committed decision")
+
+  private def notAfter(left: PartitionCleanupDecision, right: PartitionCleanupDecision): Boolean =
+    left == right || right.supersedes(left)
 
 private[storage] object PartitionCleanupState:
   val Empty: PartitionCleanupState = PartitionCleanupState(None, None, None)
