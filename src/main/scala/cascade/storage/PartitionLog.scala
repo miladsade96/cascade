@@ -80,7 +80,7 @@ final class PartitionLog(
 
   private val segments = ArrayBuffer.empty[LogSegment]
   private val recentProducerBatches = HashMap.empty[Long, ArrayDeque[RecordBatchMetadata]]
-  private val checkpointedProducerBatches = producerStateCheckpoint.recovered
+  private var checkpointedProducerBatches = producerStateCheckpoint.recovered
   loadSegments()
   rebuildProducerHistory()
 
@@ -292,6 +292,7 @@ final class PartitionLog(
   private[storage] def flushForSnapshot(): Long = synchronized {
     awaitBackgroundFlush()
     flushDirtySegments()
+    persistProducerHistory()
     committedOffset
   }
 
@@ -401,6 +402,7 @@ final class PartitionLog(
     awaitBackgroundFlush()
     flushDirtySegments()
     highWatermarkCheckpoint.persist(committedOffset)
+    persistProducerHistory()
     segments.foreach(_.close())
     highWatermarkCheckpoint.close()
   }
@@ -540,6 +542,11 @@ final class PartitionLog(
     checkpointedProducerBatches.foreach(indexProducerBatch)
     segments.iterator.flatMap(_.index.iterator).foreach(entry => indexProducerBatch(entry.metadata))
 
+  private def persistProducerHistory(): Unit =
+    checkpointedProducerBatches = producerStateCheckpoint.persist(
+      recentProducerBatches.valuesIterator.flatMap(_.iterator).toVector
+    )
+
   private def retireSegment(segment: LogSegment): Unit =
     val bytes = segment.size
     segment.close()
@@ -554,6 +561,8 @@ final class PartitionLog(
   private def compactClosedSegments(): Unit =
     awaitBackgroundFlush()
     flushDirtySegments()
+    val candidates = segments.dropRight(1).filter(_.index.lastOption.forall(_.lastOffset < committedOffset)).toVector
+    if candidates.nonEmpty then persistProducerHistory()
     val latestByKey = HashMap.empty[Vector[Byte], Long]
     segments.iterator.flatMap(_.index.iterator).foreach { entry =>
       if !entry.metadata.transactional && !entry.metadata.control then
@@ -561,7 +570,6 @@ final class PartitionLog(
           records.foreach(record => record.key.foreach(key => latestByKey.update(key, record.offset)))
         }
     }
-    val candidates = segments.dropRight(1).filter(_.index.lastOption.forall(_.lastOffset < committedOffset)).toVector
     var changed = false
     val tombstoneCutoff = System.currentTimeMillis() - currentLifecycleConfig.deleteRetentionMillis
     candidates.foreach { segment =>
