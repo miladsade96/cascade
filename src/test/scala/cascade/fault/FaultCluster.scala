@@ -23,7 +23,9 @@ final class FaultCluster(
     resources: cascade.security.ResourceLimits = cascade.security.ResourceLimits(),
     offsetBatch: cascade.group.OffsetBatchConfig = cascade.group.OffsetBatchConfig(),
     coordinatorPublication: cascade.coordinator.CoordinatorPublicationConfig = cascade.coordinator.CoordinatorPublicationConfig(),
-    advertisedCapabilities: Option[PeerCapabilities] = None
+    advertisedCapabilities: Option[PeerCapabilities] = None,
+    segmentBytes: Long = 128L * 1024 * 1024,
+    storageLifecycle: cascade.storage.StorageLifecycleConfig = cascade.storage.StorageLifecycleConfig()
 ) extends AutoCloseable:
   require(size >= 3, "fault cluster requires at least three brokers")
   private val voterCount = if initialVoters < 0 then size else initialVoters
@@ -42,6 +44,7 @@ final class FaultCluster(
       advertisedHost = node.host,
       advertisedPort = Some(node.port),
       dataDirectory = directory,
+      segmentBytes = segmentBytes,
       flushPolicy = FlushPolicy.Sync,
       nodeId = node.id,
       clusterNodes = voterNodes,
@@ -54,7 +57,7 @@ final class FaultCluster(
       offsetBatch = offsetBatch,
       coordinatorPublication = coordinatorPublication,
       security = cascade.security.BrokerSecurityConfig(resources = resources.copy(maxConnectionsPerIp = maxConnectionsPerIp)),
-      storageLifecycle = cascade.storage.StorageLifecycleConfig(journalCompactionBytes = journalCompactionBytes)
+      storageLifecycle = storageLifecycle.copy(journalCompactionBytes = journalCompactionBytes)
     )
   }
   private val running = mutable.HashMap.empty[Int, KafkaBroker]
