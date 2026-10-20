@@ -16,6 +16,34 @@ import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import scala.jdk.CollectionConverters.*
 
 final class BrokerIntegrationSuite extends FunSuite:
+  test("returns CORRUPT_MESSAGE without appending a CRC-damaged batch") {
+    withBroker { broker =>
+      val socket = Socket("127.0.0.1", broker.boundPort)
+      try
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream))
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream))
+        request(output, input, metadataRequest("crc-events", 1))
+        val corrupt = TestRecordBatch.single()
+        corrupt(corrupt.length - 1) = (corrupt.last ^ 0x01).toByte
+
+        assertProduceResult(
+          request(output, input, produceRequest("crc-events", corrupt, 2)),
+          2,
+          Errors.CorruptMessage,
+          -1L,
+          "crc-events"
+        )
+        assertProduceResult(
+          request(output, input, produceRequest("crc-events", TestRecordBatch.single(), 3)),
+          3,
+          Errors.None,
+          0L,
+          "crc-events"
+        )
+      finally socket.close()
+    }
+  }
+
   test("serves the flexible ConsumerGroupHeartbeat protocol with server-side assignment") {
     withBroker { broker =>
       val socket = Socket("127.0.0.1", broker.boundPort)
