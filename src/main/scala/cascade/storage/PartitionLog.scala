@@ -1,6 +1,6 @@
 package cascade.storage
 
-import cascade.protocol.ProtocolException
+import cascade.protocol.{CorruptRecordException, ProtocolException}
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -423,7 +423,7 @@ final class PartitionLog(
         val path = segmentPaths(index)
         val base = path.getFileName.toString.stripSuffix(".log").toLong
         val segment = LogSegment(base, path)
-        recoveredTail = scan(segment)
+        recoveredTail = scan(segment, repairCorruptTail = index == segmentPaths.length - 1)
         segments += segment
         if recoveredTail then segmentPaths.drop(index + 1).foreach(Files.delete)
         index += 1
@@ -433,7 +433,7 @@ final class PartitionLog(
   private def openSegment(baseOffset: Long): LogSegment =
     LogSegment(baseOffset, directory.resolve(f"$baseOffset%020d.log"))
 
-  private def scan(segment: LogSegment): Boolean =
+  private def scan(segment: LogSegment, repairCorruptTail: Boolean): Boolean =
     var position = 0L
     val fileSize = segment.channel.size()
     var scanning = true
@@ -450,12 +450,18 @@ final class PartitionLog(
         else
           val batch = new Array[Byte](totalSize)
           readFully(segment.channel, ByteBuffer.wrap(batch), position)
-          val metadata = RecordBatch.metadata(batch)
-          segment.index += BatchIndex(metadata, position, totalSize)
-          segment.timestampIndex.append(metadata)
-          segment.transactionIndex.append(metadata)
-          indexProducerBatch(metadata)
-          position += totalSize
+          try
+            val metadata = RecordBatch.metadata(batch)
+            segment.index += BatchIndex(metadata, position, totalSize)
+            segment.timestampIndex.append(metadata)
+            segment.transactionIndex.append(metadata)
+            indexProducerBatch(metadata)
+            position += totalSize
+          catch
+            case _: CorruptRecordException if repairCorruptTail && position + totalSize == fileSize =>
+              scanning = false
+            case error: CorruptRecordException =>
+              throw CorruptRecordException(s"corrupt persisted record batch in ${segment.path} at $position: ${error.getMessage}")
     if position < fileSize then
       segment.channel.truncate(position)
       segment.channel.force(true)
@@ -585,7 +591,7 @@ final class PartitionLog(
       segment.close()
       AtomicFileLifecycle.replace(temporary, segment.path)
       val replacement = LogSegment(segment.baseOffset, segment.path)
-      scan(replacement)
+      scan(replacement, repairCorruptTail = false)
       segments.update(segmentIndex, replacement)
       reclaimedBytes = Math.addExact(reclaimedBytes, oldSize - replacement.size)
       throttleCompaction(oldSize)
