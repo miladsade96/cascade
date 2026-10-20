@@ -85,6 +85,28 @@ object TestRecordBatch:
     RecordBatch.rewriteCrc(batch)
     batch
 
+  def keyedProducer(
+      records: Vector[Record],
+      producerId: Long,
+      producerEpoch: Short,
+      baseSequence: Int,
+      transactional: Boolean = false,
+      control: Boolean = false,
+      baseOffset: Long = 0L
+  ): Array[Byte] =
+    require(producerId >= 0L, "producer ID must be non-negative")
+    require(producerEpoch >= 0, "producer epoch must be non-negative")
+    require(baseSequence >= 0, "base sequence must be non-negative")
+    val batch = keyed(records, baseOffset)
+    val buffer = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
+    val flags = (if transactional then 0x10 else 0) | (if control then 0x20 else 0)
+    buffer.putShort(21, (buffer.getShort(21) | flags).toShort)
+    buffer.putLong(43, producerId)
+    buffer.putShort(51, producerEpoch)
+    buffer.putInt(53, baseSequence)
+    RecordBatch.rewriteCrc(batch)
+    batch
+
   def gzipKeyed(records: Vector[Record], baseOffset: Long = 0L): Array[Byte] =
     compressedKeyed(records, compressionType = 1, baseOffset = baseOffset)
 

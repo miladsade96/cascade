@@ -599,6 +599,39 @@ final class PartitionLogSuite extends FunSuite:
     }
   }
 
+  test("compaction restart preserves a cleaned producer duplicate window") {
+    val directory = Files.createTempDirectory("cascade-compacted-producer-window-test")
+    val value = Array.fill[Byte](700)(7)
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(cleanupPolicy = CleanupPolicy.Compact, retentionMillis = -1L)
+      )
+      try
+        log.append(TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("key".getBytes), Some(value), 1000L)),
+          producerId = 42L,
+          producerEpoch = 3,
+          baseSequence = 18
+        ))
+        log.append(TestRecordBatch.keyed(
+          Vector(TestRecordBatch.Record(Some("key".getBytes), Some(value), 2000L))
+        ))
+        log.runLifecycle()
+        assertEquals(log.recentBatches(42L).map(_.lastSequence), Vector(18))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        val state = recovered.recentBatches(42L)
+        assertEquals(state.map(value => (value.producerEpoch, value.baseSequence, value.lastSequence)), Vector((3.toShort, 18, 18)))
+        assertEquals(recovered.logStartOffset, 1L)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]
