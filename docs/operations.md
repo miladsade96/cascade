@@ -80,6 +80,14 @@ If `credential_policy` fails, Cascade likewise continues using the last valid PL
 
 If `tls_material` fails, Cascade continues using the last valid key/trust generation for new connections. I atomically restore or repair both stores, wait for readiness to recover, and require a fresh TLS handshake before I finish the rotation. My [TLS rotation runbook](tls-rotation.md) covers leaf and CA replacement without a trust gap.
 
+## Record-batch corruption response
+
+I use the [magic-v2 integrity contract](record-batch-integrity.md) when a producer reports `CORRUPT_MESSAGE` or a broker refuses to recover a segment. A client-side error means Cascade rejected the batch before offset assignment. I capture the producer logs and serializer/compression settings, correct the client or transport fault, and retry through the producer's normal delivery policy. I do not edit the broker log for a rejected request.
+
+On startup, Cascade may truncate one incomplete or CRC-invalid final batch only at the physical end of the final active segment. It fails startup for CRC corruption anywhere in the durable prefix and leaves the bytes unchanged. In that case I stop writes to the affected replica, make a forensic copy of the partition directory and broker logs, record device/filesystem health, and recover from a verified in-sync replica or backup. I never hex-edit, recalculate the CRC of, or manually truncate a durable segment to make startup pass; doing that would turn unknown data into apparently valid data and could hide loss.
+
+After repair I compare the authoritative high watermark and recovery fingerprints, restart the replica through the normal recovery path, and verify exact record and offset continuity with a Kafka client. Repeated CRC faults require device, memory, filesystem, controller-cache, and power-path investigation before I return the host to service.
+
 ## Structured events and capacity alerts
 
 With `--structured-log logs/cascade.jsonl`, I write one JSON object per line. I rotate before an event would cross `--structured-log-max-bytes`, retain the configured number of generations, and name them `cascade.jsonl.1`, `cascade.jsonl.2`, and so on. Standard error remains enabled unless I pass `--no-stderr-log`.
