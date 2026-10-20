@@ -300,6 +300,29 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("recovery truncates a CRC-corrupt final batch from the active segment") {
+    val directory = Files.createTempDirectory("cascade-crc-tail-recovery-test")
+    try
+      val log = PartitionLog(directory)
+      try
+        log.append(TestRecordBatch.single())
+        log.append(TestRecordBatch.single())
+      finally log.close()
+
+      val segment = directory.resolve("00000000000000000000.log")
+      val damaged = Files.readAllBytes(segment)
+      damaged(damaged.length - 1) = (damaged.last ^ 0x01).toByte
+      Files.write(segment, damaged)
+
+      val recovered = PartitionLog(directory)
+      try
+        assertEquals(Files.size(segment), 61L)
+        assertEquals(recovered.logEndOffset, 1L)
+        assertEquals(recovered.append(TestRecordBatch.single()).baseOffset, 1L)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   test("recovery discards segments after an incomplete earlier tail") {
     val directory = Files.createTempDirectory("cascade-multisegment-recovery-test")
     try
