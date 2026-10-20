@@ -1,7 +1,7 @@
 package cascade.storage
 
 import cascade.TestRecordBatch
-import cascade.protocol.CorruptRecordException
+import cascade.protocol.{CorruptRecordException, ProtocolException}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
@@ -566,6 +566,70 @@ final class PartitionLogSuite extends FunSuite:
         assertEquals(held.deleteBeforeOffset, 0L)
         val released = log.planLifecycle(retentionFloor = log.highWatermark)
         assertEquals(released.deleteBeforeOffset, 2L)
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
+  test("a committed cleanup plan resumes exactly once after restart") {
+    val directory = Files.createTempDirectory("cascade-cleanup-resume-test")
+    val config = StorageLifecycleConfig(retentionMillis = -1L, retentionBytes = 1000L)
+    try
+      val initial = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync, lifecycleConfig = config)
+      val decision = try
+        (0 until 3).foreach(_ => initial.append(TestRecordBatch.single(totalBytes = 600)))
+        val value = PartitionCleanupDecision(4, initial.nextCleanupGeneration(4), initial.planLifecycle())
+        assertEquals(value.plan.deleteBeforeOffset, 2L)
+        initial.prepareCleanup(value)
+        initial.commitCleanup(value)
+        value
+      finally initial.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync, lifecycleConfig = config)
+      try
+        assertEquals(recovered.logStartOffset, 0L)
+        recovered.applyCommittedCleanup()
+        assertEquals(recovered.logStartOffset, 2L)
+        assertEquals(recovered.cleanupProgress, Some(decision) -> Some(decision))
+        val runs = recovered.lifecycleStatistics.runs
+        recovered.applyCommittedCleanup()
+        assertEquals(recovered.lifecycleStatistics.runs, runs)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
+  test("prepared but uncommitted cleanup never removes records after restart") {
+    val directory = Files.createTempDirectory("cascade-cleanup-prepare-only-test")
+    val config = StorageLifecycleConfig(retentionMillis = -1L, retentionBytes = 1000L)
+    try
+      val initial = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync, lifecycleConfig = config)
+      try
+        (0 until 3).foreach(_ => initial.append(TestRecordBatch.single(totalBytes = 600)))
+        initial.prepareCleanup(PartitionCleanupDecision(1, 1L, initial.planLifecycle()))
+      finally initial.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync, lifecycleConfig = config)
+      try
+        recovered.applyCommittedCleanup()
+        assertEquals(recovered.logStartOffset, 0L)
+        assertEquals(recovered.cleanupProgress, None -> None)
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
+  test("replicated cleanup rejects uncommitted and non-segment boundaries") {
+    val directory = Files.createTempDirectory("cascade-cleanup-validation-test")
+    try
+      val log = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        (0 until 2).foreach(index =>
+          log.append(TestRecordBatch.producer(90L + index, 1, 0, recordCount = 2, totalBytes = 600))
+        )
+        intercept[ProtocolException] {
+          log.prepareCleanup(PartitionCleanupDecision(1, 1L, PartitionCleanupPlan(5L, 5L, 0L)))
+        }
+        intercept[ProtocolException] {
+          log.prepareCleanup(PartitionCleanupDecision(1, 1L, PartitionCleanupPlan(0L, 1L, 0L)))
+        }
       finally log.close()
     finally deleteTree(directory)
   }
