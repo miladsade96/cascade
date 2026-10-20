@@ -370,44 +370,74 @@ final class PartitionLog(
       nowMillis: Long = System.currentTimeMillis(),
       retentionFloor: Long = Long.MaxValue
   ): LifecycleStatistics = synchronized {
+    val plan = planLifecycle(nowMillis, retentionFloor)
+    applyLifecyclePlan(plan)
+  }
+
+  private[cascade] def planLifecycle(
+      nowMillis: Long = System.currentTimeMillis(),
+      retentionFloor: Long = Long.MaxValue
+  ): PartitionCleanupPlan = synchronized {
     val lifecycleConfig = currentLifecycleConfig
     val cleanupBoundary = math.min(committedOffset, math.max(logStartOffset, retentionFloor))
+    val closed = segments.dropRight(1).toVector
+    val eligible = closed.takeWhile(_.index.lastOption.forall(_.lastOffset < cleanupBoundary))
+    val timeExpired =
+      if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
+        val cutoff = nowMillis - lifecycleConfig.retentionMillis
+        eligible.takeWhile { segment =>
+          val maximumTimestamp = segment.index.iterator.map(_.metadata.maxTimestamp).maxOption.getOrElse(0L)
+          val ageTimestamp =
+            if maximumTimestamp > 0L then maximumTimestamp
+            else Files.getLastModifiedTime(segment.path).toMillis
+          ageTimestamp < cutoff
+        }
+      else Vector.empty
+
+    val sizeExpired =
+      if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionBytes > 0L then
+        var retainedBytes = segments.iterator.map(_.size).sum - timeExpired.iterator.map(_.size).sum
+        val selected = ArrayBuffer.empty[LogSegment]
+        eligible.drop(timeExpired.size).iterator.takeWhile { segment =>
+          if retainedBytes > lifecycleConfig.retentionBytes then
+            selected += segment
+            retainedBytes -= segment.size
+            true
+          else false
+        }.foreach(_ => ())
+        selected.toVector
+      else Vector.empty
+
+    val expired = timeExpired ++ sizeExpired
+    val deleteBefore = expired.lastOption
+      .flatMap(_.index.lastOption)
+      .map(entry => Math.addExact(entry.lastOffset, 1L))
+      .getOrElse(logStartOffset)
+    val compactBefore =
+      if lifecycleConfig.cleanupPolicy.compactEnabled then
+        closed.takeWhile(_.index.lastOption.forall(_.lastOffset < committedOffset)).lastOption
+          .flatMap(_.index.lastOption)
+          .map(entry => Math.addExact(entry.lastOffset, 1L))
+          .getOrElse(logStartOffset)
+      else logStartOffset
+    PartitionCleanupPlan(deleteBefore, math.max(deleteBefore, compactBefore), nowMillis - lifecycleConfig.deleteRetentionMillis)
+  }
+
+  private def applyLifecyclePlan(plan: PartitionCleanupPlan): LifecycleStatistics =
+    val lifecycleConfig = currentLifecycleConfig
     lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
-    if lifecycleConfig.cleanupPolicy.compactEnabled then compactClosedSegments()
-    if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
+    if lifecycleConfig.cleanupPolicy.compactEnabled then
+      compactClosedSegments(plan.compactBeforeOffset, plan.tombstoneCutoffMillis)
+    if lifecycleConfig.cleanupPolicy.deleteEnabled && plan.deleteBeforeOffset > logStartOffset then
       awaitBackgroundFlush()
       flushDirtySegments()
-      val cutoff = nowMillis - lifecycleConfig.retentionMillis
       val expired = segments.dropRight(1).takeWhile { segment =>
-        val fullyCommitted = segment.index.lastOption.forall(_.lastOffset < cleanupBoundary)
-        val maximumTimestamp = segment.index.iterator.map(_.metadata.maxTimestamp).maxOption.getOrElse(0L)
-        val ageTimestamp =
-          if maximumTimestamp > 0L then maximumTimestamp
-          else Files.getLastModifiedTime(segment.path).toMillis
-        fullyCommitted && ageTimestamp < cutoff
+        segment.index.lastOption.forall(_.lastOffset < plan.deleteBeforeOffset)
       }.toVector
       if expired.nonEmpty then persistProducerHistory()
       expired.foreach(retireSegment)
       if expired.nonEmpty then rebuildProducerHistory()
-    if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionBytes > 0L then
-      awaitBackgroundFlush()
-      flushDirtySegments()
-      var totalBytes = segments.iterator.map(_.size).sum
-      val oversized = segments.dropRight(1).iterator
-        .filter(_.index.lastOption.forall(_.lastOffset < cleanupBoundary))
-        .toVector
-        .iterator
-      var removed = false
-      if totalBytes > lifecycleConfig.retentionBytes && oversized.hasNext then persistProducerHistory()
-      while totalBytes > lifecycleConfig.retentionBytes && oversized.hasNext do
-        val segment = oversized.next()
-        val bytes = segment.size
-        retireSegment(segment)
-        totalBytes -= bytes
-        removed = true
-      if removed then rebuildProducerHistory()
     lifecycleStatistics
-  }
 
   override def close(): Unit = synchronized {
     awaitBackgroundFlush()
@@ -569,10 +599,12 @@ final class PartitionLog(
     retiredSegments = Math.addExact(retiredSegments, 1L)
     reclaimedBytes = Math.addExact(reclaimedBytes, bytes)
 
-  private def compactClosedSegments(): Unit =
+  private def compactClosedSegments(compactBeforeOffset: Long, tombstoneCutoffMillis: Long): Unit =
     awaitBackgroundFlush()
     flushDirtySegments()
-    val candidates = segments.dropRight(1).filter(_.index.lastOption.forall(_.lastOffset < committedOffset)).toVector
+    val candidates = segments.dropRight(1)
+      .filter(_.index.lastOption.forall(entry => entry.lastOffset < compactBeforeOffset && entry.lastOffset < committedOffset))
+      .toVector
     if candidates.nonEmpty then persistProducerHistory()
     val latestByKey = HashMap.empty[Vector[Byte], Long]
     segments.iterator.flatMap(_.index.iterator).foreach { entry =>
@@ -582,11 +614,10 @@ final class PartitionLog(
         }
     }
     var changed = false
-    val tombstoneCutoff = System.currentTimeMillis() - currentLifecycleConfig.deleteRetentionMillis
     candidates.foreach { segment =>
       val rewrites = segment.index.iterator.map { entry =>
         val original = readBatch(entry)
-        entry -> RecordBatch.compact(original, latestByKey.toMap, tombstoneCutoff)
+        entry -> RecordBatch.compact(original, latestByKey.toMap, tombstoneCutoffMillis)
       }.toMap
       val rewrittenCount = rewrites.count { case (entry, replacement) =>
         replacement.forall(bytes => !java.util.Arrays.equals(bytes, readBatch(entry)))
