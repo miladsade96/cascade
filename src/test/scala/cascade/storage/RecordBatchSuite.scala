@@ -120,6 +120,36 @@ final class RecordBatchSuite extends FunSuite:
     }
   }
 
+  test("preserves every immutable magic-v2 header field during rewriting") {
+    val batch = TestRecordBatch.compressedKeyed(
+      Vector(
+        TestRecordBatch.Record(Some("key".getBytes), Some("old".getBytes), 1000L),
+        TestRecordBatch.Record(Some("key".getBytes), Some("new".getBytes), 1010L)
+      ),
+      compressionType = 4,
+      baseOffset = 50L
+    )
+    val header = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
+    header.putInt(12, 7)
+    header.putShort(21, (header.getShort(21) | 0x08).toShort)
+    header.putLong(43, 99L)
+    header.putShort(51, 3.toShort)
+    header.putInt(53, 200)
+    RecordBatch.rewriteCrc(batch)
+    val fixedPrefix = java.util.Arrays.copyOfRange(batch, 0, 8)
+    val fixedHeader = java.util.Arrays.copyOfRange(batch, 12, 17)
+    val coveredHeader = java.util.Arrays.copyOfRange(batch, 21, 57)
+
+    val compacted = RecordBatch.compact(batch, Map("key".getBytes.toVector -> 51L), Long.MinValue)
+      .getOrElse(fail("rewritten batch was removed"))
+
+    assertEquals(java.util.Arrays.copyOfRange(compacted, 0, 8).toVector, fixedPrefix.toVector)
+    assertEquals(java.util.Arrays.copyOfRange(compacted, 12, 17).toVector, fixedHeader.toVector)
+    assertEquals(java.util.Arrays.copyOfRange(compacted, 21, 57).toVector, coveredHeader.toVector)
+    assertEquals(ByteBuffer.wrap(compacted).order(ByteOrder.BIG_ENDIAN).getInt(57), 1)
+    assert(RecordBatch.hasValidCrc(compacted))
+  }
+
   test("keeps malformed compressed record payloads opaque") {
     val compressed = TestRecordBatch.keyed(
       Vector(TestRecordBatch.Record(Some("key".getBytes), Some("value".getBytes), 1000L))
