@@ -366,8 +366,12 @@ final class PartitionLog(
     segments.iterator.flatMap(_.transactionIndex.overlapping(firstOffset, lastOffsetExclusive)).toVector
   }
 
-  private[storage] def runLifecycle(nowMillis: Long = System.currentTimeMillis()): LifecycleStatistics = synchronized {
+  private[storage] def runLifecycle(
+      nowMillis: Long = System.currentTimeMillis(),
+      retentionFloor: Long = Long.MaxValue
+  ): LifecycleStatistics = synchronized {
     val lifecycleConfig = currentLifecycleConfig
+    val cleanupBoundary = math.min(committedOffset, math.max(logStartOffset, retentionFloor))
     lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
     if lifecycleConfig.cleanupPolicy.compactEnabled then compactClosedSegments()
     if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionMillis > 0L then
@@ -375,7 +379,7 @@ final class PartitionLog(
       flushDirtySegments()
       val cutoff = nowMillis - lifecycleConfig.retentionMillis
       val expired = segments.dropRight(1).takeWhile { segment =>
-        val fullyCommitted = segment.index.lastOption.forall(_.lastOffset < committedOffset)
+        val fullyCommitted = segment.index.lastOption.forall(_.lastOffset < cleanupBoundary)
         val maximumTimestamp = segment.index.iterator.map(_.metadata.maxTimestamp).maxOption.getOrElse(0L)
         val ageTimestamp =
           if maximumTimestamp > 0L then maximumTimestamp
@@ -390,7 +394,7 @@ final class PartitionLog(
       flushDirtySegments()
       var totalBytes = segments.iterator.map(_.size).sum
       val oversized = segments.dropRight(1).iterator
-        .filter(_.index.lastOption.forall(_.lastOffset < committedOffset))
+        .filter(_.index.lastOption.forall(_.lastOffset < cleanupBoundary))
         .toVector
         .iterator
       var removed = false

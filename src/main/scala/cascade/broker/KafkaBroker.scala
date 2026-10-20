@@ -153,6 +153,9 @@ final class KafkaBroker(
       journalCompactionBytes = config.storageLifecycle.journalCompactionBytes,
       readMetrics = coordinatorReadMetrics
     )
+    registry.installTransactionRetentionFloor((topic, partition, highWatermark) =>
+      delivery.retentionFloor(topic, partition, highWatermark)
+    )
     val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery))
     peerClient = peers
     clusterManager = cluster

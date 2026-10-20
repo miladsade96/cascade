@@ -42,6 +42,8 @@ final class TopicRegistry(
     case FlushPolicy.Sync => None
   private val lifecycleExecutor: ScheduledExecutorService =
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-storage-lifecycle").factory())
+  @volatile private var transactionRetentionFloor: (String, Int, Long) => Long =
+    (_, _, highWatermark) => highWatermark
 
   Files.createDirectories(dataDirectory)
   loadTopicPolicies()
@@ -66,6 +68,9 @@ final class TopicRegistry(
     }
 
   def configuredLifecyclePolicy(topic: String): Option[TopicLifecyclePolicy] = Option(topicPolicies.get(topic))
+
+  private[cascade] def installTransactionRetentionFloor(provider: (String, Int, Long) => Long): Unit =
+    transactionRetentionFloor = provider
 
   def configureLifecycle(topic: String, policy: TopicLifecyclePolicy): Either[String, Unit] = synchronized {
     ensureHealthy()
@@ -239,9 +244,11 @@ final class TopicRegistry(
     val lock = snapshotBarrier.readLock()
     lock.lock()
     try
-      topics.values().asScala.foreach { logs =>
-        logs.foreach { log =>
-          try log.runLifecycle()
+      topics.asScala.foreach { case (topic, logs) =>
+        logs.zipWithIndex.foreach { case (log, partition) =>
+          try
+            val highWatermark = log.highWatermark
+            log.runLifecycle(retentionFloor = transactionRetentionFloor(topic, partition, highWatermark))
           catch
             case error: Throwable =>
               backgroundFailure.compareAndSet(null, error): Unit
