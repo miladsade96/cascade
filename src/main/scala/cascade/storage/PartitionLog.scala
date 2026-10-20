@@ -377,6 +377,7 @@ final class PartitionLog(
           else Files.getLastModifiedTime(segment.path).toMillis
         fullyCommitted && ageTimestamp < cutoff
       }.toVector
+      if expired.nonEmpty then persistProducerHistory()
       expired.foreach(retireSegment)
       if expired.nonEmpty then rebuildProducerHistory()
     if lifecycleConfig.cleanupPolicy.deleteEnabled && lifecycleConfig.retentionBytes > 0L then
@@ -388,6 +389,7 @@ final class PartitionLog(
         .toVector
         .iterator
       var removed = false
+      if totalBytes > lifecycleConfig.retentionBytes && oversized.hasNext then persistProducerHistory()
       while totalBytes > lifecycleConfig.retentionBytes && oversized.hasNext do
         val segment = oversized.next()
         val bytes = segment.size
