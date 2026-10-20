@@ -523,6 +523,29 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("size retention holds segments below an active transaction floor") {
+    val directory = Files.createTempDirectory("cascade-transaction-retention-floor-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = -1L, retentionBytes = 100L)
+      )
+      try
+        (0 until 3).foreach(_ => log.append(TestRecordBatch.single(totalBytes = 600)))
+
+        val protectedStatistics = log.runLifecycle(retentionFloor = 0L)
+        assertEquals(protectedStatistics.retiredSegments, 0L)
+        assertEquals(log.logStartOffset, 0L)
+
+        val releasedStatistics = log.runLifecycle(retentionFloor = log.highWatermark)
+        assertEquals(releasedStatistics.retiredSegments, 2L)
+        assertEquals(log.logStartOffset, 2L)
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   test("topic registry runs lifecycle maintenance for synchronous logs") {
     val directory = Files.createTempDirectory("cascade-lifecycle-scheduler-test")
     try

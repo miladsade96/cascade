@@ -67,6 +67,25 @@ final class DeliveryReadViewSuite extends FunSuite:
     assert(view.visible(partition, nextEpochBatch))
   }
 
+  test("retention floor protects active and unacknowledged transaction ranges") {
+    val activeTransaction = active("open", 7L, 9L)
+    val pendingOutcome = completed(committed = true, first = 3L, last = 5L).copy(offsetsApplied = false)
+    val acknowledgedOutcome = completed(committed = false, first = 1L, last = 2L)
+    val view = DeliveryReadView.from(image(Vector(activeTransaction), Vector(acknowledgedOutcome, pendingOutcome)))
+
+    assertEquals(view.retentionFloor(partition, 20L), 3L)
+    assertEquals(view.retentionFloor(TopicPartition("events", 1), 20L), 20L)
+  }
+
+  test("retention floor advances after every transaction is durably acknowledged") {
+    val view = DeliveryReadView.from(image(
+      Vector.empty,
+      Vector(completed(committed = true, first = 0L, last = 4L))
+    ))
+
+    assertEquals(view.retentionFloor(partition, 12L), 12L)
+  }
+
   private def image(active: Vector[ActiveTransaction], completed: Vector[CompletedTransaction]): DeliveryImage =
     DeliveryImage.Empty.copy(version = 7L, activeTransactions = active, completedTransactions = completed)
 
