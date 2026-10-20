@@ -607,6 +607,62 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("compaction and restart preserve transactional and control batches byte for byte") {
+    val directory = Files.createTempDirectory("cascade-transactional-compaction-fidelity-test")
+    val value = Array.fill[Byte](700)(9)
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(cleanupPolicy = CleanupPolicy.Compact, retentionMillis = -1L)
+      )
+      val before = try
+        log.append(TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("transaction".getBytes), Some(value), 1000L)),
+          producerId = 81L,
+          producerEpoch = 4,
+          baseSequence = 11,
+          transactional = true
+        ))
+        log.append(TestRecordBatch.keyedProducer(
+          Vector(TestRecordBatch.Record(Some("control".getBytes), Some(value), 1001L)),
+          producerId = 81L,
+          producerEpoch = 4,
+          baseSequence = 12,
+          transactional = true,
+          control = true
+        ))
+        log.append(TestRecordBatch.keyed(
+          Vector(TestRecordBatch.Record(Some("transaction".getBytes), Some(value), 1002L))
+        ))
+        val original = splitBatches(log.fetch(0L, 16 * 1024).records).take(2)
+
+        log.runLifecycle()
+        val compacted = splitBatches(log.fetch(0L, 16 * 1024).records).take(2)
+        assertEquals(compacted.map(_.toVector), original.map(_.toVector))
+        original
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        val after = splitBatches(recovered.fetch(0L, 16 * 1024).records).take(2)
+        assertEquals(after.map(_.toVector), before.map(_.toVector))
+        assertEquals(
+          after.map(batch =>
+            val metadata = RecordBatch.metadata(batch)
+            (metadata.producerId, metadata.producerEpoch, metadata.baseSequence, metadata.transactional, metadata.control)
+          ),
+          Vector(
+            (81L, 4.toShort, 11, true, false),
+            (81L, 4.toShort, 12, true, true)
+          )
+        )
+        assertEquals(recovered.transactionBatches(0L, 2L).map(_.producerId), Vector(81L, 81L))
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   test("advanced compaction rewrites individual records for every compression codec and expires tombstones") {
     (1 to 4).foreach { compressionType =>
       val directory = Files.createTempDirectory(s"cascade-record-compaction-$compressionType-test")
