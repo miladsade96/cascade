@@ -38,13 +38,14 @@ foreach ($entry in (Get-Content -LiteralPath $classpathFile -Raw).Trim().Split([
     }
 }
 $common = @('run', '--rm', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-    '--memory', '3g', '--tmpfs', '/tmp:size=1g,mode=1777,nosuid,nodev', '--workdir', '/repo',
+    '--memory', '3g', '--tmpfs', '/tmp:size=1g,mode=1777,nosuid,nodev,noexec', '--workdir', '/repo',
     '--entrypoint', '/opt/java/bin/java') + $mountArguments
 $suites = @('cascade.security.TlsContextFactorySuite', 'cascade.security.ReloadableTlsContextSuite',
     'cascade.security.MutualTlsMaterialSuite', 'cascade.security.PeerTlsClientSuite',
-    'cascade.broker.PeerSecurityIntegrationSuite')
+    'cascade.broker.PeerSecurityIntegrationSuite', 'cascade.storage.RecordBatchSuite',
+    'cascade.storage.PartitionLogSuite')
 & docker @common $metadata.Id '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp ($mapped -join ':') org.junit.runner.JUnitCore @suites
-if ($LASTEXITCODE -ne 0) { throw 'Packaged-image TLS/SASL/security regression failed.' }
+if ($LASTEXITCODE -ne 0) { throw 'Packaged-image runtime regression failed.' }
 & $Java '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn' -cp (Get-Content -LiteralPath $classpathFile -Raw).Trim() cascade.e2e.ExternalSecureImageQualification $metadata.Id
 if ($LASTEXITCODE -ne 0) { throw 'External secure Kafka clients failed against the actual image.' }
 Write-Output "IMAGE_RUNTIME_SECURITY_RESULT passed image_id=$($metadata.Id) version=$ExpectedVersion suites=$($suites.Count) broker_classes=image"

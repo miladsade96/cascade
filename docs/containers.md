@@ -14,6 +14,7 @@ I build the application, Scala runtime, and compression codecs in a JDK 21 stage
 - declares `/var/lib/cascade` as the durable volume;
 - carries OCI source, version, revision, creation-time, and license labels;
 - uses pinned Alpine/musl runtime packages without glibc or OpenSSL, with Java TLS supplied by the JDK; and
+- loads build-extracted Snappy, LZ4, and Zstd native libraries from the read-only `/opt/cascade/native` tree, so hardened `noexec` temporary storage remains compatible with compaction; and
 - is qualified and published for `linux/amd64` with SBOM and provenance attestations. ARM64 publication remains disabled until equivalent runtime qualification is added.
 
 The default operations listener stays on `127.0.0.1` inside the container. Docker can therefore evaluate readiness without exposing an unauthenticated HTTP endpoint. When I need remote metrics, I bind operations explicitly to `0.0.0.0`, mount a token file, set `CASCADE_HEALTHCHECK_TOKEN_FILE` to the same file, and put TLS or mTLS in front of port 9404.
@@ -26,7 +27,7 @@ Release 1.3.0 includes [shard-object storage](shard-storage.md), [bounded offset
 
 `deploy/VERSION` records that deployment pin separately from the source `VERSION`. Tests permit a different pin only for `-SNAPSHOT` development; a release must align both files, the manifests, and the documented image commands.
 
-The historical snapshot milestones ran staged jars inside a full JDK container. For 1.10.0 I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.10.0 -ExpectedVersion 1.10.0` to test the actual minimal image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL and secure-peer regression tests.
+The historical snapshot milestones ran staged jars inside a full JDK container. For 1.10.0 I use `scripts/qualify-staged-clients.ps1 -BrokerImage miladsade96/cascade:1.10.0 -ExpectedVersion 1.10.0` to test the actual minimal image, with all five pinned clients and Java restart recovery. It checks the image's own user, entry point, JVM configuration, and health probe rather than substituting a JDK runtime. I also run `scripts/qualify-image-runtime.ps1` against the packaged JVM and broker for TLS/SASL, secure-peer, and all-codec compaction regression tests while `/tmp` remains `noexec`.
 
 The 1.3.0 release passed its functional tests, but its original vulnerability scan failed. A subsequent scan found 21 vulnerabilities in its Debian 12 libc/OpenSSL packages. The 1.3.1 patch changes the base and adds the [fail-closed security gate](container-security.md); functional success is no longer sufficient for publication. Its qualified image reports 33.5 MB; local and published-registry scans returned zero findings on 2026-09-04, with the complete 446-test suite, five client languages, TLS/SASL and restart checks passing. Exact evidence and limitations are in the [1.3.1 notes](releases/1.3.1.md). Historical sizes and test counts are retained in each release's own notes.
 

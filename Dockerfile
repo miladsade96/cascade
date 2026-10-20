@@ -12,7 +12,19 @@ COPY project/build.properties project/build.properties
 RUN chmod 0755 sbt && ./sbt update
 
 COPY src/main src/main
-RUN ./sbt stage
+RUN ./sbt stage && \
+    mkdir -p target/docker-stage/native && \
+    cd target/docker-stage/native && \
+    "$JAVA_HOME/bin/jar" xf ../lib/snappy-java-1.1.10.12.jar \
+      org/xerial/snappy/native/Linux/x86_64-musl/libsnappyjava.so && \
+    mv org/xerial/snappy/native/Linux/x86_64-musl/libsnappyjava.so . && \
+    "$JAVA_HOME/bin/jar" xf ../lib/lz4-java-1.12.0.jar \
+      net/jpountz/util/linux/amd64/liblz4-java.so && \
+    mv net/jpountz/util/linux/amd64/liblz4-java.so . && \
+    "$JAVA_HOME/bin/jar" xf ../lib/zstd-jni-1.5.7-23.jar \
+      linux/amd64/libzstd-jni-1.5.7-23.so && \
+    mv linux/amd64/libzstd-jni-1.5.7-23.so . && \
+    rm -rf org net linux
 
 FROM ${RUNTIME_JDK_IMAGE} AS java-runtime-build
 
@@ -60,7 +72,7 @@ LABEL org.opencontainers.image.title="Cascade" \
 
 ENV JAVA_HOME=/opt/java \
     PATH=/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    JAVA_TOOL_OPTIONS="-XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8" \
+    JAVA_TOOL_OPTIONS="-XX:InitialRAMPercentage=10.0 -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8 -Djava.library.path=/opt/cascade/native -Dorg.xerial.snappy.use.systemlib=true -DZstdNativePath=/opt/cascade/native/libzstd-jni-1.5.7-23.so" \
     CASCADE_OPERATIONS_PORT=9404 \
     CASCADE_HEALTHCHECK_HOST=127.0.0.1 \
     CASCADE_HEALTHCHECK_TIMEOUT_MS=2000
@@ -68,6 +80,7 @@ ENV JAVA_HOME=/opt/java \
 COPY --from=runtime-base-build /runtime/ /
 COPY --from=java-runtime-build --chown=65532:65532 /opt/cascade-java /opt/java
 COPY --from=application-build --chown=65532:65532 /workspace/target/docker-stage/lib /opt/cascade/lib
+COPY --from=application-build --chown=65532:65532 /workspace/target/docker-stage/native /opt/cascade/native
 COPY --from=java-runtime-build --chown=65532:65532 /image/var/lib/cascade /var/lib/cascade
 
 USER 65532:65532
