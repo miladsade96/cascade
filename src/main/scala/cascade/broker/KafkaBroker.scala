@@ -335,6 +335,7 @@ final class KafkaBroker(
       connections.shutdownNow()
       Option(acceptThread).foreach(_.join(5000))
       connections.awaitTermination(5, TimeUnit.SECONDS)
+      registry.stopLifecycle()
       Option(handler).foreach(_.close())
       Option(coordinatorStateMachine).foreach(_.close())
       Option(replicationManager).foreach(_.close())

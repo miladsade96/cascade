@@ -437,7 +437,7 @@ final class ReplicationManager(
       case None => Errors.UnknownTopicOrPartition
       case Some(metadata) if metadata.leaderId != request.leaderId ||
           metadata.leaderEpoch != request.decision.leaderEpoch => Errors.FencedLeaderEpoch
-      case Some(metadata) if metadata.leaderId == config.nodeId || !metadata.inSyncReplicas.contains(config.nodeId) =>
+      case Some(metadata) if metadata.leaderId == config.nodeId || !metadata.replicas.contains(config.nodeId) =>
         Errors.NotLeaderOrFollower
       case Some(_) => Errors.None
 
@@ -605,6 +605,28 @@ final class ReplicationManager(
     val commitError = commit.readShort()
     commit.ensureFullyRead()
     if commitError != Errors.None then throw IllegalStateException(s"replica commit returned error $commitError")
+    synchronizeFollowerCleanup(topic, partition, leaderEpoch, follower, log)
+
+  private def synchronizeFollowerCleanup(
+      topic: String,
+      partition: Int,
+      leaderEpoch: Int,
+      follower: ClusterNode,
+      log: PartitionLog
+  ): Unit =
+    log.cleanupProgress._1.foreach { recovered =>
+      val decision =
+        if recovered.leaderEpoch == leaderEpoch then recovered
+        else
+          val renewed = PartitionCleanupDecision(leaderEpoch, log.nextCleanupGeneration(leaderEpoch), recovered.plan)
+          log.prepareCleanup(renewed)
+          log.commitCleanup(renewed)
+          renewed
+      val prepared = replicateCleanup(Vector(follower), InternalApi.ReplicaCleanupPrepare, topic, partition, decision)
+      if prepared.isEmpty then throw IllegalStateException("recovering replica rejected cleanup prepare")
+      val committed = replicateCleanup(Vector(follower), InternalApi.ReplicaCleanupCommit, topic, partition, decision)
+      if committed.isEmpty then throw IllegalStateException("recovering replica rejected cleanup commit")
+    }
 
   private def readRecoveryState(
       topic: String,

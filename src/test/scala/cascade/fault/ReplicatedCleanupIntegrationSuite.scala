@@ -69,6 +69,46 @@ final class ReplicatedCleanupIntegrationSuite extends FunSuite:
     finally cluster.close()
   }
 
+  test("a new leader supersedes an uncommitted cleanup generation and repairs the returning replica") {
+    val cluster = cleanupCluster()
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic(Topic, 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
+        val initial = awaitIsr(admin)
+        val oldLeader = initial.leader().id()
+        val follower = (Set(1, 2, 3) - oldLeader).head
+        val selector = FaultSelector(oldLeader, follower, Some(InternalApi.ReplicaCleanupPrepare))
+        cluster.faults.block(selector)
+        produce(cluster.bootstrapServers, 8)
+        awaitCondition("old leader prepare attempt") {
+          cluster.faults.calls.exists(call => selector.matches(call))
+        }
+        assert(cluster.directories.forall(directory => segmentBases(directory).headOption.contains(0L)))
+
+        cluster.stop(oldLeader)
+        cluster.faults.heal()
+        val survivors = Set(1, 2, 3) - oldLeader
+        val promoted = awaitIsrIds(admin, survivors)
+        assertNotEquals(promoted.leader().id(), oldLeader)
+        awaitCondition("survivor cleanup after leader promotion") {
+          val bases = cluster.directories.zipWithIndex.collect {
+            case (directory, index) if survivors(index + 1) => segmentBases(directory)
+          }
+          bases.forall(_.headOption.exists(_ > 0L)) && bases.distinct.size == 1
+        }
+
+        cluster.start(oldLeader)
+        awaitIsrIds(admin, Set(1, 2, 3))
+        awaitCondition("returning replica cleanup repair") {
+          val bases = cluster.directories.map(segmentBases)
+          bases.forall(_.headOption.exists(_ > 0L))
+        }
+      finally admin.close(Duration.ofSeconds(5))
+    finally cluster.close()
+  }
+
   private def cleanupCluster(): FaultCluster =
     FaultCluster(
       3,
@@ -117,12 +157,18 @@ final class ReplicatedCleanupIntegrationSuite extends FunSuite:
       finally paths.close()
 
   private def awaitIsr(admin: Admin): org.apache.kafka.common.TopicPartitionInfo =
+    awaitIsrIds(admin, Set(1, 2, 3))
+
+  private def awaitIsrIds(
+      admin: Admin,
+      expected: Set[Int]
+  ): org.apache.kafka.common.TopicPartitionInfo =
     var result: Option[org.apache.kafka.common.TopicPartitionInfo] = None
-    awaitCondition("three-member ISR") {
+    awaitCondition(s"ISR ${expected.toVector.sorted.mkString(",")}") {
       val info = admin.describeTopics(java.util.List.of(Topic)).allTopicNames().get(5, TimeUnit.SECONDS)
         .get(Topic).partitions().get(0)
       result = Some(info)
-      info.isr().asScala.map(_.id()).toSet == Set(1, 2, 3)
+      info.isr().asScala.map(_.id()).toSet == expected
     }
     result.get
 

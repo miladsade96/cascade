@@ -31,6 +31,7 @@ final class TopicRegistry(
   private val topics = ConcurrentHashMap[String, Vector[PartitionLog]]()
   private val topicPolicies = ConcurrentHashMap[String, TopicLifecyclePolicy]()
   private val closed = AtomicBoolean(false)
+  private val lifecycleStopped = AtomicBoolean(false)
   private val flushQueued = AtomicBoolean(false)
   private val backgroundFailure = AtomicReference[Throwable]()
   private val snapshotBarrier = ReentrantReadWriteLock(true)
@@ -119,10 +120,7 @@ final class TopicRegistry(
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
-      lifecycleExecutor.shutdown()
-      if !lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS) then
-        lifecycleExecutor.shutdownNow(): Unit
-        lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS): Unit
+      stopLifecycle()
       flusher.foreach { executor =>
         executor.shutdown()
         if !executor.awaitTermination(30, TimeUnit.SECONDS) then
@@ -130,6 +128,13 @@ final class TopicRegistry(
           executor.awaitTermination(30, TimeUnit.SECONDS): Unit
       }
       topics.values().asScala.foreach(_.foreach(_.close()))
+
+  private[cascade] def stopLifecycle(): Unit =
+    if lifecycleStopped.compareAndSet(false, true) then
+      lifecycleExecutor.shutdown()
+      if !lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS) then
+        lifecycleExecutor.shutdownNow(): Unit
+        lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS): Unit
 
   def flushStatistics: FlushStatistics =
     topics.values().asScala
