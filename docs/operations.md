@@ -90,6 +90,8 @@ After repair I compare the authoritative high watermark and recovery fingerprint
 
 The per-partition producer checkpoint has a separate [producer-state recovery runbook](producer-state-recovery.md). I never delete that file to bypass startup validation: compaction or retention may already have removed the only batch header that carries a retry's producer ID, epoch, and sequence.
 
+The per-partition `replicated-cleanup.checkpoint` has the same fail-closed rule. I never remove or edit it to unblock retention. I first confirm the current leader epoch, ISR, peer connectivity, and identical effective topic lifecycle policy. A prepared-only generation is safe and may be superseded by the current leader; a committed generation must be allowed to resume. CRC or structural failure requires replica isolation and normal recovery from a verified ISR member. The complete protocol and rolling boundary are in [replicated partition cleanup](replicated-cleanup.md).
+
 ## Structured events and capacity alerts
 
 With `--structured-log logs/cascade.jsonl`, I write one JSON object per line. I rotate before an event would cross `--structured-log-max-bytes`, retain the configured number of generations, and name them `cascade.jsonl.1`, `cascade.jsonl.2`, and so on. Standard error remains enabled unless I pass `--no-stderr-log`.

@@ -158,6 +158,7 @@ The [external client matrix](compatibility/README.md) explains exactly what each
 - Segment, timestamp, transaction, high-watermark, and bounded producer duplicate state recover after restart.
 - A CRC-invalid Produce gets `CORRUPT_MESSAGE`; recovery repairs only the final active tail and preserves interior corruption for investigation.
 - Time/size retention retires only safe closed segments through atomic rename.
+- In clustered mode the leader sends one epoch-fenced retention/compaction plan through a durable full-ISR prepare barrier before any replica applies it.
 - [Safe magic-v2 compaction](docs/record-batch-integrity.md) rewrites keyed records from uncompressed, Gzip, Snappy, LZ4, and Zstd batches, preserves offsets and producer sequences, rebuilds and verifies CRC32C, honors tombstone grace, and leaves control/transactional batches opaque.
 - `periodic` flushing batches force operations; `sync` forces every local append.
 
@@ -169,6 +170,7 @@ The [external client matrix](compatibility/README.md) explains exactly what each
 - A majority elects and fences controllers; isolated leaders lose their lease.
 - Failed partition leaders are removed from ISR and a surviving ISR replica is promoted with a new leader epoch.
 - Returning replicas repair divergent tails before rejoining ISR.
+- Returning replicas receive the committed cleanup generation before ISR admission, so reclaimed prefixes do not silently reappear.
 - Online reassignment uses adding/removing replicas and finalizes only after the target catches up.
 
 ## Consumer groups
@@ -287,9 +289,8 @@ The [production-readiness document](docs/production-readiness.md) maps capabilit
 1. Run and archive the 72-hour authenticated multi-tenant soak and real power/device-loss campaign.
 2. Publish dedicated-host RF=3/TLS capacity and failover envelopes.
 3. Complete coordinated cross-host snapshots and scheduled off-host retention.
-4. Add replicated cleanup coordination across partition replicas.
-5. Expand client-version and adjacent-release rolling matrices.
-6. Pursue zero-copy Fetch, multi-device placement, and worker-pool changes only when profiles justify them.
+4. Expand client-version and adjacent-release rolling matrices.
+5. Pursue zero-copy Fetch, multi-device placement, and worker-pool changes only when profiles justify them.
 
 ## Build and contribute
 

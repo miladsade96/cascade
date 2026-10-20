@@ -95,6 +95,8 @@ sequenceDiagram
 
 An `acks=all` response is sent only after the configured minimum ISR is present and every current ISR member appends. The committed high watermark advances separately from local log end. After failure, only an in-sync replica can be promoted; the new epoch fences stale leaders. Returning replicas compare offsets and truncate divergent data before ISR admission.
 
+Cleanup uses a separate two-phase partition protocol. The leader calculates one delete boundary, compaction boundary, and tombstone cutoff, then requires every current ISR member to force the epoch-fenced plan before committing it. Each replica applies the same decision idempotently. A promoted leader supersedes prepared-only work with its newer epoch, and recovery transfers the latest committed cleanup generation before ISR admission. The detailed contract is in [replicated partition cleanup](replicated-cleanup.md).
+
 ## Durable state ownership
 
 | State | Owner | Durability boundary |
@@ -105,6 +107,7 @@ An `acks=all` response is sent only after the configured minimum ISR is present 
 | Topics, replicas, ISR, leaders, membership | Metadata quorum | Majority metadata commit |
 | Controller vote and term | `ControllerStateStore` | Forced CRC32C journal |
 | High watermarks | Partition checkpoint | Double-buffered checksum-protected checkpoint |
+| Cleanup generations | Partition cleanup checkpoint | CRC32C atomic prepare/commit/apply state plus full-ISR prepare barrier |
 
 ## Important boundaries
 
