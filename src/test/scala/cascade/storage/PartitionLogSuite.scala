@@ -523,6 +523,53 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("lifecycle planning is deterministic and does not mutate the log") {
+    val directory = Files.createTempDirectory("cascade-lifecycle-plan-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(
+          cleanupPolicy = CleanupPolicy.CompactDelete,
+          retentionMillis = -1L,
+          retentionBytes = 1000L,
+          deleteRetentionMillis = 500L
+        )
+      )
+      try
+        (0 until 3).foreach(_ => log.append(TestRecordBatch.single(totalBytes = 600)))
+        val first = log.planLifecycle(nowMillis = 5000L)
+        val second = log.planLifecycle(nowMillis = 5000L)
+        assertEquals(first, second)
+        assertEquals(first.deleteBeforeOffset, 2L)
+        assertEquals(first.compactBeforeOffset, 2L)
+        assertEquals(first.tombstoneCutoffMillis, 4500L)
+        assertEquals(log.logStartOffset, 0L)
+        assertEquals(log.lifecycleStatistics.runs, 0L)
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
+  test("lifecycle planning never crosses an unresolved transaction floor") {
+    val directory = Files.createTempDirectory("cascade-lifecycle-plan-floor-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = -1L, retentionBytes = 100L)
+      )
+      try
+        (0 until 3).foreach(_ => log.append(TestRecordBatch.single(totalBytes = 600)))
+        val held = log.planLifecycle(retentionFloor = 0L)
+        assertEquals(held.deleteBeforeOffset, 0L)
+        val released = log.planLifecycle(retentionFloor = log.highWatermark)
+        assertEquals(released.deleteBeforeOffset, 2L)
+      finally log.close()
+    finally deleteTree(directory)
+  }
+
   test("size retention holds segments below an active transaction floor") {
     val directory = Files.createTempDirectory("cascade-transaction-retention-floor-test")
     try
