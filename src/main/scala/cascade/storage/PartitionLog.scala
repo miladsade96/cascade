@@ -73,10 +73,16 @@ final class PartitionLog(
   private val flushIntervalNanos = Math.multiplyExact(flushIntervalMillis, 1_000_000L)
   private val producerHistoryLimit = 5
   private val highWatermarkCheckpoint = HighWatermarkCheckpoint(directory.resolve("high-watermark.checkpoint"))
+  private val producerStateCheckpoint = ProducerStateCheckpoint(
+    directory.resolve("producer-state.checkpoint"),
+    producerHistoryLimit
+  )
 
   private val segments = ArrayBuffer.empty[LogSegment]
   private val recentProducerBatches = HashMap.empty[Long, ArrayDeque[RecordBatchMetadata]]
+  private val checkpointedProducerBatches = producerStateCheckpoint.recovered
   loadSegments()
+  rebuildProducerHistory()
 
   private var nextOffset: Long = segments.lastOption
     .flatMap(_.index.lastOption)
@@ -512,8 +518,14 @@ final class PartitionLog(
   private def indexProducerBatch(metadata: RecordBatchMetadata): Unit =
     if metadata.producerId >= 0L then
       val history = recentProducerBatches.getOrElseUpdate(metadata.producerId, ArrayDeque.empty)
-      history.append(metadata)
-      while history.length > producerHistoryLimit do history.removeHead(): Unit
+      history.find(_.baseOffset == metadata.baseOffset) match
+        case Some(existing) if existing != metadata =>
+          throw ProtocolException(s"producer-state checkpoint conflicts at offset ${metadata.baseOffset}")
+        case Some(_) => ()
+        case None =>
+          val retained = (history.toVector :+ metadata).sortBy(_.baseOffset).takeRight(producerHistoryLimit)
+          history.clear()
+          history.appendAll(retained)
 
   private def rebuildAuxiliaryIndexes(segment: LogSegment): Unit =
     segment.timestampIndex.clear()
@@ -525,6 +537,7 @@ final class PartitionLog(
 
   private def rebuildProducerHistory(): Unit =
     recentProducerBatches.clear()
+    checkpointedProducerBatches.foreach(indexProducerBatch)
     segments.iterator.flatMap(_.index.iterator).foreach(entry => indexProducerBatch(entry.metadata))
 
   private def retireSegment(segment: LogSegment): Unit =
