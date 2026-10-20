@@ -43,6 +43,7 @@ object ApiKey:
 
 object Errors:
   val None: Short = 0
+  val CorruptMessage: Short = 2
   val UnknownTopicOrPartition: Short = 3
   val LeaderNotAvailable: Short = 5
   val NotLeaderOrFollower: Short = 6

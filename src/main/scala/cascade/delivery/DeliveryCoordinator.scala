@@ -3,7 +3,7 @@ package cascade.delivery
 import cascade.cluster.{ReplicatedAppendResult, ReplicatedAppender}
 import cascade.coordinator.{CoordinatorCheckpoint, CoordinatorReadMetrics}
 import cascade.group.{CommittedOffset, GroupCoordinator, GroupOffsetKey, OffsetCommitValue}
-import cascade.protocol.{Errors, ProtocolException}
+import cascade.protocol.{CorruptRecordException, Errors, ProtocolException}
 import cascade.storage.{RecordBatch, RecordBatchMetadata, TopicPartition, TopicRegistry}
 import java.nio.file.Path
 import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledExecutorService, TimeUnit}
@@ -350,7 +350,9 @@ final class DeliveryCoordinator(
     lock.synchronized {
       val log = registry.partition(topic, partition)
       if log.isEmpty then return DeliveryAppendResult(Errors.UnknownTopicOrPartition, -1L)
-      val batches = RecordBatch.prepare(records, 0L).map(batch => RecordBatch.metadata(batch.bytes))
+      val batches =
+        try RecordBatch.prepare(records, 0L).map(batch => RecordBatch.metadata(batch.bytes))
+        catch case _: CorruptRecordException => return DeliveryAppendResult(Errors.CorruptMessage, -1L)
       if batches.isEmpty then return DeliveryAppendResult(Errors.InvalidRequest, -1L)
       val producerId = batches.head.producerId
       if batches.exists(batch => batch.producerId != producerId || batch.producerEpoch != batches.head.producerEpoch) then
