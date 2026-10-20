@@ -126,6 +126,12 @@ object RecordBatch:
     if lastOffsetDelta < 0 || recordCount < 0 then throw ProtocolException("negative record batch counters")
     val compressionType = buffer.getShort(21).toInt & 0x07
     if compressionType > 4 then throw ProtocolException(s"unsupported record compression type: $compressionType")
+    val expectedCrc = storedCrc(bytes)
+    val actualCrc = computedCrc(bytes)
+    if expectedCrc != actualCrc then
+      throw ProtocolException(
+        f"record batch CRC32C mismatch: stored=0x${expectedCrc & 0xffffffffL}%08x, computed=0x${actualCrc & 0xffffffffL}%08x"
+      )
     buffer
 
   /** Decodes keys from every Kafka magic-v2 compression codec. */
