@@ -9,6 +9,7 @@ import java.util.zip.{CRC32C, GZIPInputStream, GZIPOutputStream}
 import org.xerial.snappy.{SnappyInputStream, SnappyOutputStream}
 import net.jpountz.lz4.{LZ4FrameInputStream, LZ4FrameOutputStream}
 import com.github.luben.zstd.{ZstdInputStreamNoFinalizer, ZstdOutputStreamNoFinalizer}
+import scala.util.control.NonFatal
 
 final case class PreparedBatch(baseOffset: Long, lastOffset: Long, bytes: Array[Byte])
 final case class RecordBatchMetadata(
@@ -141,7 +142,7 @@ object RecordBatch:
     try
       val metadata = RecordBatch.metadata(bytes)
       decodedRecords(bytes, metadata).map(_.map(_.indexed))
-    catch case _: Throwable => None
+    catch case NonFatal(_) => None
 
   /** Returns a rewritten batch, the original batch, or None when every compactable record is obsolete. */
   def compact(
@@ -165,7 +166,7 @@ object RecordBatch:
           if retained.size == records.size then Some(bytes)
           else if retained.isEmpty then None
           else Some(rebuild(bytes, metadata, retained))
-    catch case _: Throwable => Some(bytes)
+    catch case NonFatal(_) => Some(bytes)
 
   def totalSize(prefix: Array[Byte]): Int =
     if prefix.length < 12 then throw CorruptRecordException("record batch prefix is too short")
@@ -246,9 +247,11 @@ object RecordBatch:
     val buffer = ByteBuffer.wrap(rebuilt).order(ByteOrder.BIG_ENDIAN)
     buffer.putInt(8, rebuilt.length - 12)
     buffer.putInt(57, records.size)
-    val crc = CRC32C()
-    crc.update(rebuilt, 21, rebuilt.length - 21)
-    buffer.putInt(17, crc.getValue.toInt)
+    rewriteCrc(rebuilt)
+    val rebuiltMetadata = RecordBatch.metadata(rebuilt)
+    val decodedCount = decodedRecords(rebuilt, rebuiltMetadata).fold(-1)(_.size)
+    if decodedCount != records.size then
+      throw CorruptRecordException(s"rewritten record count $decodedCount does not match ${records.size}")
     rebuilt
 
   private def decompress(value: Array[Byte], codec: Int): Array[Byte] =
