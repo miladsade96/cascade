@@ -128,3 +128,19 @@ final class RecordBatchSuite extends FunSuite:
     assertEquals(RecordBatch.indexedRecords(compressed), None)
     assertEquals(RecordBatch.indexedRecords(TestRecordBatch.single()), None)
   }
+
+  test("rejects decoded records that escape their offset or length boundaries") {
+    val outsideOffset = TestRecordBatch.keyed(
+      Vector(TestRecordBatch.Record(Some("k".getBytes), Some("v".getBytes), 1000L))
+    )
+    outsideOffset(64) = 4.toByte // Zig-zag encoded offset delta 2; the batch ends at delta 0.
+    RecordBatch.rewriteCrc(outsideOffset)
+    assertEquals(RecordBatch.indexedRecords(outsideOffset), None)
+
+    val shortRecord = TestRecordBatch.keyed(
+      Vector(TestRecordBatch.Record(Some("k".getBytes), Some("v".getBytes), 1000L))
+    )
+    shortRecord(61) = (shortRecord(61) - 2).toByte // Shorten the decoded record by one byte.
+    RecordBatch.rewriteCrc(shortRecord)
+    assertEquals(RecordBatch.indexedRecords(shortRecord), None)
+  }
