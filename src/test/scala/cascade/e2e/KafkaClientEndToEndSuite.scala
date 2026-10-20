@@ -4,7 +4,7 @@ import cascade.TestRecordBatch
 import cascade.broker.{BrokerConfig, KafkaBroker}
 import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient, VoterDirectoryId}
 import cascade.protocol.{ByteWriter, Errors}
-import cascade.storage.{CleanupPolicy, FlushPolicy, PartitionLog, TopicLifecyclePolicy}
+import cascade.storage.{CleanupPolicy, FlushPolicy, PartitionLog, StorageLifecycleConfig, TopicLifecyclePolicy}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.net.ServerSocket
@@ -1439,6 +1439,85 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           )
         finally uncommittedConsumer.close()
       finally secondBroker.close()
+    finally deleteTree(directory)
+  }
+
+  test("Kafka transaction visibility survives compaction and broker restart") {
+    val directory = Files.createTempDirectory("cascade-transaction-compaction-e2e")
+    val topic = "compacted-transaction-events"
+    val committedValue = "committed-" + "c" * 1500
+    val abortedValue = "aborted-" + "a" * 1500
+    val obsoleteValue = "obsolete-" + "o" * 1500
+    val latestValue = "latest-" + "l" * 1500
+    def compactingBroker(): KafkaBroker = KafkaBroker(BrokerConfig(
+      bindHost = "127.0.0.1",
+      port = 0,
+      advertisedHost = "127.0.0.1",
+      dataDirectory = directory,
+      segmentBytes = 1024L,
+      flushPolicy = FlushPolicy.Sync,
+      storageLifecycle = StorageLifecycleConfig(
+        cleanupPolicy = CleanupPolicy.Compact,
+        retentionMillis = -1L,
+        lifecycleIntervalMillis = 20L
+      )
+    ))
+
+    try
+      val firstBroker = compactingBroker()
+      try
+        firstBroker.start()
+        val admin = Admin.create(adminProperties(firstBroker.bootstrapServers))
+        try admin.createTopics(java.util.List.of(new NewTopic(topic, 1, 1.toShort))).all().get()
+        finally admin.close(Duration.ofSeconds(5))
+
+        val transactional = KafkaProducer[Array[Byte], Array[Byte]](
+          transactionalProducerProperties(firstBroker.bootstrapServers, "compacted-transactional-producer")
+        )
+        try
+          transactional.initTransactions()
+          transactional.beginTransaction()
+          transactional.send(ProducerRecord(topic, "committed".getBytes, committedValue.getBytes(StandardCharsets.UTF_8))).get()
+          transactional.commitTransaction()
+          transactional.beginTransaction()
+          transactional.send(ProducerRecord(topic, "aborted".getBytes, abortedValue.getBytes(StandardCharsets.UTF_8))).get()
+          transactional.abortTransaction()
+        finally transactional.close(Duration.ofSeconds(5))
+
+        val ordinary = KafkaProducer[Array[Byte], Array[Byte]](producerProperties(firstBroker.bootstrapServers))
+        try
+          ordinary.send(ProducerRecord(topic, "ordinary".getBytes, obsoleteValue.getBytes(StandardCharsets.UTF_8))).get()
+          ordinary.send(ProducerRecord(topic, "ordinary".getBytes, latestValue.getBytes(StandardCharsets.UTF_8))).get()
+        finally ordinary.close(Duration.ofSeconds(5))
+
+        val checkpoint = directory.resolve(topic).resolve("partition-0").resolve("producer-state.checkpoint")
+        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos
+        while !Files.exists(checkpoint) && System.nanoTime() < deadline do Thread.sleep(10L)
+        assert(Files.exists(checkpoint), "compaction lifecycle did not checkpoint producer state")
+      finally firstBroker.close()
+
+      val recoveredBroker = compactingBroker()
+      try
+        recoveredBroker.start()
+        val partition = TopicPartition(topic, 0)
+        val committedConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(recoveredBroker.bootstrapServers, readCommitted = true)
+        )
+        try
+          committedConsumer.assign(java.util.List.of(partition))
+          committedConsumer.seekToBeginning(java.util.List.of(partition))
+          assertEquals(pollValues(committedConsumer, expected = 2), Vector(committedValue, latestValue))
+        finally committedConsumer.close()
+
+        val uncommittedConsumer = KafkaConsumer[Array[Byte], Array[Byte]](
+          consumerProperties(recoveredBroker.bootstrapServers, readCommitted = false)
+        )
+        try
+          uncommittedConsumer.assign(java.util.List.of(partition))
+          uncommittedConsumer.seekToBeginning(java.util.List.of(partition))
+          assertEquals(pollValues(uncommittedConsumer, expected = 3), Vector(committedValue, abortedValue, latestValue))
+        finally uncommittedConsumer.close()
+      finally recoveredBroker.close()
     finally deleteTree(directory)
   }
 
