@@ -85,9 +85,7 @@ object RecordBatch:
     Math.addExact(buffer.getLong(0), buffer.getInt(23).toLong)
 
   def metadata(bytes: Array[Byte]): RecordBatchMetadata =
-    if bytes.length < MinimumSize then throw ProtocolException("record batch is too short")
-    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-    if buffer.get(16) != 2.toByte then throw ProtocolException("only Kafka record batch magic 2 is supported")
+    val buffer = validatedHeader(bytes)
     val base = buffer.getLong(0)
     val lastOffsetDelta = buffer.getInt(23)
     val last = Math.addExact(base, lastOffsetDelta.toLong)
@@ -112,6 +110,23 @@ object RecordBatch:
       maxTimestamp = buffer.getLong(35),
       compressionType = attributes & 0x07
     )
+
+  private def validatedHeader(bytes: Array[Byte]): ByteBuffer =
+    if bytes.length < MinimumSize then throw ProtocolException("record batch is too short")
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+    val batchLength = buffer.getInt(8)
+    val declaredSize =
+      try Math.addExact(batchLength, 12)
+      catch case _: ArithmeticException => throw ProtocolException(s"invalid record batch length: $batchLength")
+    if batchLength < MinimumSize - 12 || declaredSize != bytes.length then
+      throw ProtocolException(s"record batch length $batchLength does not match ${bytes.length - 12}")
+    if buffer.get(16) != 2.toByte then throw ProtocolException("only Kafka record batch magic 2 is supported")
+    val lastOffsetDelta = buffer.getInt(23)
+    val recordCount = buffer.getInt(57)
+    if lastOffsetDelta < 0 || recordCount < 0 then throw ProtocolException("negative record batch counters")
+    val compressionType = buffer.getShort(21).toInt & 0x07
+    if compressionType > 4 then throw ProtocolException(s"unsupported record compression type: $compressionType")
+    buffer
 
   /** Decodes keys from every Kafka magic-v2 compression codec. */
   def indexedRecords(bytes: Array[Byte]): Option[Vector[IndexedRecord]] =
