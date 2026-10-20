@@ -304,6 +304,30 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("replica truncation removes divergent producer sequence state") {
+    val directory = Files.createTempDirectory("cascade-producer-state-truncate-test")
+    try
+      val log = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        log.append(TestRecordBatch.producer(91L, 4, 7))
+        log.append(TestRecordBatch.producer(91L, 4, 8))
+        log.truncateReplicaTo(1L)
+        assertEquals(log.recentBatches(91L).map(_.lastSequence), Vector(7))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(recovered.recentBatches(91L).map(_.lastSequence), Vector(7))
+        recovered.resetReplica(0L)
+        assertEquals(recovered.recentBatches(91L), Vector.empty)
+      finally recovered.close()
+
+      val reset = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try assertEquals(reset.latestProducerBatches, Vector.empty)
+      finally reset.close()
+    finally deleteTree(directory)
+  }
+
   test("recovery truncates an incomplete batch from the active segment") {
     val directory = Files.createTempDirectory("cascade-tail-recovery-test")
     try
