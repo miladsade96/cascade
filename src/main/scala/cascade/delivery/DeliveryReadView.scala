@@ -6,10 +6,14 @@ import cascade.storage.{RecordBatchMetadata, TopicPartition}
 private[cascade] final case class DeliveryReadView private (
     imageVersion: Long,
     activeFirstOffsets: Map[TopicPartition, Long],
+    retentionFirstOffsets: Map[TopicPartition, Long],
     completedByProducer: Map[(Long, Short), Vector[CompletedTransaction]]
 ):
   def lastStableOffset(topicPartition: TopicPartition, highWatermark: Long): Long =
     activeFirstOffsets.get(topicPartition).fold(highWatermark)(math.min(highWatermark, _))
+
+  def retentionFloor(topicPartition: TopicPartition, highWatermark: Long): Long =
+    retentionFirstOffsets.get(topicPartition).fold(highWatermark)(math.min(highWatermark, _))
 
   def visible(topicPartition: TopicPartition, batch: RecordBatchMetadata): Boolean =
     if !batch.transactional then true
@@ -33,6 +37,13 @@ private[cascade] object DeliveryReadView:
       .map(range => TopicPartition(range.topic, range.partition) -> range.firstOffset)
       .toVector
       .groupMapReduce(_._1)(_._2)(math.min)
+    val incompleteOffsets = image.completedTransactions.iterator
+      .filter(!_.offsetsApplied)
+      .flatMap(_.ranges)
+      .map(range => TopicPartition(range.topic, range.partition) -> range.firstOffset)
+    val retentionOffsets = (firstOffsets.iterator ++ incompleteOffsets)
+      .toVector
+      .groupMapReduce(_._1)(_._2)(math.min)
     val completed = image.completedTransactions.reverseIterator.toVector
       .groupBy(transaction => (transaction.producerId, transaction.producerEpoch))
-    DeliveryReadView(image.version, firstOffsets, completed)
+    DeliveryReadView(image.version, firstOffsets, retentionOffsets, completed)

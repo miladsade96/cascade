@@ -498,6 +498,9 @@ final class DeliveryCoordinator(
     readMetrics.recordStableOffset()
     view.lastStableOffset(TopicPartition(topic, partition), highWatermark)
 
+  private[cascade] def retentionFloor(topic: String, partition: Int, highWatermark: Long): Long =
+    acknowledgedReadView.retentionFloor(TopicPartition(topic, partition), highWatermark)
+
   def visible(topic: String, partition: Int, batch: RecordBatchMetadata): Boolean =
     visible(acknowledged, topic, partition, batch)
 
