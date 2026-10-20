@@ -32,6 +32,29 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("recovers checkpointed producer state after its source batch is cleaned") {
+    val directory = Files.createTempDirectory("cascade-producer-state-recovery-test")
+    try
+      val original = TestRecordBatch.producer(17L, 3, 41)
+      val metadata = RecordBatch.metadata(original)
+      val log = PartitionLog(directory)
+      try log.append(original)
+      finally log.close()
+
+      ProducerStateCheckpoint(directory.resolve("producer-state.checkpoint"), historyLimit = 5)
+        .persist(Vector(metadata))
+      Files.write(directory.resolve("00000000000000000000.log"), TestRecordBatch.single())
+
+      val recovered = PartitionLog(directory)
+      try
+        assertEquals(
+          recovered.latestProducerBatches.map(value => (value.producerId, value.producerEpoch, value.lastSequence)),
+          Vector((17L, 3.toShort, 41))
+        )
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   test("assigns monotonic offsets, rolls segments, and recovers its index") {
     val directory = Files.createTempDirectory("cascade-log-test")
     try
