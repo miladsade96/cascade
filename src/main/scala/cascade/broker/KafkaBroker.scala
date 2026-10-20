@@ -156,6 +156,7 @@ final class KafkaBroker(
     registry.installTransactionRetentionFloor((topic, partition, highWatermark) =>
       delivery.retentionFloor(topic, partition, highWatermark)
     )
+    registry.installCleanupCoordinator(replication)
     val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery))
     peerClient = peers
     clusterManager = cluster

@@ -147,7 +147,8 @@ final class RequestHandler(
       val response = header.apiKey match
         case InternalApi.ReplicaAppend | InternalApi.ReplicaCommit | InternalApi.ReplicaCatchUp |
             InternalApi.ReplicaReset | InternalApi.ReplicaRecoveryComplete | InternalApi.ReplicaRecoveryState |
-            InternalApi.ReplicaRecoveryProbe | InternalApi.ReplicaTruncate =>
+            InternalApi.ReplicaRecoveryProbe | InternalApi.ReplicaTruncate | InternalApi.ReplicaCleanupPrepare |
+            InternalApi.ReplicaCleanupCommit =>
           replicationManager.handleInternal(header.apiKey, body)
         case _ => clusterManager.handleInternal(header.apiKey, header.apiVersion, body)
       return Some(ResponseFrame.encode(header, response))

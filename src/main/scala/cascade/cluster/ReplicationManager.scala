@@ -2,7 +2,14 @@ package cascade.cluster
 
 import cascade.broker.BrokerConfig
 import cascade.protocol.{ByteCursor, ByteWriter, Errors}
-import cascade.storage.{BatchFingerprint, StoragePressureException, TopicRegistry}
+import cascade.storage.{
+  BatchFingerprint,
+  PartitionCleanupCoordinator,
+  PartitionCleanupDecision,
+  PartitionLog,
+  StoragePressureException,
+  TopicRegistry
+}
 import java.util.concurrent.{Callable, ExecutorService, Executors, Future, TimeUnit}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,6 +38,7 @@ final class ReplicationManager(
     peerClient: PeerTransport
 )
     extends ReplicatedAppender,
+      PartitionCleanupCoordinator,
       AutoCloseable:
   private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
   private val partitionLocks = ConcurrentHashMap[String, Object]()
@@ -151,7 +159,30 @@ final class ReplicationManager(
     case InternalApi.ReplicaRecoveryState => replicaRecoveryState(cursor)
     case InternalApi.ReplicaRecoveryProbe => replicaRecoveryProbe(cursor)
     case InternalApi.ReplicaTruncate => replicaTruncate(cursor)
+    case InternalApi.ReplicaCleanupPrepare => replicaCleanupPrepare(cursor)
+    case InternalApi.ReplicaCleanupCommit => replicaCleanupCommit(cursor)
     case _ => throw IllegalArgumentException(s"unsupported replication API: $apiKey")
+
+  override def run(
+      topic: String,
+      partition: Int,
+      log: PartitionLog,
+      nowMillis: Long,
+      retentionFloor: Long
+  ): Unit =
+    if !cluster.isEnabled || !cluster.supportsFeature(ClusterFeature.ReplicatedCleanup) then
+      log.runLifecycle(nowMillis, retentionFloor): Unit
+    else if !cluster.isBrokerFenced then
+      cluster.partition(topic, partition) match
+        case Some(metadata) if metadata.replicas.contains(config.nodeId) =>
+          val key = partitionKey(topic, partition)
+          val lock = partitionLocks.computeIfAbsent(key, _ => Object())
+          lock.synchronized {
+            if metadata.leaderId == config.nodeId && !Option(recoveries.get(key)).exists(!_.isEmpty) then
+              coordinateCleanup(topic, partition, log, nowMillis, retentionFloor, metadata)
+            else log.applyCommittedCleanup(): Unit
+          }
+        case _ => ()
 
   override def close(): Unit =
     if closed.compareAndSet(false, true) then
@@ -370,6 +401,46 @@ final class ReplicationManager(
             catch case _: Throwable => Errors.InvalidRequest
     ByteWriter().writeShort(error).result()
 
+  private def replicaCleanupPrepare(cursor: ByteCursor): Array[Byte] =
+    val request = ReplicaCleanupCodec.decode(cursor)
+    ByteWriter().writeShort(applyReplicaCleanup(request, commit = false)).result()
+
+  private def replicaCleanupCommit(cursor: ByteCursor): Array[Byte] =
+    val request = ReplicaCleanupCodec.decode(cursor)
+    ByteWriter().writeShort(applyReplicaCleanup(request, commit = true)).result()
+
+  private def applyReplicaCleanup(request: ReplicaCleanupRequest, commit: Boolean): Short =
+    cleanupAccess(request) match
+      case denied if denied != Errors.None => denied
+      case _ =>
+        registry.partition(request.topic, request.partition) match
+          case None => Errors.UnknownTopicOrPartition
+          case Some(log) =>
+            val lock = partitionLocks.computeIfAbsent(partitionKey(request.topic, request.partition), _ => Object())
+            lock.synchronized {
+              cleanupAccess(request) match
+                case denied if denied != Errors.None => denied
+                case _ =>
+                  try
+                    if commit then
+                      log.commitCleanup(request.decision)
+                      log.applyCommittedCleanup(): Unit
+                    else log.prepareCleanup(request.decision)
+                    Errors.None
+                  catch case _: Throwable => Errors.InvalidRequest
+            }
+
+  private def cleanupAccess(request: ReplicaCleanupRequest): Short =
+    if cluster.isBrokerFenced then Errors.BrokerNotAvailable
+    else if !cluster.supportsFeature(ClusterFeature.ReplicatedCleanup) then Errors.UnsupportedVersion
+    else cluster.partition(request.topic, request.partition) match
+      case None => Errors.UnknownTopicOrPartition
+      case Some(metadata) if metadata.leaderId != request.leaderId ||
+          metadata.leaderEpoch != request.decision.leaderEpoch => Errors.FencedLeaderEpoch
+      case Some(metadata) if metadata.leaderId == config.nodeId || !metadata.inSyncReplicas.contains(config.nodeId) =>
+        Errors.NotLeaderOrFollower
+      case Some(_) => Errors.None
+
   private def replicaTruncationAccess(topic: String, partition: Int, leaderId: Int, leaderEpoch: Int): Short =
     if cluster.isBrokerFenced then Errors.BrokerNotAvailable
     else cluster.partition(topic, partition) match
@@ -421,6 +492,50 @@ final class ReplicationManager(
       accepted
     }: Unit
     log.truncateReplicaTo(baseOffset)
+
+  private def coordinateCleanup(
+      topic: String,
+      partition: Int,
+      log: PartitionLog,
+      nowMillis: Long,
+      retentionFloor: Long,
+      metadata: PartitionMetadata
+  ): Unit =
+    val followers = metadata.inSyncReplicas.filterNot(_ == config.nodeId).flatMap(nodeById)
+    log.cleanupProgress._1.foreach { committed =>
+      replicateCleanup(followers, InternalApi.ReplicaCleanupCommit, topic, partition, committed)
+      log.applyCommittedCleanup(): Unit
+    }
+
+    val plan = log.planLifecycle(nowMillis, retentionFloor)
+    if plan.hasWork(log.logStartOffset) then
+      val decision = PartitionCleanupDecision(
+        metadata.leaderEpoch,
+        log.nextCleanupGeneration(metadata.leaderEpoch),
+        plan
+      )
+      log.prepareCleanup(decision)
+      val prepared = replicateCleanup(followers, InternalApi.ReplicaCleanupPrepare, topic, partition, decision)
+      if prepared.size == followers.size then
+        log.commitCleanup(decision)
+        replicateCleanup(followers, InternalApi.ReplicaCleanupCommit, topic, partition, decision)
+        log.applyCommittedCleanup(): Unit
+    else log.recordLifecycleCheck()
+
+  private def replicateCleanup(
+      followers: Vector[ClusterNode],
+      apiKey: Short,
+      topic: String,
+      partition: Int,
+      decision: PartitionCleanupDecision
+  ): Vector[ClusterNode] =
+    val payload = ReplicaCleanupCodec.encode(ReplicaCleanupRequest(topic, partition, config.nodeId, decision))
+    invokePeers(followers, config.peerTimeoutMillis) { follower =>
+      val response = peerClient.call(follower, apiKey, payload, config.peerTimeoutMillis)
+      val accepted = response.readShort() == Errors.None
+      response.ensureFullyRead()
+      accepted
+    }
 
   private def copyCommittedLog(
       topic: String,

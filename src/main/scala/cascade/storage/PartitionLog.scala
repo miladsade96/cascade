@@ -368,7 +368,7 @@ final class PartitionLog(
     segments.iterator.flatMap(_.transactionIndex.overlapping(firstOffset, lastOffsetExclusive)).toVector
   }
 
-  private[storage] def runLifecycle(
+  private[cascade] def runLifecycle(
       nowMillis: Long = System.currentTimeMillis(),
       retentionFloor: Long = Long.MaxValue
   ): LifecycleStatistics = synchronized {
@@ -451,6 +451,10 @@ final class PartitionLog(
 
   private[cascade] def cleanupProgress: (Option[PartitionCleanupDecision], Option[PartitionCleanupDecision]) = synchronized {
     cleanupState.committed -> cleanupState.applied
+  }
+
+  private[cascade] def recordLifecycleCheck(): Unit = synchronized {
+    lifecycleRuns = Math.addExact(lifecycleRuns, 1L)
   }
 
   private def validateCleanupPlan(plan: PartitionCleanupPlan): Unit =
