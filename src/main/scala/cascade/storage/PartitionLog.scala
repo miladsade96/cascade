@@ -181,6 +181,11 @@ final class PartitionLog(
     else
       awaitBackgroundFlush()
       flushDirtySegments()
+      checkpointedProducerBatches = producerStateCheckpoint.persist(
+        (checkpointedProducerBatches.iterator ++ segments.iterator.flatMap(_.index.iterator).map(_.metadata))
+          .filter(_.lastOffset < offsetExclusive)
+          .toVector
+      )
       val cutIndex = segments.indexWhere(_.index.exists(_.baseOffset >= offsetExclusive))
       if cutIndex < 0 then throw ProtocolException(s"missing replica suffix at $offsetExclusive")
       val cutSegment = segments(cutIndex)
@@ -195,8 +200,7 @@ final class PartitionLog(
         Files.deleteIfExists(segment.path): Unit
       }
       segments.remove(cutIndex + 1, segments.size - cutIndex - 1)
-      recentProducerBatches.clear()
-      segments.iterator.flatMap(_.index.iterator).foreach(entry => indexProducerBatch(entry.metadata))
+      rebuildProducerHistory()
       nextOffset = offsetExclusive
       committedOffset = math.min(committedOffset, offsetExclusive)
       durableOffset = offsetExclusive
@@ -214,6 +218,7 @@ final class PartitionLog(
   def resetReplica(startOffset: Long): Unit = synchronized {
     if startOffset < 0L then throw ProtocolException(s"negative replica start offset: $startOffset")
     awaitBackgroundFlush()
+    checkpointedProducerBatches = producerStateCheckpoint.persist(Vector.empty)
     segments.foreach(_.close())
     segments.foreach(segment => Files.deleteIfExists(segment.path): Unit)
     segments.clear()
