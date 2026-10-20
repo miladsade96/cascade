@@ -30,7 +30,25 @@ private final case class EncodedRecord(indexed: IndexedRecord, bytes: Array[Byte
 
 object RecordBatch:
   private val MinimumSize = 61
+  private val CrcOffset = 17
+  private val CrcCoverageOffset = 21
   private val MaximumDecodedBatchBytes = 128 * 1024 * 1024
+
+  private[cascade] def computedCrc(bytes: Array[Byte]): Int =
+    if bytes.length < CrcCoverageOffset then throw ProtocolException("record batch is too short for CRC32C")
+    val crc = CRC32C()
+    crc.update(bytes, CrcCoverageOffset, bytes.length - CrcCoverageOffset)
+    crc.getValue.toInt
+
+  private[cascade] def storedCrc(bytes: Array[Byte]): Int =
+    if bytes.length < CrcCoverageOffset then throw ProtocolException("record batch is too short for CRC32C")
+    ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getInt(CrcOffset)
+
+  private[cascade] def rewriteCrc(bytes: Array[Byte]): Unit =
+    ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).putInt(CrcOffset, computedCrc(bytes)): Unit
+
+  private[cascade] def hasValidCrc(bytes: Array[Byte]): Boolean =
+    storedCrc(bytes) == computedCrc(bytes)
 
   /** Splits a Kafka record set, validates batch envelopes, and assigns broker offsets. */
   def prepare(recordSet: Array[Byte], firstOffset: Long): Vector[PreparedBatch] =
