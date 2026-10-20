@@ -6,6 +6,7 @@ import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.FileTime
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import munit.FunSuite
 import scala.jdk.CollectionConverters.*
@@ -680,6 +681,47 @@ final class PartitionLogSuite extends FunSuite:
         while registry.lifecycleStatistics.retiredSegments == 0L && System.nanoTime() < deadline do Thread.sleep(5L)
         assertEquals(registry.lifecycleStatistics.retiredSegments, 1L)
         assertEquals(log.logStartOffset, 1L)
+      finally registry.close()
+    finally deleteTree(directory)
+  }
+
+  test("topic registry delegates lifecycle decisions to the installed coordinator") {
+    val directory = Files.createTempDirectory("cascade-lifecycle-coordinator-test")
+    try
+      val registry = TopicRegistry(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(retentionMillis = 50L, lifecycleIntervalMillis = 20L)
+      )
+      try
+        val called = CountDownLatch(1)
+        val invocations = AtomicInteger()
+        registry.installCleanupCoordinator(new PartitionCleanupCoordinator:
+          override def run(
+              topic: String,
+              partition: Int,
+              log: PartitionLog,
+              nowMillis: Long,
+              retentionFloor: Long
+          ): Unit =
+            assertEquals(topic, "events")
+            assertEquals(partition, 0)
+            invocations.incrementAndGet(): Unit
+            called.countDown()
+        )
+        assertEquals(registry.createTopic("events", 1), CreateTopicResult.Created)
+        val log = registry.partition("events", 0).getOrElse(fail("missing partition"))
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        log.append(TestRecordBatch.single(totalBytes = 600))
+        Files.setLastModifiedTime(
+          directory.resolve("events").resolve("partition-0").resolve("00000000000000000000.log"),
+          FileTime.fromMillis(1L)
+        )
+
+        assert(called.await(2L, TimeUnit.SECONDS))
+        assert(invocations.get() > 0)
+        assertEquals(log.logStartOffset, 0L)
       finally registry.close()
     finally deleteTree(directory)
   }
