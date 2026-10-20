@@ -169,7 +169,9 @@ object RecordBatch:
 
   def totalSize(prefix: Array[Byte]): Int =
     if prefix.length < 12 then throw CorruptRecordException("record batch prefix is too short")
-    Math.addExact(ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN).getInt(8), 12)
+    val batchLength = ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN).getInt(8)
+    try Math.addExact(batchLength, 12)
+    catch case _: ArithmeticException => throw CorruptRecordException(s"invalid record batch length: $batchLength")
 
   private def decodedRecords(bytes: Array[Byte], metadata: RecordBatchMetadata): Option[Vector[EncodedRecord]] =
     val payload = Arrays.copyOfRange(bytes, MinimumSize, bytes.length)
@@ -179,40 +181,59 @@ object RecordBatch:
       case _ => return None
     val buffer = ByteBuffer.wrap(decoded).order(ByteOrder.BIG_ENDIAN)
     val baseTimestamp = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(27)
+    val lastOffsetDelta = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getInt(23)
+    if metadata.recordCount > decoded.length then
+      throw CorruptRecordException("record count exceeds the decoded record payload")
     val records = Vector.newBuilder[EncodedRecord]
     var count = 0
+    var previousOffsetDelta = -1
     while count < metadata.recordCount do
       val recordStart = buffer.position()
       val recordLength = readVarInt(buffer)
       if recordLength < 0 || recordLength > buffer.remaining() then
         throw CorruptRecordException(s"invalid record length: $recordLength")
       val recordEnd = Math.addExact(buffer.position(), recordLength)
-      buffer.get()
-      val timestampDelta = readVarLong(buffer)
-      val offsetDelta = readVarInt(buffer)
-      if offsetDelta < 0 then throw CorruptRecordException(s"negative record offset delta: $offsetDelta")
-      val key = readNullableBytes(buffer)
-      val value = readNullableBytes(buffer)
-      val headers = readVarInt(buffer)
-      if headers < 0 then throw CorruptRecordException(s"negative record header count: $headers")
-      var header = 0
-      while header < headers do
-        val headerKeyLength = readVarInt(buffer)
-        if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
-          throw CorruptRecordException(s"invalid record header key length: $headerKeyLength")
-        buffer.position(buffer.position() + headerKeyLength)
-        readNullableBytes(buffer)
-        header += 1
+      val outerLimit = buffer.limit()
+      buffer.limit(recordEnd)
+      val (timestampDelta, offsetDelta, key, value) =
+        try
+          buffer.get()
+          val timestamp = readVarLong(buffer)
+          val offset = readVarInt(buffer)
+          if offset < 0 || offset > lastOffsetDelta then
+            throw CorruptRecordException(s"record offset delta $offset is outside batch range 0..$lastOffsetDelta")
+          if offset <= previousOffsetDelta then
+            throw CorruptRecordException(s"record offset delta $offset is not strictly increasing")
+          val recordKey = readNullableBytes(buffer)
+          val recordValue = readNullableBytes(buffer)
+          val headers = readVarInt(buffer)
+          if headers < 0 then throw CorruptRecordException(s"negative record header count: $headers")
+          if headers > buffer.remaining() / 2 then
+            throw CorruptRecordException(s"record header count $headers exceeds the record boundary")
+          var header = 0
+          while header < headers do
+            val headerKeyLength = readVarInt(buffer)
+            if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
+              throw CorruptRecordException(s"invalid record header key length: $headerKeyLength")
+            buffer.position(buffer.position() + headerKeyLength)
+            readNullableBytes(buffer)
+            header += 1
+          (timestamp, offset, recordKey, recordValue)
+        finally buffer.limit(outerLimit): Unit
       if buffer.position() != recordEnd then throw CorruptRecordException("record length does not match its contents")
+      val timestamp =
+        try Math.addExact(baseTimestamp, timestampDelta)
+        catch case _: ArithmeticException => throw CorruptRecordException("record timestamp overflows a signed 64-bit value")
       records += EncodedRecord(
         IndexedRecord(
           Math.addExact(metadata.baseOffset, offsetDelta.toLong),
-          Math.addExact(baseTimestamp, timestampDelta),
+          timestamp,
           key,
           value.isEmpty
         ),
         Arrays.copyOfRange(decoded, recordStart, recordEnd)
       )
+      previousOffsetDelta = offsetDelta
       count += 1
     if buffer.hasRemaining then throw CorruptRecordException("record batch contains trailing bytes")
     Some(records.result())
@@ -281,7 +302,10 @@ object RecordBatch:
     while !complete && count < maximumBytes do
       if !buffer.hasRemaining then throw CorruptRecordException("truncated variable-length integer")
       val value = buffer.get().toInt & 0xff
-      result |= (value & 0x7f).toLong << shift
+      val payload = value & 0x7f
+      if count == maximumBytes - 1 && payload > (if maximumBytes == 5 then 0x0f else 0x01) then
+        throw CorruptRecordException("variable-length integer overflows its target type")
+      result |= payload.toLong << shift
       complete = (value & 0x80) == 0
       shift += 7
       count += 1
