@@ -1,6 +1,7 @@
 package cascade.storage
 
 import cascade.TestRecordBatch
+import cascade.protocol.CorruptRecordException
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
@@ -320,6 +321,26 @@ final class PartitionLogSuite extends FunSuite:
         assertEquals(recovered.logEndOffset, 1L)
         assertEquals(recovered.append(TestRecordBatch.single()).baseOffset, 1L)
       finally recovered.close()
+    finally deleteTree(directory)
+  }
+
+  test("recovery rejects interior CRC corruption without deleting evidence") {
+    val directory = Files.createTempDirectory("cascade-crc-interior-recovery-test")
+    try
+      val log = PartitionLog(directory)
+      try
+        log.append(TestRecordBatch.single())
+        log.append(TestRecordBatch.single())
+      finally log.close()
+
+      val segment = directory.resolve("00000000000000000000.log")
+      val damaged = Files.readAllBytes(segment)
+      damaged(60) = (damaged(60) ^ 0x01).toByte
+      Files.write(segment, damaged)
+
+      val error = intercept[CorruptRecordException](PartitionLog(directory))
+      assert(error.getMessage.contains("corrupt persisted record batch"))
+      assertEquals(Files.size(segment), 122L)
     finally deleteTree(directory)
   }
 
