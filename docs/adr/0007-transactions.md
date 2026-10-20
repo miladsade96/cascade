@@ -11,7 +11,7 @@ Transactions span producer identity, multiple partitions, outcome markers, and c
 
 The delivery coordinator durably tracks producer epochs, active ranges, enlisted partitions/groups, timeouts, outcomes, and offset-application checkpoints. Transaction changes use sorted shard locking and majority-forced prepare, vote, decision-certificate, and terminal records. A successor queries voter decisions and completes a certified in-doubt transaction.
 
-Partitions reserve transaction ranges before append. Fetch calculates the last stable offset and excludes aborted or open ranges for `read_committed`. Transactional offsets become visible only after the commit outcome and applied checkpoint.
+Partitions reserve transaction ranges before append. Fetch calculates the last stable offset and excludes aborted or open ranges for `read_committed`. Transactional offsets become visible only after the commit outcome and applied checkpoint. The acknowledged delivery image also supplies each partition's retention floor: active ranges and completed outcomes whose offsets are not yet applied pin their earliest offset, so time/size retention cannot erase data needed to resolve transaction visibility.
 
 ## Alternatives considered
 
@@ -25,5 +25,5 @@ Cross-shard certification costs more messages and forced records than a local tr
 
 ## Consequences
 
-Qualification includes commit/abort visibility, open-transaction last-stable offsets, fencing, timeout aborts, transactional offsets, restart, coordinator loss, certified recovery, and Admin inspection.
+Qualification includes commit/abort visibility, open-transaction last-stable offsets, retention floors, byte-exact transactional/control batches through compaction, fencing, timeout aborts, transactional offsets, restart, coordinator loss, certified recovery, and Admin inspection.
 

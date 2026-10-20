@@ -9,7 +9,7 @@ Kafka producers retry when a response is lost. Without producer identity, epoch 
 
 ## Decision
 
-Cascade allocates durable producer IDs and monotonically advances epochs. Each partition validates producer epoch and sequence before append, keeps a bounded five-batch duplicate window, and returns the original offset for a recognized retry. Producer state recovers from persisted record-batch headers after restart.
+Cascade allocates durable producer IDs and monotonically advances epochs. Each partition validates producer epoch and sequence before append, keeps a bounded five-batch duplicate window, and returns the original offset for a recognized retry. Producer state recovers by merging persisted record-batch headers with an atomic, versioned, CRC32C-protected per-partition checkpoint. The checkpoint preserves producer ID, epoch, base and last sequence, offset span, record count, timestamp, compression, and transaction/control flags even when retention or compaction removes the source batch.
 
 Producer allocation and fencing belong to the delivery coordinator. An expected ID/epoch initialization retry returns the already-applied result instead of advancing the epoch twice.
 
@@ -21,9 +21,9 @@ Producer allocation and fencing belong to the delivery coordinator. An expected 
 
 ## Trade-offs
 
-The bounded window matches the intended retry horizon but cannot recognize arbitrarily old batches. Recovery work scans durable headers and therefore depends on valid segment recovery.
+The bounded window matches Kafka's intended retry horizon but cannot recognize arbitrarily old batches. The extra forced checkpoint occurs only at snapshot, close, or immediately before destructive log maintenance; it does not add a second force to every append. A corrupt checkpoint fails startup instead of silently weakening idempotence.
 
 ## Consequences
 
-Tests cover duplicate response offsets, gaps, wraparound, epoch fencing, initialization retries, restart recovery, leader failover, and concurrent transaction admission.
+Tests cover duplicate response offsets, gaps, wraparound, epoch fencing, initialization retries, restart recovery, compaction and retention restart, authoritative replica truncation, leader failover, and concurrent transaction admission.
 

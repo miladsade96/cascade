@@ -11,7 +11,7 @@ The broker needs stable offsets, sequential writes, bounded recovery time, reten
 
 Each topic partition owns an append-only `PartitionLog` made of size-bounded segments. Kafka magic-v2 batches stay serialized and compressed on the normal path; Cascade validates their exact envelope and CRC32C before trusting metadata, then changes only the base offset outside the batch CRC region. Positional file I/O avoids shared channel-position races. Offset, timestamp, and transaction indexes rebuild only from validated persisted batches.
 
-I support `periodic` batched forcing and `sync` per-append forcing as explicit durability policies. Segment deletion and compaction use atomic rename protocols that startup recovery completes or rolls forward safely.
+I support `periodic` batched forcing and `sync` per-append forcing as explicit durability policies. Segment deletion and compaction use atomic rename protocols that startup recovery completes or rolls forward safely. Before either operation can retire a producer batch, the partition atomically forces its bounded producer history to a CRC32C-protected sibling checkpoint.
 
 ## Alternatives considered
 
@@ -25,5 +25,5 @@ Opaque compressed batches preserve throughput and compatibility on the hot path.
 
 ## Consequences
 
-Acknowledgement, replication, and disk forcing remain separate contracts. Recovery truncates a CRC-invalid complete batch only at the final physical position of the active segment; interior corruption fails startup without deleting evidence. Recovery tests must cover torn batches, CRC-invalid tails, interior corruption, later dependent segments, interrupted rename operations, indexes, and high-watermark checkpoints.
+Acknowledgement, replication, and disk forcing remain separate contracts. Recovery truncates a CRC-invalid complete batch only at the final physical position of the active segment; interior corruption fails startup without deleting evidence. Recovery merges validated log headers with the producer checkpoint, while authoritative replica truncation or reset prunes checkpoint entries from the discarded suffix. Recovery tests must cover torn batches, CRC-invalid tails, interior corruption, later dependent segments, interrupted rename operations, indexes, high-watermark checkpoints, producer checkpoints, and divergent replica suffixes.
 
