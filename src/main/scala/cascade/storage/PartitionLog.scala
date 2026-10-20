@@ -77,10 +77,12 @@ final class PartitionLog(
     directory.resolve("producer-state.checkpoint"),
     producerHistoryLimit
   )
+  private val cleanupCheckpoint = PartitionCleanupCheckpoint(directory.resolve("replicated-cleanup.checkpoint"))
 
   private val segments = ArrayBuffer.empty[LogSegment]
   private val recentProducerBatches = HashMap.empty[Long, ArrayDeque[RecordBatchMetadata]]
   private var checkpointedProducerBatches = producerStateCheckpoint.recovered
+  private var cleanupState = cleanupCheckpoint.recovered
   loadSegments()
   rebuildProducerHistory()
 
@@ -422,6 +424,48 @@ final class PartitionLog(
       else logStartOffset
     PartitionCleanupPlan(deleteBefore, math.max(deleteBefore, compactBefore), nowMillis - lifecycleConfig.deleteRetentionMillis)
   }
+
+  private[cascade] def nextCleanupGeneration(leaderEpoch: Int): Long = synchronized {
+    cleanupState.nextGeneration(leaderEpoch)
+  }
+
+  private[cascade] def prepareCleanup(decision: PartitionCleanupDecision): Unit = synchronized {
+    validateCleanupPlan(decision.plan)
+    cleanupState = cleanupCheckpoint.persist(cleanupState.prepare(decision))
+  }
+
+  private[cascade] def commitCleanup(decision: PartitionCleanupDecision): Unit = synchronized {
+    validateCleanupPlan(decision.plan)
+    cleanupState = cleanupCheckpoint.persist(cleanupState.commit(decision))
+  }
+
+  private[cascade] def applyCommittedCleanup(): LifecycleStatistics = synchronized {
+    cleanupState.committed match
+      case Some(decision) if !cleanupState.applied.contains(decision) =>
+        validateCleanupPlan(decision.plan)
+        val statistics = applyLifecyclePlan(decision.plan)
+        cleanupState = cleanupCheckpoint.persist(cleanupState.markApplied(decision))
+        statistics
+      case _ => lifecycleStatistics
+  }
+
+  private[cascade] def cleanupProgress: (Option[PartitionCleanupDecision], Option[PartitionCleanupDecision]) = synchronized {
+    cleanupState.committed -> cleanupState.applied
+  }
+
+  private def validateCleanupPlan(plan: PartitionCleanupPlan): Unit =
+    val start = logStartOffset
+    if plan.deleteBeforeOffset > committedOffset || plan.compactBeforeOffset > committedOffset then
+      throw ProtocolException(
+        s"cleanup plan exceeds the committed log: delete=${plan.deleteBeforeOffset}, " +
+          s"compact=${plan.compactBeforeOffset}, high-watermark=$committedOffset"
+      )
+    val closed = segments.dropRight(1)
+    val boundaries = closed.iterator.flatMap(_.index.lastOption).map(entry => Math.addExact(entry.lastOffset, 1L)).toSet
+    if plan.deleteBeforeOffset > start && !boundaries.contains(plan.deleteBeforeOffset) then
+      throw ProtocolException(s"cleanup delete offset ${plan.deleteBeforeOffset} is not a closed-segment boundary")
+    if plan.compactBeforeOffset > start && !boundaries.contains(plan.compactBeforeOffset) then
+      throw ProtocolException(s"cleanup compaction offset ${plan.compactBeforeOffset} is not a closed-segment boundary")
 
   private def applyLifecyclePlan(plan: PartitionCleanupPlan): LifecycleStatistics =
     val lifecycleConfig = currentLifecycleConfig
