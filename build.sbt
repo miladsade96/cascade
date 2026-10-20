@@ -39,6 +39,9 @@ lazy val root = (project in file("."))
       Seq(output)
     }.taskValue,
     libraryDependencies ++= Seq(
+      "org.xerial.snappy" % "snappy-java" % "1.1.10.12",
+      "at.yawk.lz4" % "lz4-java" % "1.12.0",
+      "com.github.luben" % "zstd-jni" % "1.5.7-23",
       "org.scalameta" %% "munit" % "1.3.4" % Test,
       "org.apache.kafka" % "kafka-clients" % "4.3.1" % Test,
       "org.slf4j" % "slf4j-simple" % "2.0.17" % Test

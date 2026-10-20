@@ -10,7 +10,7 @@ Cascade accepts real Kafka protocol frames over TCP. Existing Java, JavaScript, 
 
 I built the broker itself with Scala 3 and the JDK. Apache Kafka's Java client is a test-only dependency that verifies compatibility from outside the implementation.
 
-The current release is `1.9.0`. The source, deployment manifests, compatibility package, and container metadata use that version. I keep Docker Hub publication separate until the exact image passes every release gate and its registry digest is recorded.
+The current release is `1.10.0`. The source, deployment manifests, compatibility package, and container metadata use that version. I keep Docker Hub publication separate until the exact image passes every release gate and its registry digest is recorded.
 
 ## What this project demonstrates
 
@@ -25,7 +25,7 @@ The current release is `1.9.0`. The source, deployment manifests, compatibility 
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **612/612** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **273 seconds**. It includes Kafka transaction protocol V2 recovery and failover coverage. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
+The latest complete source qualification passed **614/614** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **192 seconds**. It includes exact Snappy/LZ4/Zstd compaction verification plus Kafka transaction protocol V2 recovery and failover coverage. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
 
 > [!IMPORTANT]
 > Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, cross-version-image, and dedicated-host gates explicit.
@@ -89,7 +89,7 @@ The demo runs three brokers, creates an RF=3 topic, starts one idempotent `acks=
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.9.0 -Records 100000 `
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.10.0 -Records 100000 `
   -Java 'C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe'
 ```
 
@@ -158,7 +158,7 @@ The [external client matrix](compatibility/README.md) explains exactly what each
 - Segment, timestamp, transaction, and high-watermark state recover after restart.
 - CRC32C journals truncate incomplete/corrupt tails conservatively.
 - Time/size retention retires only safe closed segments through atomic rename.
-- Compaction rewrites uncompressed/gzip keyed records, preserves tombstone grace, and leaves unsupported/control/transactional batches opaque.
+- Compaction rewrites keyed records from uncompressed, Gzip, Snappy, LZ4, and Zstd magic-v2 batches, preserves offsets and producer sequences, rebuilds CRC32C, honors tombstone grace, and leaves control/transactional batches opaque.
 - `periodic` flushing batches force operations; `sync` forces every local append.
 
 ## Replication and leader election
@@ -208,7 +208,7 @@ These runs share a development machine and some share the broker/client JVM. The
 For a same-client, same-container-limit, same-payload comparison against the official Apache Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.9.0 `
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.10.0 `
   -KafkaImage apache/kafka:4.3.1 -Records 250000
 ```
 
@@ -277,7 +277,6 @@ What I will not claim yet:
 - no physical host-power or storage-device-loss qualification;
 - no dedicated-host RF=3/TLS capacity envelope;
 - no coordinated cluster-wide snapshot artifact across replica hosts;
-- no compressed-record rewriting for Snappy/LZ4/Zstd compaction;
 - no full Kafka API or transaction-protocol-V2 parity;
 - no exhaustive published-image rolling matrix across every adjacent release.
 
@@ -288,7 +287,7 @@ The [production-readiness document](docs/production-readiness.md) maps capabilit
 1. Run and archive the 72-hour authenticated multi-tenant soak and real power/device-loss campaign.
 2. Publish dedicated-host RF=3/TLS capacity and failover envelopes.
 3. Complete coordinated cross-host snapshots and scheduled off-host retention.
-4. Add Snappy/LZ4/Zstd compaction rewriting and replicated cleanup coordination.
+4. Add replicated cleanup coordination across partition replicas.
 5. Expand client-version and adjacent-release rolling matrices.
 6. Pursue zero-copy Fetch, multi-device placement, and worker-pool changes only when profiles justify them.
 

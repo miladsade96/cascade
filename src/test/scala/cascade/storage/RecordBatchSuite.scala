@@ -3,6 +3,7 @@ package cascade.storage
 import cascade.TestRecordBatch
 import cascade.protocol.ProtocolException
 import java.nio.{ByteBuffer, ByteOrder}
+import java.util.zip.CRC32C
 import munit.FunSuite
 
 final class RecordBatchSuite extends FunSuite:
@@ -52,7 +53,49 @@ final class RecordBatchSuite extends FunSuite:
     )
   }
 
-  test("keeps compressed and malformed record payloads opaque") {
+  test("compacts and rebuilds every Kafka compression codec with valid offsets and CRC") {
+    (1 to 4).foreach { compressionType =>
+      val batch = TestRecordBatch.compressedKeyed(
+        Vector(
+          TestRecordBatch.Record(Some("key".getBytes), Some("old".getBytes), 1000L),
+          TestRecordBatch.Record(Some("key".getBytes), Some("new".getBytes), 1010L)
+        ),
+        compressionType,
+        baseOffset = 20L
+      )
+      val inputHeader = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
+      inputHeader.putLong(43, 99L)
+      inputHeader.putShort(51, 2.toShort)
+      inputHeader.putInt(53, 100)
+      val inputCrc = CRC32C()
+      inputCrc.update(batch, 21, batch.length - 21)
+      inputHeader.putInt(17, inputCrc.getValue.toInt)
+
+      assertEquals(
+        RecordBatch.indexedRecords(batch).getOrElse(fail(s"codec $compressionType was not decoded")).map(_.offset),
+        Vector(20L, 21L)
+      )
+      val compacted = RecordBatch.compact(batch, Map("key".getBytes.toVector -> 21L), Long.MinValue)
+        .getOrElse(fail(s"codec $compressionType was removed"))
+      val metadata = RecordBatch.metadata(compacted)
+      assertEquals(metadata.baseOffset, 20L)
+      assertEquals(metadata.lastOffset, 21L)
+      assertEquals(metadata.recordCount, 1)
+      assertEquals(metadata.compressionType, compressionType)
+      assertEquals(metadata.baseSequence, 100)
+      assertEquals(metadata.lastSequence, 101)
+      assertEquals(
+        RecordBatch.indexedRecords(compacted).getOrElse(fail(s"codec $compressionType rewrite was unreadable")).map(_.offset),
+        Vector(21L)
+      )
+
+      val expectedCrc = CRC32C()
+      expectedCrc.update(compacted, 21, compacted.length - 21)
+      assertEquals(ByteBuffer.wrap(compacted).order(ByteOrder.BIG_ENDIAN).getInt(17), expectedCrc.getValue.toInt)
+    }
+  }
+
+  test("keeps malformed compressed record payloads opaque") {
     val compressed = TestRecordBatch.keyed(
       Vector(TestRecordBatch.Record(Some("key".getBytes), Some("value".getBytes), 1000L))
     )

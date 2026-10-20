@@ -21,7 +21,7 @@ I support `periodic` batched forcing and `sync` per-append forcing as explicit d
 
 ## Trade-offs
 
-Opaque compressed batches preserve throughput and compatibility, but advanced compaction currently rewrites only uncompressed and gzip data. Periodic forcing improves throughput while creating a documented local power-loss window.
+Opaque compressed batches preserve throughput and compatibility on the hot path. Closed-segment compaction pays the decode/re-encode cost only when it rewrites uncompressed, Gzip, Snappy, LZ4, or Zstd keyed records. Periodic forcing improves throughput while creating a documented local power-loss window.
 
 ## Consequences
 

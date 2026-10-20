@@ -4,17 +4,17 @@ I use these runners to produce auditable evidence rather than treating a short u
 
 ## Portfolio failover and comparison evidence
 
-I compile the test tools once, then run the exact 1.9.0 image through the short leader-failover demo:
+I compile the test tools once, then run the exact 1.10.0 image through the short leader-failover demo:
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.9.0 -Records 100000 -Java <Java-21-executable>
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.10.0 -Records 100000 -Java <Java-21-executable>
 ```
 
 For the controlled RF=1 comparison, I run the same Kafka Java workload against Cascade and the official Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.9.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.10.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
 ```
 
 The [failover guide](failover-demo.md) defines the failure timestamp and exactness gate. The [benchmark guide](benchmarking.md) defines the workload, environment inventory, and publication rules.
@@ -47,7 +47,7 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-16 the clean release tree passed 612/612 tests in 273 seconds with no failures or errors. The [transaction V2 report](performance/2026-10-16-transaction-v2.md) records the coverage and remaining limits.
+On 2026-10-20 the 1.10.0 release tree passed 614/614 tests in 192 seconds with no failures or errors. This includes the transaction V2 gates and the new exact Snappy/LZ4/Zstd compaction coverage. The [1.10.0 release notes](releases/1.10.0.md) record the complete result, while the [transaction V2 report](performance/2026-10-16-transaction-v2.md) keeps that milestone's focused coverage and limits.
 
 ## Distributed quotas
 

@@ -493,39 +493,43 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
-  test("advanced compaction rewrites individual gzip records and expires old tombstones") {
-    val directory = Files.createTempDirectory("cascade-record-compaction-test")
-    val value = Array.fill[Byte](700)(4)
-    try
-      val log = PartitionLog(
-        directory,
-        maxSegmentBytes = 1024,
-        flushPolicy = FlushPolicy.Sync,
-        lifecycleConfig = StorageLifecycleConfig(
-          cleanupPolicy = CleanupPolicy.Compact,
-          retentionMillis = -1L,
-          deleteRetentionMillis = 0L,
-          compactionMaxBytesPerSecond = 10_000_000L
-        )
-      )
+  test("advanced compaction rewrites individual records for every compression codec and expires tombstones") {
+    (1 to 4).foreach { compressionType =>
+      val directory = Files.createTempDirectory(s"cascade-record-compaction-$compressionType-test")
+      val value = Array.fill[Byte](700)(4)
       try
-        log.append(TestRecordBatch.gzipKeyed(Vector(
-          TestRecordBatch.Record(Some("duplicate".getBytes), Some(value), 1L),
-          TestRecordBatch.Record(Some("duplicate".getBytes), Some(value), 2L)
-        )))
-        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("deleted".getBytes), Some(value), 3L))))
-        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("deleted".getBytes), None, 4L))))
-        log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(None, Some(value), 5L))))
+        val log = PartitionLog(
+          directory,
+          maxSegmentBytes = 1024,
+          flushPolicy = FlushPolicy.Sync,
+          lifecycleConfig = StorageLifecycleConfig(
+            cleanupPolicy = CleanupPolicy.Compact,
+            retentionMillis = -1L,
+            deleteRetentionMillis = 0L,
+            compactionMaxBytesPerSecond = 10_000_000L
+          )
+        )
+        try
+          log.append(TestRecordBatch.compressedKeyed(Vector(
+            TestRecordBatch.Record(Some("duplicate".getBytes), Some(value), 1L),
+            TestRecordBatch.Record(Some("duplicate".getBytes), Some(value), 2L)
+          ), compressionType))
+          log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("deleted".getBytes), Some(value), 3L))))
+          log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(Some("deleted".getBytes), None, 4L))))
+          log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(None, Some(value), 5L))))
+          log.append(TestRecordBatch.keyed(Vector(TestRecordBatch.Record(None, Some(value), 6L))))
 
-        val statistics = log.runLifecycle(nowMillis = 10_000L)
-        assert(statistics.compactedBatches >= 2L)
-        val batches = splitBatches(log.fetch(0L, 16 * 1024).records)
-        val records = batches.flatMap(batch => RecordBatch.indexedRecords(batch).getOrElse(Vector.empty))
-        assertEquals(records.filter(_.key.contains("duplicate".getBytes.toVector)).map(_.offset), Vector(1L))
-        assertEquals(records.exists(_.key.contains("deleted".getBytes.toVector)), false)
-        assert(records.exists(_.key.isEmpty))
-      finally log.close()
-    finally deleteTree(directory)
+          val statistics = log.runLifecycle(nowMillis = 10_000L)
+          assert(statistics.compactedBatches >= 2L, s"codec $compressionType was not compacted")
+          val batches = splitBatches(log.fetch(0L, 16 * 1024).records)
+          val records = batches.flatMap(batch => RecordBatch.indexedRecords(batch).getOrElse(Vector.empty))
+          assertEquals(records.filter(_.key.contains("duplicate".getBytes.toVector)).map(_.offset), Vector(1L))
+          assertEquals(records.exists(_.key.contains("deleted".getBytes.toVector)), false)
+          assert(records.exists(_.key.isEmpty))
+          assert(batches.exists(batch => RecordBatch.metadata(batch).compressionType == compressionType))
+        finally log.close()
+      finally deleteTree(directory)
+    }
   }
 
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =

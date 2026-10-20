@@ -4,8 +4,11 @@ import cascade.protocol.ProtocolException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream}
 import java.util.zip.{CRC32C, GZIPInputStream, GZIPOutputStream}
+import org.xerial.snappy.{SnappyInputStream, SnappyOutputStream}
+import net.jpountz.lz4.{LZ4FrameInputStream, LZ4FrameOutputStream}
+import com.github.luben.zstd.{ZstdInputStreamNoFinalizer, ZstdOutputStreamNoFinalizer}
 
 final case class PreparedBatch(baseOffset: Long, lastOffset: Long, bytes: Array[Byte])
 final case class RecordBatchMetadata(
@@ -68,7 +71,8 @@ object RecordBatch:
     val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
     if buffer.get(16) != 2.toByte then throw ProtocolException("only Kafka record batch magic 2 is supported")
     val base = buffer.getLong(0)
-    val last = Math.addExact(base, buffer.getInt(23).toLong)
+    val lastOffsetDelta = buffer.getInt(23)
+    val last = Math.addExact(base, lastOffsetDelta.toLong)
     val producerId = buffer.getLong(43)
     val producerEpoch = buffer.getShort(51)
     val baseSequence = buffer.getInt(53)
@@ -76,7 +80,7 @@ object RecordBatch:
     val attributes = buffer.getShort(21).toInt & 0xffff
     val lastSequence =
       if baseSequence < 0 || recordCount == 0 then baseSequence
-      else ((baseSequence.toLong + recordCount.toLong - 1L) % (Int.MaxValue.toLong + 1L)).toInt
+      else ((baseSequence.toLong + lastOffsetDelta.toLong) % (Int.MaxValue.toLong + 1L)).toInt
     RecordBatchMetadata(
       base,
       last,
@@ -91,7 +95,7 @@ object RecordBatch:
       compressionType = attributes & 0x07
     )
 
-  /** Decodes keys from uncompressed and gzip magic-v2 batches; unsupported codecs stay opaque. */
+  /** Decodes keys from every Kafka magic-v2 compression codec. */
   def indexedRecords(bytes: Array[Byte]): Option[Vector[IndexedRecord]] =
     try
       val metadata = RecordBatch.metadata(bytes)
@@ -130,7 +134,7 @@ object RecordBatch:
     val payload = Arrays.copyOfRange(bytes, MinimumSize, bytes.length)
     val decoded = metadata.compressionType match
       case 0 => payload
-      case 1 => gunzip(payload)
+      case codec if codec >= 1 && codec <= 4 => decompress(payload, codec)
       case _ => return None
     val buffer = ByteBuffer.wrap(decoded).order(ByteOrder.BIG_ENDIAN)
     val baseTimestamp = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(27)
@@ -174,7 +178,7 @@ object RecordBatch:
 
   private def rebuild(original: Array[Byte], metadata: RecordBatchMetadata, records: Vector[EncodedRecord]): Array[Byte] =
     val plain = records.iterator.flatMap(_.bytes).toArray
-    val payload = if metadata.compressionType == 1 then gzip(plain) else plain
+    val payload = if metadata.compressionType == 0 then plain else compress(plain, metadata.compressionType)
     val rebuilt = Arrays.copyOf(original, MinimumSize + payload.length)
     System.arraycopy(payload, 0, rebuilt, MinimumSize, payload.length)
     val buffer = ByteBuffer.wrap(rebuilt).order(ByteOrder.BIG_ENDIAN)
@@ -185,19 +189,30 @@ object RecordBatch:
     buffer.putInt(17, crc.getValue.toInt)
     rebuilt
 
-  private def gunzip(value: Array[Byte]): Array[Byte] =
-    val input = GZIPInputStream(ByteArrayInputStream(value))
+  private def decompress(value: Array[Byte], codec: Int): Array[Byte] =
+    val source = ByteArrayInputStream(value)
+    val input: InputStream = codec match
+      case 1 => GZIPInputStream(source)
+      case 2 => SnappyInputStream(source)
+      case 3 => LZ4FrameInputStream(source)
+      case 4 => ZstdInputStreamNoFinalizer(source)
+      case _ => throw ProtocolException(s"unsupported record compression type: $codec")
     try
       val decoded = input.readNBytes(MaximumDecodedBatchBytes + 1)
       if decoded.length > MaximumDecodedBatchBytes then throw ProtocolException("decompressed record batch exceeds 128 MiB")
       decoded
     finally input.close()
 
-  private def gzip(value: Array[Byte]): Array[Byte] =
+  private def compress(value: Array[Byte], codec: Int): Array[Byte] =
     val output = ByteArrayOutputStream()
-    val gzip = GZIPOutputStream(output)
-    try gzip.write(value)
-    finally gzip.close()
+    val compressed: OutputStream = codec match
+      case 1 => GZIPOutputStream(output)
+      case 2 => SnappyOutputStream(output)
+      case 3 => LZ4FrameOutputStream(output)
+      case 4 => ZstdOutputStreamNoFinalizer(output)
+      case _ => throw ProtocolException(s"unsupported record compression type: $codec")
+    try compressed.write(value)
+    finally compressed.close()
     output.toByteArray
 
   private def readNullableBytes(buffer: ByteBuffer): Option[Vector[Byte]] =

@@ -1,8 +1,11 @@
 package cascade
 
 import java.nio.{ByteBuffer, ByteOrder}
-import java.io.ByteArrayOutputStream
+import java.io.{ByteArrayOutputStream, OutputStream}
 import java.util.zip.{CRC32C, GZIPOutputStream}
+import org.xerial.snappy.SnappyOutputStream
+import net.jpountz.lz4.LZ4FrameOutputStream
+import com.github.luben.zstd.ZstdOutputStreamNoFinalizer
 
 object TestRecordBatch:
   final case class Record(key: Option[Array[Byte]], value: Option[Array[Byte]], timestamp: Long)
@@ -77,17 +80,25 @@ object TestRecordBatch:
     buffer.array()
 
   def gzipKeyed(records: Vector[Record], baseOffset: Long = 0L): Array[Byte] =
+    compressedKeyed(records, compressionType = 1, baseOffset = baseOffset)
+
+  def compressedKeyed(records: Vector[Record], compressionType: Int, baseOffset: Long = 0L): Array[Byte] =
+    require(compressionType >= 1 && compressionType <= 4, "compression type must be gzip, snappy, lz4, or zstd")
     val plain = keyed(records, baseOffset)
     val compressed = ByteArrayOutputStream()
-    val gzip = GZIPOutputStream(compressed)
-    try gzip.write(plain, 61, plain.length - 61)
-    finally gzip.close()
+    val codec: OutputStream = compressionType match
+      case 1 => GZIPOutputStream(compressed)
+      case 2 => SnappyOutputStream(compressed)
+      case 3 => LZ4FrameOutputStream(compressed)
+      case 4 => ZstdOutputStreamNoFinalizer(compressed)
+    try codec.write(plain, 61, plain.length - 61)
+    finally codec.close()
     val payload = compressed.toByteArray
     val batch = java.util.Arrays.copyOf(plain, 61 + payload.length)
     System.arraycopy(payload, 0, batch, 61, payload.length)
     val buffer = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
     buffer.putInt(8, batch.length - 12)
-    buffer.putShort(21, (buffer.getShort(21) | 1).toShort)
+    buffer.putShort(21, (buffer.getShort(21) | compressionType).toShort)
     val crc = CRC32C()
     crc.update(batch, 21, batch.length - 21)
     buffer.putInt(17, crc.getValue.toInt)

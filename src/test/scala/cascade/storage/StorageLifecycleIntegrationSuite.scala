@@ -15,6 +15,8 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySe
 import scala.jdk.CollectionConverters.*
 
 final class StorageLifecycleIntegrationSuite extends FunSuite:
+  private final case class ConsumedRecord(offset: Long, key: Option[Vector[Byte]], value: Vector[Byte])
+
   test("broker size retention advances the Kafka log start and survives restart") {
     val directory = Files.createTempDirectory("cascade-broker-retention-test")
     val config = BrokerConfig(
@@ -95,6 +97,72 @@ final class StorageLifecycleIntegrationSuite extends FunSuite:
       deleteTree(directory)
   }
 
+  test("Kafka clients read compacted Snappy, LZ4, and Zstd batches with exact keys, values, and offsets") {
+    val directory = Files.createTempDirectory("cascade-broker-compressed-compaction-test")
+    val broker = KafkaBroker(
+      BrokerConfig(
+        bindHost = "127.0.0.1",
+        port = 0,
+        advertisedHost = "127.0.0.1",
+        dataDirectory = directory,
+        segmentBytes = 8 * 1024L,
+        flushPolicy = FlushPolicy.Sync,
+        storageLifecycle = StorageLifecycleConfig(
+          cleanupPolicy = CleanupPolicy.Compact,
+          retentionMillis = -1L,
+          lifecycleIntervalMillis = 20L,
+          compactionMaxBytesPerSecond = 100_000_000L
+        )
+      )
+    )
+    try
+      broker.start()
+      Vector("snappy", "lz4", "zstd").zipWithIndex.foreach { case (compression, codecIndex) =>
+        val topic = s"compacted-$compression"
+        createTopic(broker.bootstrapServers, topic)
+        val properties = producerProperties(broker.bootstrapServers)
+        properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, compression)
+        properties.put(ProducerConfig.BATCH_SIZE_CONFIG, (64 * 1024).toString)
+        properties.put(ProducerConfig.LINGER_MS_CONFIG, "1000")
+        val compactedBefore = broker.lifecycleStatistics.compactedBatches
+        val producer = KafkaProducer[Array[Byte], Array[Byte]](properties)
+        val keys = (0 until 8).map(index => s"key-$index".getBytes(StandardCharsets.UTF_8)).toVector
+        val latestValues = keys.indices.map(index => randomBytes(1024, codecIndex * 1000L + index + 100L)).toVector
+        try
+          val duplicateSends =
+            keys.indices.map { index =>
+              producer.send(ProducerRecord(topic, 0, keys(index), randomBytes(1024, codecIndex * 1000L + index)))
+            } ++ keys.indices.map { index =>
+              producer.send(ProducerRecord(topic, 0, keys(index), latestValues(index)))
+            }
+          producer.flush()
+          duplicateSends.foreach(_.get(10, TimeUnit.SECONDS))
+
+          val fillerSends = (0 until 16).map { index =>
+            producer.send(ProducerRecord(topic, 0, null, randomBytes(1024, codecIndex * 1000L + index + 500L)))
+          }
+          producer.flush()
+          fillerSends.foreach(_.get(10, TimeUnit.SECONDS))
+        finally producer.close(Duration.ofSeconds(5))
+
+        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos
+        while broker.lifecycleStatistics.compactedBatches <= compactedBefore && System.nanoTime() < deadline do
+          Thread.sleep(10L)
+        assert(
+          broker.lifecycleStatistics.compactedBatches > compactedBefore,
+          s"$compression batch was not compacted before the deadline"
+        )
+
+        val keyed = consumeRecords(broker.bootstrapServers, topic).filter(_.key.nonEmpty)
+        assertEquals(keyed.map(_.offset), (8L until 16L).toVector)
+        assertEquals(keyed.map(_.key.get), keys.map(_.toVector))
+        assertEquals(keyed.map(_.value), latestValues.map(_.toVector))
+      }
+    finally
+      broker.close()
+      deleteTree(directory)
+  }
+
   private def createTopic(bootstrap: String, topic: String): Unit =
     val properties = Properties()
     properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)
@@ -103,21 +171,35 @@ final class StorageLifecycleIntegrationSuite extends FunSuite:
     finally admin.close(Duration.ofSeconds(5))
 
   private def consumeAvailable(bootstrap: String, topic: String): Vector[String] =
+    consumeRecords(bootstrap, topic).map(record => String(record.value.toArray, StandardCharsets.UTF_8))
+
+  private def consumeRecords(bootstrap: String, topic: String): Vector[ConsumedRecord] =
     val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties(bootstrap))
     try
       val partition = KafkaTopicPartition(topic, 0)
       consumer.assign(java.util.List.of(partition))
       consumer.seekToBeginning(java.util.List.of(partition))
-      val values = Vector.newBuilder[String]
+      val values = Vector.newBuilder[ConsumedRecord]
       var idlePolls = 0
       while idlePolls < 4 do
         val records = consumer.poll(Duration.ofMillis(250))
         if records.isEmpty then idlePolls += 1
         else
           idlePolls = 0
-          records.iterator().asScala.foreach(record => values += String(record.value(), StandardCharsets.UTF_8))
+          records.iterator().asScala.foreach { record =>
+            values += ConsumedRecord(
+              record.offset(),
+              Option(record.key()).map(_.toVector),
+              Option(record.value()).fold(Vector.empty[Byte])(_.toVector)
+            )
+          }
       values.result()
     finally consumer.close()
+
+  private def randomBytes(size: Int, seed: Long): Array[Byte] =
+    val bytes = new Array[Byte](size)
+    java.util.Random(seed).nextBytes(bytes)
+    bytes
 
   private def producerProperties(bootstrap: String): Properties =
     val values = Properties()
