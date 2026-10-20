@@ -61,21 +61,23 @@ object RecordBatch:
       val view = ByteBuffer.wrap(recordSet, position, recordSet.length - position).order(ByteOrder.BIG_ENDIAN)
       view.getLong()
       val batchLength = view.getInt()
-      val totalSize = Math.addExact(batchLength, 12)
+      val totalSize =
+        try Math.addExact(batchLength, 12)
+        catch case _: ArithmeticException => throw ProtocolException(s"invalid record batch length: $batchLength")
       if totalSize < MinimumSize || totalSize > recordSet.length - position then
         throw ProtocolException(s"invalid record batch length: $batchLength")
       val batch = Arrays.copyOfRange(recordSet, position, position + totalSize)
-      val header = ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN)
-      if header.get(16) != 2.toByte then throw ProtocolException("only Kafka record batch magic 2 is supported")
+      val header = validatedHeader(batch)
       val lastOffsetDelta = header.getInt(23)
-      val recordCount = header.getInt(57)
-      if lastOffsetDelta < 0 || recordCount < 0 then throw ProtocolException("negative record batch counters")
       header.putLong(0, nextOffset)
       val lastOffset = Math.addExact(nextOffset, lastOffsetDelta.toLong)
       builder += PreparedBatch(nextOffset, lastOffset, batch)
       nextOffset = Math.addExact(lastOffset, 1L)
       position += totalSize
     builder.result()
+
+  def validate(bytes: Array[Byte]): Unit =
+    validatedHeader(bytes): Unit
 
   def baseOffset(bytes: Array[Byte]): Long =
     ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getLong(0)
