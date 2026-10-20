@@ -632,6 +632,37 @@ final class PartitionLogSuite extends FunSuite:
     finally deleteTree(directory)
   }
 
+  test("size retention preserves producer epoch and sequence after restart") {
+    val directory = Files.createTempDirectory("cascade-retained-producer-window-test")
+    try
+      val log = PartitionLog(
+        directory,
+        maxSegmentBytes = 1024,
+        flushPolicy = FlushPolicy.Sync,
+        lifecycleConfig = StorageLifecycleConfig(
+          cleanupPolicy = CleanupPolicy.Delete,
+          retentionMillis = -1L,
+          retentionBytes = 100L
+        )
+      )
+      try
+        log.append(TestRecordBatch.producer(73L, 5, 90))
+        (1 to 16).foreach(_ => log.append(TestRecordBatch.single()))
+        log.runLifecycle()
+        assertEquals(log.logStartOffset, 16L)
+        assertEquals(log.recentBatches(73L).map(_.lastSequence), Vector(90))
+      finally log.close()
+
+      val recovered = PartitionLog(directory, maxSegmentBytes = 1024, flushPolicy = FlushPolicy.Sync)
+      try
+        assertEquals(
+          recovered.latestProducerBatches.map(value => (value.producerId, value.producerEpoch, value.lastSequence)),
+          Vector((73L, 5.toShort, 90))
+        )
+      finally recovered.close()
+    finally deleteTree(directory)
+  }
+
   private def batchBaseOffsets(records: Array[Byte]): Vector[Long] =
     val buffer = ByteBuffer.wrap(records).order(ByteOrder.BIG_ENDIAN)
     val offsets = Vector.newBuilder[Long]
