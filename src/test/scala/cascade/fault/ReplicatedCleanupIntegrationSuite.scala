@@ -28,10 +28,10 @@ final class ReplicatedCleanupIntegrationSuite extends FunSuite:
         produce(cluster.bootstrapServers, 8)
         awaitCondition("replica cleanup convergence") {
           val bases = cluster.directories.map(segmentBases)
-          bases.forall(_.headOption.exists(_ > 0L)) && bases.distinct.size == 1
+          bases.forall(_.headOption.exists(_ > 0L)) && convergedCleanupProgress(cluster)
         }
         val bases = cluster.directories.map(segmentBases)
-        assertEquals(bases.distinct.size, 1)
+        assert(convergedCleanupProgress(cluster))
         cluster.directories.foreach { directory =>
           assert(Files.exists(directory.resolve(Topic).resolve("partition-0").resolve("replicated-cleanup.checkpoint")))
         }
@@ -155,6 +155,14 @@ final class ReplicatedCleanupIntegrationSuite extends FunSuite:
         .toVector
         .sorted
       finally paths.close()
+
+  private def convergedCleanupProgress(cluster: FaultCluster): Boolean =
+    val progress = cluster.runningNodeIds.toVector.sorted.flatMap { nodeId =>
+      cluster.broker(nodeId).partitionCleanupProgress(Topic, 0)
+    }
+    val committed = progress.flatMap(_._1)
+    progress.size == cluster.runningNodeIds.size && committed.size == progress.size && committed.distinct.size == 1 &&
+      progress.forall { case (decision, applied) => decision == applied }
 
   private def awaitIsr(admin: Admin): org.apache.kafka.common.TopicPartitionInfo =
     awaitIsrIds(admin, Set(1, 2, 3))

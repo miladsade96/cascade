@@ -222,6 +222,12 @@ final class KafkaBroker(
 
   def lifecycleStatistics: cascade.storage.LifecycleStatistics = registry.lifecycleStatistics
 
+  private[cascade] def partitionCleanupProgress(
+      topic: String,
+      partition: Int
+  ): Option[(Option[cascade.storage.PartitionCleanupDecision], Option[cascade.storage.PartitionCleanupDecision])] =
+    registry.partition(topic, partition).map(_.cleanupProgress)
+
   def connectionAdmissionSnapshot: ConnectionAdmissionSnapshot = connectionAdmission.snapshot
 
   def requestAdmissionSnapshot: RequestAdmissionSnapshot = requestAdmission.snapshot

@@ -178,7 +178,9 @@ final class ReplicationManager(
           val key = partitionKey(topic, partition)
           val lock = partitionLocks.computeIfAbsent(key, _ => Object())
           lock.synchronized {
-            if metadata.leaderId == config.nodeId && !Option(recoveries.get(key)).exists(!_.isEmpty) then
+            if metadata.leaderId == config.nodeId && metadata.inSyncReplicas.contains(config.nodeId) &&
+                !Option(recoveries.get(key)).exists(!_.isEmpty)
+            then
               coordinateCleanup(topic, partition, log, nowMillis, retentionFloor, metadata)
             else log.applyCommittedCleanup(): Unit
           }
@@ -501,7 +503,9 @@ final class ReplicationManager(
       retentionFloor: Long,
       metadata: PartitionMetadata
   ): Unit =
-    val followers = metadata.inSyncReplicas.filterNot(_ == config.nodeId).flatMap(nodeById)
+    val followerIds = metadata.inSyncReplicas.filterNot(_ == config.nodeId)
+    val followers = followerIds.flatMap(nodeById)
+    if followers.size != followerIds.size then return
     log.cleanupProgress._1.foreach { committed =>
       replicateCleanup(followers, InternalApi.ReplicaCleanupCommit, topic, partition, committed)
       log.applyCommittedCleanup(): Unit

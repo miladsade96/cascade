@@ -47,7 +47,7 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-20 the 1.12.0 release tree passed 634/634 tests in 164 seconds with no failures or errors. This includes durable producer history through compaction/retention, transaction-aware retention floors, strict magic-v2 envelope/CRC validation, transaction V2 gates, and exact Snappy/LZ4/Zstd compaction coverage. The [1.12.0 release notes](releases/1.12.0.md) record the complete result, while the [transaction V2 report](performance/2026-10-16-transaction-v2.md) keeps that milestone's focused coverage and limits.
+On 2026-10-20 the 1.13.0 release tree passed 652/652 tests in 291 seconds with no failures or errors. This includes three-broker replicated cleanup convergence, quorum blocking, failover and repair; durable producer history through compaction/retention; transaction-aware retention floors; strict magic-v2 envelope/CRC validation; transaction V2 gates; and exact Snappy/LZ4/Zstd compaction coverage. The [1.13.0 release notes](releases/1.13.0.md) record the complete result, while the [replicated cleanup guide](replicated-cleanup.md) states the new protocol and its limits.
 
 ## Distributed quotas
 
