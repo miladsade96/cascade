@@ -44,6 +44,7 @@ final class TopicRegistry(
     Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("cascade-storage-lifecycle").factory())
   @volatile private var transactionRetentionFloor: (String, Int, Long) => Long =
     (_, _, highWatermark) => highWatermark
+  @volatile private var cleanupCoordinator: PartitionCleanupCoordinator = LocalPartitionCleanupCoordinator
 
   Files.createDirectories(dataDirectory)
   loadTopicPolicies()
@@ -71,6 +72,9 @@ final class TopicRegistry(
 
   private[cascade] def installTransactionRetentionFloor(provider: (String, Int, Long) => Long): Unit =
     transactionRetentionFloor = provider
+
+  private[cascade] def installCleanupCoordinator(coordinator: PartitionCleanupCoordinator): Unit =
+    cleanupCoordinator = coordinator
 
   def configureLifecycle(topic: String, policy: TopicLifecyclePolicy): Either[String, Unit] = synchronized {
     ensureHealthy()
@@ -248,7 +252,13 @@ final class TopicRegistry(
         logs.zipWithIndex.foreach { case (log, partition) =>
           try
             val highWatermark = log.highWatermark
-            log.runLifecycle(retentionFloor = transactionRetentionFloor(topic, partition, highWatermark))
+            cleanupCoordinator.run(
+              topic,
+              partition,
+              log,
+              System.currentTimeMillis(),
+              transactionRetentionFloor(topic, partition, highWatermark)
+            )
           catch
             case error: Throwable =>
               backgroundFailure.compareAndSet(null, error): Unit

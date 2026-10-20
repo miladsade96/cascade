@@ -75,3 +75,22 @@ private[storage] final case class PartitionCleanupState(
 
 private[storage] object PartitionCleanupState:
   val Empty: PartitionCleanupState = PartitionCleanupState(None, None, None)
+
+private[cascade] trait PartitionCleanupCoordinator:
+  def run(
+      topic: String,
+      partition: Int,
+      log: PartitionLog,
+      nowMillis: Long,
+      retentionFloor: Long
+  ): Unit
+
+private[cascade] object LocalPartitionCleanupCoordinator extends PartitionCleanupCoordinator:
+  override def run(
+      topic: String,
+      partition: Int,
+      log: PartitionLog,
+      nowMillis: Long,
+      retentionFloor: Long
+  ): Unit =
+    log.runLifecycle(nowMillis, retentionFloor): Unit
