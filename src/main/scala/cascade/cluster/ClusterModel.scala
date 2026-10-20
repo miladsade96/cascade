@@ -189,7 +189,8 @@ object PeerCapabilities:
       ClusterFeature.AdvancedCompaction -> 1,
       ClusterFeature.DistributedQuotas -> 2,
       ClusterFeature.IndependentCoordinator -> 1,
-      ClusterFeature.TransactionVersion -> 2
+      ClusterFeature.TransactionVersion -> 2,
+      ClusterFeature.ReplicatedCleanup -> 1
     )
   )
 
@@ -205,6 +206,7 @@ object ClusterFeature:
   val DistributedQuotas = "distributed-quotas"
   val IndependentCoordinator = "independent-coordinator"
   val TransactionVersion = "transaction.version"
+  val ReplicatedCleanup = "replicated-cleanup"
 
   /** Features that change shared wire/state semantics activate only after every voter commits them. */
   def requiresFullVoterCommit(current: Map[String, Short], candidate: Map[String, Short]): Boolean =
@@ -212,7 +214,9 @@ object ClusterFeature:
       current.getOrElse(DistributedQuotas, 0.toShort) < 2 && candidate.getOrElse(DistributedQuotas, 0.toShort) >= 2
     val transactionV2Activation =
       current.getOrElse(TransactionVersion, 0.toShort) < 2 && candidate.getOrElse(TransactionVersion, 0.toShort) >= 2
-    distributedQuotaActivation || transactionV2Activation
+    val replicatedCleanupActivation =
+      current.getOrElse(ReplicatedCleanup, 0.toShort) < 1 && candidate.getOrElse(ReplicatedCleanup, 0.toShort) >= 1
+    distributedQuotaActivation || transactionV2Activation || replicatedCleanupActivation
 
 final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
   def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
@@ -278,5 +282,7 @@ object InternalApi:
   val CoordinatorDecisionQuery: Short = -128
   val CoordinatorStateQuery: Short = -129
   val QuotaReserve: Short = -130
+  val ReplicaCleanupPrepare: Short = -131
+  val ReplicaCleanupCommit: Short = -132
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= QuotaReserve
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaCleanupCommit
