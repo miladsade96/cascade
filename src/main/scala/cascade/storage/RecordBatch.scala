@@ -1,6 +1,6 @@
 package cascade.storage
 
-import cascade.protocol.ProtocolException
+import cascade.protocol.CorruptRecordException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
@@ -35,13 +35,13 @@ object RecordBatch:
   private val MaximumDecodedBatchBytes = 128 * 1024 * 1024
 
   private[cascade] def computedCrc(bytes: Array[Byte]): Int =
-    if bytes.length < CrcCoverageOffset then throw ProtocolException("record batch is too short for CRC32C")
+    if bytes.length < CrcCoverageOffset then throw CorruptRecordException("record batch is too short for CRC32C")
     val crc = CRC32C()
     crc.update(bytes, CrcCoverageOffset, bytes.length - CrcCoverageOffset)
     crc.getValue.toInt
 
   private[cascade] def storedCrc(bytes: Array[Byte]): Int =
-    if bytes.length < CrcCoverageOffset then throw ProtocolException("record batch is too short for CRC32C")
+    if bytes.length < CrcCoverageOffset then throw CorruptRecordException("record batch is too short for CRC32C")
     ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getInt(CrcOffset)
 
   private[cascade] def rewriteCrc(bytes: Array[Byte]): Unit =
@@ -57,15 +57,15 @@ object RecordBatch:
     var nextOffset = firstOffset
     while position < recordSet.length do
       if recordSet.length - position < 12 then
-        throw ProtocolException("truncated record batch envelope")
+        throw CorruptRecordException("truncated record batch envelope")
       val view = ByteBuffer.wrap(recordSet, position, recordSet.length - position).order(ByteOrder.BIG_ENDIAN)
       view.getLong()
       val batchLength = view.getInt()
       val totalSize =
         try Math.addExact(batchLength, 12)
-        catch case _: ArithmeticException => throw ProtocolException(s"invalid record batch length: $batchLength")
+        catch case _: ArithmeticException => throw CorruptRecordException(s"invalid record batch length: $batchLength")
       if totalSize < MinimumSize || totalSize > recordSet.length - position then
-        throw ProtocolException(s"invalid record batch length: $batchLength")
+        throw CorruptRecordException(s"invalid record batch length: $batchLength")
       val batch = Arrays.copyOfRange(recordSet, position, position + totalSize)
       val header = validatedHeader(batch)
       val lastOffsetDelta = header.getInt(23)
@@ -114,24 +114,24 @@ object RecordBatch:
     )
 
   private def validatedHeader(bytes: Array[Byte]): ByteBuffer =
-    if bytes.length < MinimumSize then throw ProtocolException("record batch is too short")
+    if bytes.length < MinimumSize then throw CorruptRecordException("record batch is too short")
     val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
     val batchLength = buffer.getInt(8)
     val declaredSize =
       try Math.addExact(batchLength, 12)
-      catch case _: ArithmeticException => throw ProtocolException(s"invalid record batch length: $batchLength")
+      catch case _: ArithmeticException => throw CorruptRecordException(s"invalid record batch length: $batchLength")
     if batchLength < MinimumSize - 12 || declaredSize != bytes.length then
-      throw ProtocolException(s"record batch length $batchLength does not match ${bytes.length - 12}")
-    if buffer.get(16) != 2.toByte then throw ProtocolException("only Kafka record batch magic 2 is supported")
+      throw CorruptRecordException(s"record batch length $batchLength does not match ${bytes.length - 12}")
+    if buffer.get(16) != 2.toByte then throw CorruptRecordException("only Kafka record batch magic 2 is supported")
     val lastOffsetDelta = buffer.getInt(23)
     val recordCount = buffer.getInt(57)
-    if lastOffsetDelta < 0 || recordCount < 0 then throw ProtocolException("negative record batch counters")
+    if lastOffsetDelta < 0 || recordCount < 0 then throw CorruptRecordException("negative record batch counters")
     val compressionType = buffer.getShort(21).toInt & 0x07
-    if compressionType > 4 then throw ProtocolException(s"unsupported record compression type: $compressionType")
+    if compressionType > 4 then throw CorruptRecordException(s"unsupported record compression type: $compressionType")
     val expectedCrc = storedCrc(bytes)
     val actualCrc = computedCrc(bytes)
     if expectedCrc != actualCrc then
-      throw ProtocolException(
+      throw CorruptRecordException(
         f"record batch CRC32C mismatch: stored=0x${expectedCrc & 0xffffffffL}%08x, computed=0x${actualCrc & 0xffffffffL}%08x"
       )
     buffer
@@ -168,7 +168,7 @@ object RecordBatch:
     catch case _: Throwable => Some(bytes)
 
   def totalSize(prefix: Array[Byte]): Int =
-    if prefix.length < 12 then throw ProtocolException("record batch prefix is too short")
+    if prefix.length < 12 then throw CorruptRecordException("record batch prefix is too short")
     Math.addExact(ByteBuffer.wrap(prefix).order(ByteOrder.BIG_ENDIAN).getInt(8), 12)
 
   private def decodedRecords(bytes: Array[Byte], metadata: RecordBatchMetadata): Option[Vector[EncodedRecord]] =
@@ -185,25 +185,25 @@ object RecordBatch:
       val recordStart = buffer.position()
       val recordLength = readVarInt(buffer)
       if recordLength < 0 || recordLength > buffer.remaining() then
-        throw ProtocolException(s"invalid record length: $recordLength")
+        throw CorruptRecordException(s"invalid record length: $recordLength")
       val recordEnd = Math.addExact(buffer.position(), recordLength)
       buffer.get()
       val timestampDelta = readVarLong(buffer)
       val offsetDelta = readVarInt(buffer)
-      if offsetDelta < 0 then throw ProtocolException(s"negative record offset delta: $offsetDelta")
+      if offsetDelta < 0 then throw CorruptRecordException(s"negative record offset delta: $offsetDelta")
       val key = readNullableBytes(buffer)
       val value = readNullableBytes(buffer)
       val headers = readVarInt(buffer)
-      if headers < 0 then throw ProtocolException(s"negative record header count: $headers")
+      if headers < 0 then throw CorruptRecordException(s"negative record header count: $headers")
       var header = 0
       while header < headers do
         val headerKeyLength = readVarInt(buffer)
         if headerKeyLength < 0 || headerKeyLength > buffer.remaining() then
-          throw ProtocolException(s"invalid record header key length: $headerKeyLength")
+          throw CorruptRecordException(s"invalid record header key length: $headerKeyLength")
         buffer.position(buffer.position() + headerKeyLength)
         readNullableBytes(buffer)
         header += 1
-      if buffer.position() != recordEnd then throw ProtocolException("record length does not match its contents")
+      if buffer.position() != recordEnd then throw CorruptRecordException("record length does not match its contents")
       records += EncodedRecord(
         IndexedRecord(
           Math.addExact(metadata.baseOffset, offsetDelta.toLong),
@@ -214,7 +214,7 @@ object RecordBatch:
         Arrays.copyOfRange(decoded, recordStart, recordEnd)
       )
       count += 1
-    if buffer.hasRemaining then throw ProtocolException("record batch contains trailing bytes")
+    if buffer.hasRemaining then throw CorruptRecordException("record batch contains trailing bytes")
     Some(records.result())
 
   private def rebuild(original: Array[Byte], metadata: RecordBatchMetadata, records: Vector[EncodedRecord]): Array[Byte] =
@@ -237,10 +237,10 @@ object RecordBatch:
       case 2 => SnappyInputStream(source)
       case 3 => LZ4FrameInputStream(source)
       case 4 => ZstdInputStreamNoFinalizer(source)
-      case _ => throw ProtocolException(s"unsupported record compression type: $codec")
+      case _ => throw CorruptRecordException(s"unsupported record compression type: $codec")
     try
       val decoded = input.readNBytes(MaximumDecodedBatchBytes + 1)
-      if decoded.length > MaximumDecodedBatchBytes then throw ProtocolException("decompressed record batch exceeds 128 MiB")
+      if decoded.length > MaximumDecodedBatchBytes then throw CorruptRecordException("decompressed record batch exceeds 128 MiB")
       decoded
     finally input.close()
 
@@ -251,7 +251,7 @@ object RecordBatch:
       case 2 => SnappyOutputStream(output)
       case 3 => LZ4FrameOutputStream(output)
       case 4 => ZstdOutputStreamNoFinalizer(output)
-      case _ => throw ProtocolException(s"unsupported record compression type: $codec")
+      case _ => throw CorruptRecordException(s"unsupported record compression type: $codec")
     try compressed.write(value)
     finally compressed.close()
     output.toByteArray
@@ -259,7 +259,7 @@ object RecordBatch:
   private def readNullableBytes(buffer: ByteBuffer): Option[Vector[Byte]] =
     val length = readVarInt(buffer)
     if length == -1 then None
-    else if length < -1 || length > buffer.remaining() then throw ProtocolException(s"invalid byte-array length: $length")
+    else if length < -1 || length > buffer.remaining() then throw CorruptRecordException(s"invalid byte-array length: $length")
     else
       val bytes = new Array[Byte](length)
       buffer.get(bytes)
@@ -279,11 +279,11 @@ object RecordBatch:
     var count = 0
     var complete = false
     while !complete && count < maximumBytes do
-      if !buffer.hasRemaining then throw ProtocolException("truncated variable-length integer")
+      if !buffer.hasRemaining then throw CorruptRecordException("truncated variable-length integer")
       val value = buffer.get().toInt & 0xff
       result |= (value & 0x7f).toLong << shift
       complete = (value & 0x80) == 0
       shift += 7
       count += 1
-    if !complete then throw ProtocolException("variable-length integer is too long")
+    if !complete then throw CorruptRecordException("variable-length integer is too long")
     result

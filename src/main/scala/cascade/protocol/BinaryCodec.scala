@@ -3,7 +3,8 @@ package cascade.protocol
 import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
-final class ProtocolException(message: String) extends RuntimeException(message)
+class ProtocolException(message: String) extends RuntimeException(message)
+final class CorruptRecordException(message: String) extends ProtocolException(message)
 
 /** A bounds-checked, allocation-conscious Kafka protocol reader. */
 final class ByteCursor(private val bytes: Array[Byte]):
