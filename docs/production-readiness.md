@@ -6,7 +6,7 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 
 - Kafka TCP framing with a small, explicit API and version matrix.
 - Topic creation, metadata, produce, fetch, and offset lookup in single-node and dynamically reconfigurable cluster modes.
-- Kafka magic-v2 batches stored without decoding or recompressing them.
+- Kafka magic-v2 batches stored without hot-path decoding or recompression, with exact envelope/CRC32C validation before append, metadata indexing, and recovery.
 - Size-based segments, restart discovery, partial-tail recovery, and synchronous or batched periodic flushing.
 - Classic consumer-group join, sync, heartbeat, leave, rebalance, and session expiry.
 - Kafka-compatible `ListGroups` v0-v4, `DescribeGroups` v0-v4, and `DeleteGroups` v0-v1 over an immutable acknowledged group view, with state filters, owner routing, per-group ACLs, active-group protection, and atomic offset cleanup.
@@ -28,7 +28,7 @@ I want Cascade to become a real Kafka replacement, but it isn't there yet. This 
 - Stable-quorum majority service, minority coordinator fencing, durable joint-transition resume, controller loss during joint consensus, and dual-majority write rejection tests.
 - Scheduled time/size retention that retires only closed committed segments and preserves log-end offset continuity across broker restart.
 - Atomic `.deleted` and `.cleaned` rename protocols with startup completion for interrupted segment deletion, compaction, and coordinator-journal replacement.
-- Record-level key compaction for uncompressed, Gzip, Snappy, LZ4, and Zstd non-transactional batches, with exact offset and producer-sequence preservation, CRC32C-safe rewriting, tombstone grace, cleanup bandwidth throttling, and conservative retention of control and transactional batches.
+- Record-level key compaction for uncompressed, Gzip, Snappy, LZ4, and Zstd non-transactional batches, with bounded record decoding, exact offset and producer-sequence preservation, self-validated CRC32C rewriting, tombstone grace, cleanup bandwidth throttling, and conservative retention of control and transactional batches.
 - Rebuilt batch timestamp and transaction-range indexes, durable offset expiry, bounded offset/delivery/cluster-metadata journals, and quorum-committed per-topic cleanup and retention policy exposed through Kafka Admin.
 - Pre-append free-space admission that leaves the log end unchanged and returns Kafka `KAFKA_STORAGE_ERROR` to clients.
 - TLS 1.2/1.3 listeners with PKCS12/JKS keys, optional client-certificate verification, and Kafka-compatible authentication using PLAIN, SCRAM-SHA-256/512, or OAUTHBEARER; bearer tokens require `SASL_SSL`.

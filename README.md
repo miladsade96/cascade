@@ -10,7 +10,7 @@ Cascade accepts real Kafka protocol frames over TCP. Existing Java, JavaScript, 
 
 I built the broker itself with Scala 3 and the JDK. Apache Kafka's Java client is a test-only dependency that verifies compatibility from outside the implementation.
 
-The current release is `1.10.0`. The source, deployment manifests, compatibility package, and container metadata use that version. I keep Docker Hub publication separate until the exact image passes every release gate and its registry digest is recorded.
+The current release is `1.11.0`. The source, deployment manifests, compatibility package, and container metadata use that version. I keep Docker Hub publication separate until the exact image passes every release gate and its registry digest is recorded.
 
 ## What this project demonstrates
 
@@ -89,7 +89,7 @@ The demo runs three brokers, creates an RF=3 topic, starts one idempotent `acks=
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.10.0 -Records 100000 `
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.11.0 -Records 100000 `
   -Java 'C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe'
 ```
 
@@ -153,12 +153,12 @@ The [external client matrix](compatibility/README.md) explains exactly what each
 
 ## Storage engine
 
-- Kafka magic-v2 batches stay serialized and compressed on the normal data path.
+- Kafka magic-v2 batches stay serialized and compressed on the normal data path, with exact envelope and CRC32C validation before metadata is trusted.
 - Each partition assigns offsets under one serialization boundary and writes with positional file I/O.
 - Segment, timestamp, transaction, and high-watermark state recover after restart.
-- CRC32C journals truncate incomplete/corrupt tails conservatively.
+- A CRC-invalid Produce gets `CORRUPT_MESSAGE`; recovery repairs only the final active tail and preserves interior corruption for investigation.
 - Time/size retention retires only safe closed segments through atomic rename.
-- Compaction rewrites keyed records from uncompressed, Gzip, Snappy, LZ4, and Zstd magic-v2 batches, preserves offsets and producer sequences, rebuilds CRC32C, honors tombstone grace, and leaves control/transactional batches opaque.
+- [Safe magic-v2 compaction](docs/record-batch-integrity.md) rewrites keyed records from uncompressed, Gzip, Snappy, LZ4, and Zstd batches, preserves offsets and producer sequences, rebuilds and verifies CRC32C, honors tombstone grace, and leaves control/transactional batches opaque.
 - `periodic` flushing batches force operations; `sync` forces every local append.
 
 ## Replication and leader election
@@ -208,7 +208,7 @@ These runs share a development machine and some share the broker/client JVM. The
 For a same-client, same-container-limit, same-payload comparison against the official Apache Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.10.0 `
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.11.0 `
   -KafkaImage apache/kafka:4.3.1 -Records 250000
 ```
 

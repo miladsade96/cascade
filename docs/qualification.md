@@ -4,17 +4,17 @@ I use these runners to produce auditable evidence rather than treating a short u
 
 ## Portfolio failover and comparison evidence
 
-I compile the test tools once, then run the exact 1.10.0 image through the short leader-failover demo:
+I compile the test tools once, then run the exact 1.11.0 image through the short leader-failover demo:
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.10.0 -Records 100000 -Java <Java-21-executable>
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.11.0 -Records 100000 -Java <Java-21-executable>
 ```
 
 For the controlled RF=1 comparison, I run the same Kafka Java workload against Cascade and the official Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.10.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.11.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
 ```
 
 The [failover guide](failover-demo.md) defines the failure timestamp and exactness gate. The [benchmark guide](benchmarking.md) defines the workload, environment inventory, and publication rules.
