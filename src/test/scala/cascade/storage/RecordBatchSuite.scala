@@ -32,6 +32,31 @@ final class RecordBatchSuite extends FunSuite:
     intercept[ProtocolException](RecordBatch.prepare(invalid, 0L))
   }
 
+  test("rejects CRC corruption before assigning broker offsets") {
+    val batch = TestRecordBatch.keyed(
+      Vector(TestRecordBatch.Record(Some("key".getBytes), Some("value".getBytes), 1000L))
+    )
+    batch(batch.length - 1) = (batch.last ^ 0x01).toByte
+
+    val error = intercept[ProtocolException](RecordBatch.prepare(batch, 42L))
+    assert(error.getMessage.contains("CRC32C mismatch"))
+    assertEquals(ByteBuffer.wrap(batch).order(ByteOrder.BIG_ENDIAN).getLong(0), 0L)
+  }
+
+  test("excludes the broker-assigned base offset from Kafka CRC coverage") {
+    val batch = TestRecordBatch.keyed(
+      Vector(TestRecordBatch.Record(Some("key".getBytes), Some("value".getBytes), 1000L)),
+      baseOffset = Long.MaxValue
+    )
+    val crc = RecordBatch.storedCrc(batch)
+
+    val prepared = RecordBatch.prepare(batch, 17L).head
+
+    assertEquals(prepared.baseOffset, 17L)
+    assertEquals(RecordBatch.storedCrc(prepared.bytes), crc)
+    assert(RecordBatch.hasValidCrc(prepared.bytes))
+  }
+
   test("indexes timestamps, keys, tombstones, and absolute offsets from uncompressed records") {
     val batch = TestRecordBatch.keyed(
       Vector(
