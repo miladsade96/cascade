@@ -86,3 +86,16 @@ final class CoordinatorFormatSuite extends FunSuite:
     assert(ClusterFeature.requiresFullVoterCommit(mixed.featureLevels, upgraded.featureLevels))
     assert(!ClusterFeature.requiresFullVoterCommit(upgraded.featureLevels, upgraded.featureLevels))
   }
+
+  test("replicated cleanup remains disabled until every voter supports its protocol") {
+    val current = PeerCapabilities.Current
+    assertEquals(current.featureLevel(ClusterFeature.ReplicatedCleanup), 1.toShort)
+    val previous = current.copy(featureLevels = current.featureLevels - ClusterFeature.ReplicatedCleanup)
+    val mixed = NegotiatedCapabilities.across(Vector(current, current, previous)).toOption.get
+    assert(!mixed.supports(ClusterFeature.ReplicatedCleanup))
+
+    val upgraded = NegotiatedCapabilities.across(Vector(current, current, current)).toOption.get
+    assert(upgraded.supports(ClusterFeature.ReplicatedCleanup))
+    assert(ClusterFeature.requiresFullVoterCommit(mixed.featureLevels, upgraded.featureLevels))
+    assert(!ClusterFeature.requiresFullVoterCommit(upgraded.featureLevels, upgraded.featureLevels))
+  }
