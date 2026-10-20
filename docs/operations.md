@@ -88,6 +88,8 @@ On startup, Cascade may truncate one incomplete or CRC-invalid final batch only 
 
 After repair I compare the authoritative high watermark and recovery fingerprints, restart the replica through the normal recovery path, and verify exact record and offset continuity with a Kafka client. Repeated CRC faults require device, memory, filesystem, controller-cache, and power-path investigation before I return the host to service.
 
+The per-partition producer checkpoint has a separate [producer-state recovery runbook](producer-state-recovery.md). I never delete that file to bypass startup validation: compaction or retention may already have removed the only batch header that carries a retry's producer ID, epoch, and sequence.
+
 ## Structured events and capacity alerts
 
 With `--structured-log logs/cascade.jsonl`, I write one JSON object per line. I rotate before an event would cross `--structured-log-max-bytes`, retain the configured number of generations, and name them `cascade.jsonl.1`, `cascade.jsonl.2`, and so on. Standard error remains enabled unless I pass `--no-stderr-log`.
