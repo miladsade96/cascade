@@ -25,7 +25,7 @@ The current release is `1.12.0`. The source, deployment manifests, compatibility
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **621/621** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **216.785 seconds**. It includes strict magic-v2 envelope/CRC validation, safe recovery and compaction rewriting, exact Snappy/LZ4/Zstd compaction, and Kafka transaction protocol V2 recovery/failover coverage. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
+The latest complete source qualification passed **634/634** unit, integration, Kafka-client, fault, security, storage, and end-to-end tests in **164 seconds**. It includes durable producer ID/epoch/sequence checkpoints through cleanup, transaction-aware retention floors, strict magic-v2 envelope/CRC validation, exact Snappy/LZ4/Zstd compaction, and Kafka transaction protocol V2 recovery/failover coverage. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
 
 > [!IMPORTANT]
 > Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, cross-version-image, and dedicated-host gates explicit.
@@ -155,7 +155,7 @@ The [external client matrix](compatibility/README.md) explains exactly what each
 
 - Kafka magic-v2 batches stay serialized and compressed on the normal data path, with exact envelope and CRC32C validation before metadata is trusted.
 - Each partition assigns offsets under one serialization boundary and writes with positional file I/O.
-- Segment, timestamp, transaction, and high-watermark state recover after restart.
+- Segment, timestamp, transaction, high-watermark, and bounded producer duplicate state recover after restart.
 - A CRC-invalid Produce gets `CORRUPT_MESSAGE`; recovery repairs only the final active tail and preserves interior corruption for investigation.
 - Time/size retention retires only safe closed segments through atomic rename.
 - [Safe magic-v2 compaction](docs/record-batch-integrity.md) rewrites keyed records from uncompressed, Gzip, Snappy, LZ4, and Zstd batches, preserves offsets and producer sequences, rebuilds and verifies CRC32C, honors tombstone grace, and leaves control/transactional batches opaque.
@@ -179,7 +179,7 @@ See [consumer group administration](docs/group-administration.md) and the [consu
 
 ## Transactions and delivery semantics
 
-Producer IDs, epochs, duplicate windows, sequence state, active ranges, outcomes, transaction timeouts, and transactional offsets are durable. Kafka transaction protocol V2 is negotiated through finalized `transaction.version=2`: Produce v12 enrolls partitions, TxnOffsetCommit v5 enrolls groups, and EndTxn v5 atomically returns the next producer identity. A successor coordinator can resolve a certified in-doubt decision. Fetch computes last stable offsets and filters aborted/open data for `read_committed` consumers.
+Producer IDs, epochs, duplicate windows, sequence state, active ranges, outcomes, transaction timeouts, and transactional offsets are durable. A CRC32C-protected per-partition checkpoint keeps producer history valid after compaction/retention, while acknowledged transaction floors stop retention from crossing unresolved ranges. Kafka transaction protocol V2 is negotiated through finalized `transaction.version=2`: Produce v12 enrolls partitions, TxnOffsetCommit v5 enrolls groups, and EndTxn v5 atomically returns the next producer identity. A successor coordinator can resolve a certified in-doubt decision. Fetch computes last stable offsets and filters aborted/open data for `read_committed` consumers.
 
 See [delivery semantics](docs/delivery-semantics.md) and its [qualification report](docs/performance/2026-09-14-delivery-semantics.md).
 

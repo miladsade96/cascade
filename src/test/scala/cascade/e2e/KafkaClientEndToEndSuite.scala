@@ -1490,10 +1490,18 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           ordinary.send(ProducerRecord(topic, "ordinary".getBytes, latestValue.getBytes(StandardCharsets.UTF_8))).get()
         finally ordinary.close(Duration.ofSeconds(5))
 
-        val checkpoint = directory.resolve(topic).resolve("partition-0").resolve("producer-state.checkpoint")
+        val partitionDirectory = directory.resolve(topic).resolve("partition-0")
+        val checkpoint = partitionDirectory.resolve("producer-state.checkpoint")
+        def obsoleteBatchRemains: Boolean =
+          val paths = Files.list(partitionDirectory)
+          try paths.iterator().asScala
+            .filter(path => path.getFileName.toString.endsWith(".log"))
+            .exists(path => String(Files.readAllBytes(path), StandardCharsets.ISO_8859_1).contains(obsoleteValue))
+          finally paths.close()
         val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos
-        while !Files.exists(checkpoint) && System.nanoTime() < deadline do Thread.sleep(10L)
+        while (!Files.exists(checkpoint) || obsoleteBatchRemains) && System.nanoTime() < deadline do Thread.sleep(10L)
         assert(Files.exists(checkpoint), "compaction lifecycle did not checkpoint producer state")
+        assert(!obsoleteBatchRemains, "compaction lifecycle did not retire the obsolete keyed batch")
       finally firstBroker.close()
 
       val recoveredBroker = compactingBroker()
