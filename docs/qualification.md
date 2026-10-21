@@ -59,6 +59,32 @@ I run the manifest, request-barrier, internal-wire, participant-fencing, three-b
 
 The gate requires one artifact per voter and durable directory ID, an unchanged controller term and metadata fingerprint, equal high watermarks on every ISR, atomic global-manifest publication, barrier recovery after lost releases, and no publication after dropped prepare or capture calls. Verification must reject missing, extra, corrupt, unsafe, or mismatched artifacts. Retention must keep incomplete directories, fail closed before deleting anything if a published generation is invalid, and delete only verified generations with enough newer verified replacements. The focused 2026-10-21 run passed 45/45 tests; the whole-software gate remains mandatory.
 
+## Adjacent release images and Java client versions
+
+I qualify the real 1.14.0-to-1.15.0 image boundary only after both immutable images exist locally:
+
+```powershell
+.\scripts\qualify-adjacent-images.ps1 `
+  -BaselineImage miladsade96/cascade:1.14.0 `
+  -BaselineVersion 1.14.0 `
+  -CandidateImage miladsade96/cascade:1.15.0 `
+  -CandidateVersion 1.15.0 `
+  -Report artifacts/adjacent-images-1.14.0-to-1.15.0.json
+```
+
+The pass condition includes immutable identity and release-label checks, pre-upgrade rollback, idempotent traffic through abrupt baseline-leader replacement, at least one measured Kafka producer retry, exact contiguous acknowledgements, the declared post-upgrade downgrade behavior, all-candidate restart recovery, exact records, exact committed offset, and no broker protocol errors. Source-only rolling evidence cannot satisfy this gate.
+
+I then run five independently resolved Apache Kafka Java client releases against the exact candidate image:
+
+```powershell
+.\scripts\qualify-java-client-versions.ps1 `
+  -BrokerImage miladsade96/cascade:1.15.0 `
+  -ExpectedVersion 1.15.0 `
+  -Report artifacts/java-client-versions-1.15.0.json
+```
+
+The reviewed matrix is 3.9.1, 4.0.0, 4.1.1, 4.2.0, and 4.3.1. Every client must independently create a topic, produce 25 idempotent records with exact offsets, consume the exact ordered values through a group, commit offset 25, and retrieve that offset through Admin. The report is bound to the candidate image ID and Git revision. The existing five-language matrix remains a separate gate because one Java version matrix does not cover KafkaJS, librdkafka, franz-go, or Confluent.Kafka .NET.
+
 ## Distributed quotas
 
 I run the local bucket, peer-codec, exact ledger, metric, rolling-activation, and three-broker fault tests together:
