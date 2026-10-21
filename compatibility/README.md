@@ -32,7 +32,7 @@ The KafkaJS smoke test defaults to a single replica. For the three-broker exampl
 On Windows I can qualify the actual release image, including its declared non-root user, entry point, JVM settings, readiness check, and persistent-data restart:
 
 ```powershell
-./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.14.0 -ExpectedVersion 1.14.0 -GoProxy direct
+./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.15.0 -ExpectedVersion 1.15.0 -GoProxy direct
 ```
 
 I run the independent Java-version matrix against the same immutable image with:
