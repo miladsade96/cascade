@@ -6,7 +6,9 @@ import java.util.concurrent.CountDownLatch
 
 object Main:
   def main(arguments: Array[String]): Unit =
-    if arguments.headOption.exists(Set("backup", "verify-backup", "restore")) then
+    if arguments.headOption.exists(Set(
+        "backup", "verify-backup", "restore", "verify-cluster-snapshot", "prune-cluster-snapshots"
+      )) then
       println(BackupCommand.run(arguments))
       return
     val config = BrokerConfig.parse(arguments)
