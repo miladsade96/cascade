@@ -4,17 +4,17 @@ I use these runners to produce auditable evidence rather than treating a short u
 
 ## Portfolio failover and comparison evidence
 
-I compile the test tools once, then run the exact 1.13.0 image through the short leader-failover demo:
+I compile the test tools once, then run the exact 1.14.0 image through the short leader-failover demo:
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.13.0 -Records 100000 -Java <Java-21-executable>
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.14.0 -Records 100000 -Java <Java-21-executable>
 ```
 
 For the controlled RF=1 comparison, I run the same Kafka Java workload against Cascade and the official Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.13.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.14.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
 ```
 
 The [failover guide](failover-demo.md) defines the failure timestamp and exactness gate. The [benchmark guide](benchmarking.md) defines the workload, environment inventory, and publication rules.
@@ -47,7 +47,17 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-20 the 1.13.0 release tree passed 652/652 tests in 291 seconds with no failures or errors. This includes three-broker replicated cleanup convergence, quorum blocking, failover and repair; durable producer history through compaction/retention; transaction-aware retention floors; strict magic-v2 envelope/CRC validation; transaction V2 gates; and exact Snappy/LZ4/Zstd compaction coverage. The [1.13.0 release notes](releases/1.13.0.md) record the complete result, while the [replicated cleanup guide](replicated-cleanup.md) states the new protocol and its limits.
+On 2026-10-21 the 1.14.0 release tree passed 672/672 tests in 208 seconds with no failures or errors. This adds coordinated three-voter snapshots, controller/metadata fencing, exact ISR high-watermark checks, failure-safe publication, verified retention, and recovery after dropped snapshot RPCs to the existing replicated-cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The focused snapshot suite passed 45/45 tests. The [1.14.0 release notes](releases/1.14.0.md) record the complete result, while the [backup and restore runbook](backup-restore.md) states the protocol and its operating limits.
+
+## Coordinated snapshots
+
+I run the manifest, request-barrier, internal-wire, participant-fencing, three-broker, repository, command, coordinator-format, quorum-codec, and recovery suites together:
+
+```powershell
+.\sbt.bat "testOnly cascade.backup.* cascade.coordinator.CoordinatorFormatSuite cascade.coordinator.CoordinatorQuorumRequestCodecSuite cascade.e2e.BackupRecoveryEndToEndSuite cascade.group.OffsetBatchQuorumSuite"
+```
+
+The gate requires one artifact per voter and durable directory ID, an unchanged controller term and metadata fingerprint, equal high watermarks on every ISR, atomic global-manifest publication, barrier recovery after lost releases, and no publication after dropped prepare or capture calls. Verification must reject missing, extra, corrupt, unsafe, or mismatched artifacts. Retention must keep incomplete directories, fail closed before deleting anything if a published generation is invalid, and delete only verified generations with enough newer verified replacements. The focused 2026-10-21 run passed 45/45 tests; the whole-software gate remains mandatory.
 
 ## Distributed quotas
 

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$CascadeImage = 'miladsade96/cascade:1.13.0',
+    [string]$CascadeImage = 'miladsade96/cascade:1.14.0',
     [string]$KafkaImage = 'apache/kafka:4.3.1',
     [ValidateRange(1, 10000000)][int]$Records = 250000,
     [ValidateRange(0, 1000000)][int]$WarmupRecords = 25000,

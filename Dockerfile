@@ -57,7 +57,7 @@ COPY deploy/container/group /runtime/etc/group
 
 FROM scratch AS runtime
 
-ARG VERSION=1.13.0
+ARG VERSION=1.14.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 
