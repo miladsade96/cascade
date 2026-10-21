@@ -55,6 +55,27 @@ On 2026-09-12 I ran the pinned format-11 source at `c0ff51721bd74ea7f3f2172e9758
 
 The 2026-09-02 shard-storage campaign passed all three source baselines against 1.3.0-SNAPSHOT: format 10 in 9.559 seconds, format 9 in 8.877 seconds, and 1.0.0 in 8.953 seconds. Each completed ten phases and exact 40-record/offset checks, including pre-activation rollback and post-activation downgrade rejection. I archive [all reports and artifact hashes](performance/2026-09-02-shard-storage.md).
 
+## Adjacent release image gate
+
+The source-runtime campaigns prove storage-format compatibility, but they do not execute either release image's entry point, minimal JRE, non-root identity, health check, read-only filesystem, native libraries, or OCI labels. I qualify each adjacent release pair separately with the actual immutable image IDs:
+
+```powershell
+.\scripts\qualify-adjacent-images.ps1 `
+  -BaselineImage miladsade96/cascade:1.14.0 `
+  -BaselineVersion 1.14.0 `
+  -CandidateImage miladsade96/cascade:1.15.0 `
+  -CandidateVersion 1.15.0 `
+  -Report artifacts/adjacent-images-1.14.0-to-1.15.0.json
+```
+
+The gate creates an isolated Docker network and one persistent volume per voter, pins both tags to inspected SHA-256 image IDs, and rejects a wrong version, mutable identity, root user, missing health check, missing creation time, or non-Git revision. It starts three baseline brokers with replication factor three, minimum ISR two, synchronous flushing, read-only roots, dropped capabilities, and `no-new-privileges`.
+
+One Kafka producer keeps the same idempotent session through the entire campaign. The gate upgrades a non-leader, rolls it back before the full upgrade, upgrades it again, and then replaces the remaining non-leader. It submits a larger in-flight record wave while abruptly removing the baseline partition leader and replacing it with the candidate image. The run fails unless Kafka reports at least one producer retry and every acknowledgement retains its planned contiguous offset. After all nodes run the candidate, it proves the expected compatible downgrade on one non-leader, restores that node, restarts all three candidate containers from their original volumes, and verifies every value and the exact committed consumer offset.
+
+The atomic JSON report binds versions, Git revisions, image IDs, elapsed time, phase list, retry count, leader node, rollback/downgrade outcomes, exact recovery, and final record count. Unique resource names prevent one run from deleting another. Cleanup targets only those validated names; `-KeepResources` preserves them for diagnosis. A failed or missing report is never converted into a pass.
+
+This adjacent pair does not introduce a new storage-format floor, so a 1.14.0 broker is expected to rejoin after the cluster has run 1.15.0. For a future release that activates an incompatible feature, I will change the pair's declared downgrade expectation and require the baseline to fail closed instead. I never infer downgrade safety from semantic version numbers alone.
+
 ## Production procedure
 
 Before a rolling release I verify a current backup, record image digests, keep the old image available, and hold unrelated metadata administration. I replace one non-controller broker at a time, wait for readiness and ISR recovery, and verify `acks=all` traffic before continuing. I replace the controller last.
