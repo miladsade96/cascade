@@ -6,7 +6,7 @@ import cascade.cluster.{ClusterNode, InternalApi, MetadataCodec, PeerClient, Vot
 import cascade.protocol.{ByteWriter, Errors}
 import cascade.storage.{CleanupPolicy, FlushPolicy, PartitionLog, StorageLifecycleConfig, TopicLifecyclePolicy}
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
+import java.nio.file.{Files, NoSuchFileException}
 import java.net.ServerSocket
 import java.time.Duration
 import java.util.Collection
@@ -1496,7 +1496,10 @@ final class KafkaClientEndToEndSuite extends FunSuite:
           val paths = Files.list(partitionDirectory)
           try paths.iterator().asScala
             .filter(path => path.getFileName.toString.endsWith(".log"))
-            .exists(path => String(Files.readAllBytes(path), StandardCharsets.ISO_8859_1).contains(obsoleteValue))
+            .exists { path =>
+              try String(Files.readAllBytes(path), StandardCharsets.ISO_8859_1).contains(obsoleteValue)
+              catch case _: NoSuchFileException => false
+            }
           finally paths.close()
         val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos
         while (!Files.exists(checkpoint) || obsoleteBatchRemains) && System.nanoTime() < deadline do Thread.sleep(10L)

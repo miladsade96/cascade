@@ -127,6 +127,7 @@ final class KafkaBroker(
   @volatile private var deliveryCoordinator: DeliveryCoordinator | Null = null
   @volatile private var coordinatorStateMachine: CoordinatorStateMachine | Null = null
   @volatile private var peerClient: PeerTransport | Null = null
+  @volatile private var snapshotPeerClient: PeerTransport | Null = null
   @volatile private var operationsServer: OperationsServer | Null = null
   @volatile private var capacityMonitor: CapacityMonitor | Null = null
   @volatile private var clusterSnapshotCoordinator: ClusterSnapshotCoordinator | Null = null
@@ -141,6 +142,7 @@ final class KafkaBroker(
     server.bind(InetSocketAddress(config.bindHost, config.port))
     val localNode = ClusterNode(config.nodeId, config.advertisedHost, advertisedPort)
     val peers = peerTransportFactory(localNode, tlsContext)
+    val snapshotPeers = peerTransportFactory(localNode, tlsContext)
     val cluster = ClusterManager(config, registry, localNode, peers)
     val replication = ReplicationManager(config, cluster, registry, peers)
     cluster.attachReplicationManager(replication)
@@ -160,6 +162,7 @@ final class KafkaBroker(
     registry.installCleanupCoordinator(replication)
     val coordinatorState = Option.when(clustered)(CoordinatorStateMachine(cluster, groupCoordinator, delivery))
     peerClient = peers
+    snapshotPeerClient = snapshotPeers
     clusterManager = cluster
     replicationManager = replication
     deliveryCoordinator = delivery
@@ -173,7 +176,7 @@ final class KafkaBroker(
     val snapshots = ClusterSnapshotCoordinator(
       config.nodeId,
       cluster,
-      peers,
+      snapshotPeers,
       snapshotParticipant,
       config.replicaRecoveryTimeoutMillis
     )
@@ -374,6 +377,7 @@ final class KafkaBroker(
       Option(coordinatorStateMachine).foreach(_.close())
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
+      Option(snapshotPeerClient).foreach(_.close())
       Option(peerClient).foreach(_.close())
       tlsContext.foreach(_.close())
       Option(deliveryCoordinator).foreach(_.close())
