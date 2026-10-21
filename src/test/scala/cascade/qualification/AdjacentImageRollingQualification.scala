@@ -1,6 +1,7 @@
 package cascade.qualification
 
 import java.net.ServerSocket
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import scala.collection.mutable.ArrayBuffer
@@ -62,7 +63,10 @@ object AdjacentImageRollingQualification:
 
       require(traffic.nn.leaderId == originalLeader, "baseline leader changed before the cross-version transition")
       leaderTransitionNode = originalLeader
+      cluster.pauseNode(leaderTransitionNode)
       traffic.nn.produceDuring(s"abrupt-leader-$leaderTransitionNode-cross-version", config.transitionRecords) {
+        traffic.nn.awaitRetry(Duration.ofSeconds(30))
+        cluster.unpauseNode(leaderTransitionNode)
         cluster.replaceNodeAbruptly(leaderTransitionNode, candidate)
       }
       phases += s"idempotent-retry-while-upgrading-leader-$leaderTransitionNode"

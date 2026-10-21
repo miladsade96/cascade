@@ -76,6 +76,8 @@ The atomic JSON report binds versions, Git revisions, image IDs, elapsed time, p
 
 This adjacent pair does not introduce a new storage-format floor, so a 1.14.0 broker is expected to rejoin after the cluster has run 1.15.0. For a future release that activates an incompatible feature, I will change the pair's declared downgrade expectation and require the baseline to fail closed instead. I never infer downgrade safety from semantic version numbers alone.
 
+On 2026-10-21 this gate passed all ten phases in 96.321 seconds with 1,200 exact records, committed offset 1,200, 100 measured producer retries, rollback before the full upgrade, the declared compatible downgrade after it, and exact recovery after restarting all three candidate brokers. I keep the complete environment, image identities, discovered harness defects, and limitations in the [adjacent image rolling report](performance/2026-10-21-adjacent-image-rolling.md).
+
 ## Production procedure
 
 Before a rolling release I verify a current backup, record image digests, keep the old image available, and hold unrelated metadata administration. I replace one non-controller broker at a time, wait for readiness and ISR recovery, and verify `acks=all` traffic before continuing. I replace the controller last.

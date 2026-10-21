@@ -26,9 +26,7 @@ private[storage] final class ProducerStateCheckpoint(path: Path, historyLimit: I
   val recovered: Vector[RecordBatchMetadata] = load()
 
   def persist(entries: Iterable[RecordBatchMetadata]): Vector[RecordBatchMetadata] = synchronized {
-    val retained = entries.iterator
-      .filter(_.producerId >= 0L)
-      .toVector
+    val retained = uniqueEntries(entries)
       .groupBy(_.producerId)
       .toVector
       .sortBy(_._1)
@@ -89,11 +87,21 @@ private[storage] final class ProducerStateCheckpoint(path: Path, historyLimit: I
       val checksum = CRC32C()
       checksum.update(bytes, 0, bytes.length - ChecksumBytes)
       if expectedChecksum != checksum.getValue.toInt then throw ProtocolException("producer-state checkpoint CRC32C mismatch")
-      val entries = Vector.fill(count)(decodeEntry(buffer))
-      val grouped = entries.groupBy(_.producerId)
-      if grouped.exists { case (_, values) => values.size > historyLimit || values.map(_.baseOffset).distinct.size != values.size } then
-        throw ProtocolException("producer-state checkpoint contains duplicate or unbounded history")
+      val entries = uniqueEntries(Vector.fill(count)(decodeEntry(buffer)))
+        .sortBy(value => (value.producerId, value.baseOffset))
+      if entries.groupBy(_.producerId).exists { case (_, values) => values.size > historyLimit } then
+        throw ProtocolException("producer-state checkpoint contains unbounded history")
       entries
+
+  private def uniqueEntries(entries: Iterable[RecordBatchMetadata]): Vector[RecordBatchMetadata] =
+    val persisted = entries.iterator.filter(_.producerId >= 0L).toVector
+    persisted.foreach(validateEntry)
+    persisted.groupBy(value => value.producerId -> value.baseOffset).toVector.map { case ((producerId, baseOffset), values) =>
+      val first = values.head
+      if values.exists(_ != first) then
+        throw ProtocolException(s"producer-state checkpoint conflicts for producer $producerId at offset $baseOffset")
+      first
+    }
 
   private def encodeEntry(buffer: ByteBuffer, value: RecordBatchMetadata): Unit =
     validateEntry(value)

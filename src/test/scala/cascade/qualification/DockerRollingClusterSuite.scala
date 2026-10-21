@@ -18,12 +18,16 @@ final class DockerRollingClusterSuite extends FunSuite:
     cluster.provision()
     cluster.startNode(1, image)
     assertEquals(cluster.runningNodeIds, Vector(1))
+    cluster.pauseNode(1)
+    cluster.unpauseNode(1)
     cluster.replaceNode(1, image)
     cluster.close()
 
     assert(commands.exists(_.contains(topology.networkName)))
     assert(commands.count(_.contains(image.imageId)) == 2)
     assert(commands.exists(command => command.contains("stop") && command.contains(topology.containerName(1))))
+    assert(commands.exists(command => command.contains("pause") && command.contains(topology.containerName(1))))
+    assert(commands.exists(command => command.contains("unpause") && command.contains(topology.containerName(1))))
     assert(commands.exists(command => command.contains("volume") && command.contains("--force")))
     assert(commands.exists(command => command.contains("network") && command.contains("rm")))
   }

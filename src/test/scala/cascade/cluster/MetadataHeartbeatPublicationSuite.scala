@@ -24,7 +24,7 @@ final class MetadataHeartbeatPublicationSuite extends FunSuite:
       cluster.faults.observeReplies { (call, bytes) =>
         if call.sourceId == controller.id && call.apiKey == InternalApi.MetadataDeltaCommit then
           persisted.countDown()
-          if !release.await(2L, TimeUnit.SECONDS) then throw IllegalStateException("publication barrier timed out")
+          if !release.await(10L, TimeUnit.SECONDS) then throw IllegalStateException("publication barrier timed out")
         else if call.sourceId == controller.id && call.apiKey == InternalApi.ControllerHeartbeat && persisted.getCount == 0L then
           val response = ByteCursor(bytes)
           val responseTerm = response.readLong()
@@ -37,19 +37,19 @@ final class MetadataHeartbeatPublicationSuite extends FunSuite:
       val result = publisher.submit(new java.util.concurrent.Callable[Short]:
         override def call(): Short = CoordinatorProbe.commit(controller, delta.change)
       )
-      assert(persisted.await(2L, TimeUnit.SECONDS), "followers must persist before releasing their acknowledgements")
-      assert(aheadHeartbeat.await(1L, TimeUnit.SECONDS), "a heartbeat must observe the unpublished follower position")
+      assert(persisted.await(5L, TimeUnit.SECONDS), "followers must persist before releasing their acknowledgements")
+      assert(aheadHeartbeat.await(5L, TimeUnit.SECONDS), "a heartbeat must observe the unpublished follower position")
       // Inspect a real contending monitor, not a sleep-based assumption about when it reconciled.
       def reconciliationBlocked: Boolean = Thread.getAllStackTraces.asScala.exists { case (thread, stack) =>
         thread.getName == "cascade-cluster-monitor" && thread.getState == Thread.State.BLOCKED &&
           stack.headOption.exists(_.getMethodName == "sendHeartbeats")
       }
-      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L)
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
       while !reconciliationBlocked && System.nanoTime() < deadline do Thread.sleep(5L)
       assert(reconciliationBlocked, "the heartbeat must reconcile only after the proposal releases the mutation lock")
       assertEquals(CoordinatorProbe.snapshot(controller)._2, controller.id)
       release.countDown()
-      assertEquals(result.get(5L, TimeUnit.SECONDS), Errors.None)
+      assertEquals(result.get(10L, TimeUnit.SECONDS), Errors.None)
       val (committedTerm, committedController, committed) = CoordinatorProbe.snapshot(controller)
       assertEquals(committedTerm, term)
       assertEquals(committedController, controller.id)

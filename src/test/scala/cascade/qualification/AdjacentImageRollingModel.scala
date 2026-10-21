@@ -13,10 +13,20 @@ private[qualification] final case class ReleaseImage(
 
 private[qualification] object ReleaseImage:
   private val InspectFormat =
-    "{{.Id}}\t{{.Config.User}}\t{{index .Config.Labels \"org.opencontainers.image.version\"}}\t" +
-      "{{index .Config.Labels \"org.opencontainers.image.revision\"}}\t" +
-      "{{index .Config.Labels \"org.opencontainers.image.created\"}}\t" +
+    "{{.Id}}\t{{.Config.User}}\t{{json .Config.Labels}}\t" +
       "{{if .Config.Healthcheck}}health{{else}}missing{{end}}"
+
+  private def label(labels: String, name: String): String =
+    val prefix = s"\"$name\":\""
+    val start = labels.indexOf(prefix)
+    require(start >= 0, s"release image label $name is missing")
+    require(labels.indexOf(prefix, start + prefix.length) < 0, s"release image label $name is duplicated")
+    val valueStart = start + prefix.length
+    val valueEnd = labels.indexOf('"', valueStart)
+    require(valueEnd >= valueStart, s"release image label $name is malformed")
+    val value = labels.substring(valueStart, valueEnd)
+    require(!value.contains('\\'), s"release image label $name contains unsupported escaping")
+    value
 
   def inspect(docker: DockerCli, reference: String, expectedVersion: String): ReleaseImage =
     require(reference.nonEmpty, "release image reference must not be empty")
@@ -27,8 +37,11 @@ private[qualification] object ReleaseImage:
     )
     require(lines.size == 1, s"image inspection returned ${lines.size} lines")
     val fields = lines.head.split("\\t", -1).toVector
-    require(fields.size == 6, "image inspection returned incomplete release metadata")
-    val Vector(imageId, user, version, revision, created, health) = fields: @unchecked
+    require(fields.size == 4, "image inspection returned incomplete release metadata")
+    val Vector(imageId, user, labels, health) = fields: @unchecked
+    val version = label(labels, "org.opencontainers.image.version")
+    val revision = label(labels, "org.opencontainers.image.revision")
+    val created = label(labels, "org.opencontainers.image.created")
     require(imageId.matches("sha256:[0-9a-f]{64}"), "release image ID is not an immutable SHA-256")
     require(user == "65532:65532", "release image must declare UID/GID 65532")
     require(version == expectedVersion, s"release image version $version does not match $expectedVersion")

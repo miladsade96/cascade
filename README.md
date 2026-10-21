@@ -25,10 +25,10 @@ The current release is `1.15.0`. The source, deployment manifests, compatibility
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **672/672** unit, integration, Kafka-client, fault, security, storage, backup, and end-to-end tests in **208 seconds**. It includes coordinated three-voter snapshots with controller/metadata fencing, exact ISR high-watermark convergence, failure-safe publication and verified retention, plus replicated cleanup, durable producer state, transaction V2, strict magic-v2 validation, and Snappy/LZ4/Zstd compaction. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
+The latest complete source qualification passed **688/688** unit, integration, Kafka-client, fault, security, storage, backup, rolling-gate, and end-to-end tests in **178 seconds**. The real 1.14.0-to-1.15.0 image campaign then preserved **1,200/1,200** exact records and their committed offset through rollback, **100 measured idempotent retries**, leader replacement, compatible downgrade, and a full-cluster restart. The five-version Java matrix covers Kafka clients 3.9.1 through 4.3.1. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity.
 
 > [!IMPORTANT]
-> Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, cross-version-image, and dedicated-host gates explicit.
+> Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, future cross-version-image, and dedicated-host gates explicit.
 
 ## Architecture
 
@@ -289,7 +289,7 @@ The [production-readiness document](docs/production-readiness.md) maps capabilit
 1. Run and archive the 72-hour authenticated multi-tenant soak and real power/device-loss campaign.
 2. Publish dedicated-host RF=3/TLS capacity and failover envelopes.
 3. Run recurring encrypted off-host snapshot collection, retention, and full-cluster restore drills at production data scale.
-4. Expand client-version and adjacent-release rolling matrices.
+4. Repeat the immutable adjacent-image gate for every release and expand the version matrix for non-Java clients.
 5. Pursue zero-copy Fetch, multi-device placement, and worker-pool changes only when profiles justify them.
 
 ## Build and contribute

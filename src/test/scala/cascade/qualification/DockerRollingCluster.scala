@@ -53,6 +53,16 @@ private[qualification] final class DockerRollingCluster(
     stopNode(nodeId)
     startNode(nodeId, image)
 
+  def pauseNode(nodeId: Int): Unit = synchronized {
+    require(running.contains(nodeId), s"rolling node $nodeId is not running")
+    docker.requireSuccess(Seq("pause", topology.containerName(nodeId)), Duration.ofSeconds(30)): Unit
+  }
+
+  def unpauseNode(nodeId: Int): Unit = synchronized {
+    require(running.contains(nodeId), s"rolling node $nodeId is not running")
+    docker.requireSuccess(Seq("unpause", topology.containerName(nodeId)), Duration.ofSeconds(30)): Unit
+  }
+
   def killNode(nodeId: Int): Unit = synchronized {
     if running.contains(nodeId) then
       docker.requireSuccess(Seq("kill", topology.containerName(nodeId)), Duration.ofSeconds(30))

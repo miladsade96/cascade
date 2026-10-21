@@ -57,6 +57,12 @@ private[qualification] final class AdjacentImageRollingTraffic private (
           case _ => 0L
     }.sum
 
+  def awaitRetry(timeout: Duration): Unit =
+    require(!timeout.isZero && !timeout.isNegative, "retry wait timeout must be positive")
+    val deadline = System.nanoTime() + timeout.toNanos
+    while retryCount == 0L && System.nanoTime() < deadline do Thread.sleep(25L)
+    require(retryCount > 0L, "paused leader did not cause an idempotent producer retry")
+
   def verifyExact(): Unit =
     producer.flush()
     val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties)
