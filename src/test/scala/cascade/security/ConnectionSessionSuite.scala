@@ -44,12 +44,17 @@ final class ConnectionSessionSuite extends FunSuite:
   }
 
   test("expires a bearer-backed connection identity") {
-    val session = ConnectionSession("client", secure = true, authenticationRequired = true)
+    var nowMillis = 1_000L
+    val session = ConnectionSession(
+      "client",
+      secure = true,
+      authenticationRequired = true,
+      nowMillis = () => nowMillis
+    )
     session.selectMechanism("OAUTHBEARER")
-    session.authenticate("alice", System.currentTimeMillis() + 10L)
+    session.authenticate("alice", nowMillis + 10L)
     assert(session.authenticated)
-    val deadline = System.nanoTime() + 1_000_000_000L
-    while session.authenticated && System.nanoTime() < deadline do Thread.onSpinWait()
+    nowMillis += 10L
     assert(!session.authenticated)
     assertEquals(session.principal, "ANONYMOUS")
     assertEquals(session.mechanism, None)

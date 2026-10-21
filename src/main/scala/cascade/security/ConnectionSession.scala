@@ -4,7 +4,8 @@ final class ConnectionSession(
     val remoteAddress: String,
     val secure: Boolean,
     authenticationRequired: Boolean,
-    val transportPrincipal: Option[String] = None
+    val transportPrincipal: Option[String] = None,
+    nowMillis: () => Long = () => System.currentTimeMillis()
 ):
   @volatile private var currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
   @volatile private var currentAuthorizationPrincipals = transportPrincipal.toSet
@@ -56,7 +57,7 @@ final class ConnectionSession(
       roles: Set[String] = Set.empty
   ): Unit = synchronized {
     require(principal.nonEmpty, "authenticated principal cannot be empty")
-    require(expiresAtEpochMillis > System.currentTimeMillis(), "authentication expiry must be in the future")
+    require(expiresAtEpochMillis > nowMillis(), "authentication expiry must be in the future")
     require(roles.forall(role => role.nonEmpty && !role.exists(character => character.isWhitespace || character.isControl)), "authorization role is invalid")
     currentPrincipal = principal
     currentAuthorizationPrincipals = Set(principal) ++ roles.map(role => s"Role:$role")
@@ -79,10 +80,10 @@ final class ConnectionSession(
 
   private def expireAuthenticationIfNecessary(): Unit =
     if authenticatedState && authenticationExpiresAtMillis != Long.MaxValue &&
-        System.currentTimeMillis() >= authenticationExpiresAtMillis
+        nowMillis() >= authenticationExpiresAtMillis
     then synchronized {
       if authenticatedState && authenticationExpiresAtMillis != Long.MaxValue &&
-          System.currentTimeMillis() >= authenticationExpiresAtMillis
+          nowMillis() >= authenticationExpiresAtMillis
       then
         currentPrincipal = transportPrincipal.getOrElse("ANONYMOUS")
         currentAuthorizationPrincipals = transportPrincipal.toSet
