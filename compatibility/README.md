@@ -4,13 +4,17 @@ I keep this matrix outside the Scala test process so it checks Cascade from the 
 
 | Language | Client | Version | Produce | Consume | Admin | Groups/offsets | Transactions/security |
 | --- | --- | ---: | :---: | :---: | :---: | :---: | :---: |
+| Java | Apache Kafka client | 3.9.1 | ✅ | ✅ | ✅ | ✅ | Idempotent producer |
+| Java | Apache Kafka client | 4.0.0 | ✅ | ✅ | ✅ | ✅ | Idempotent producer |
+| Java | Apache Kafka client | 4.1.1 | ✅ | ✅ | ✅ | ✅ | Idempotent producer |
+| Java | Apache Kafka client | 4.2.0 | ✅ | ✅ | ✅ | ✅ | Idempotent producer |
 | Java | Apache Kafka client | 4.3.1 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | JavaScript | KafkaJS | 2.2.4 | ✅ | ✅ | ✅ | ✅ | Not in smoke |
 | Python | confluent-kafka | 2.15.0 | ✅ | ✅ | ✅ | Assigned consumer | Not in smoke |
 | Go | franz-go | 1.21.0 | ✅ | ✅ | ✅ | ✅ | Not in smoke |
 | .NET | Confluent.Kafka | 2.15.0 | ✅ | ✅ | ✅ | ✅ | Not in smoke |
 
-I use “Not in smoke” instead of a checkmark when that external client has not exercised the capability. The Java suite covers idempotent and transactional producers, explicit and subscribed consumers, failover, TLS/SASL/ACLs, and restart recovery. The other rows deliberately describe their smaller independent boundary.
+I use “Not in smoke” instead of a checkmark when that external client has not exercised the capability. The versioned Java smoke uses the official client artifact for each row and covers Admin topic creation, idempotent production, subscribed group consumption, and exact committed-offset administration. The complete 4.3.1 Scala suite additionally covers transactions, explicit consumers, failover, TLS/SASL/ACLs, and restart recovery. The other rows deliberately describe their smaller independent boundary.
 
 On Linux or in CI I run the complete external matrix with:
 
@@ -30,6 +34,14 @@ On Windows I can qualify the actual release image, including its declared non-ro
 ```powershell
 ./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.14.0 -ExpectedVersion 1.14.0 -GoProxy direct
 ```
+
+I run the independent Java-version matrix against the same immutable image with:
+
+```powershell
+./scripts/qualify-java-client-versions.ps1 -BrokerImage miladsade96/cascade:1.15.0 -ExpectedVersion 1.15.0
+```
+
+`compatibility/java/versions.txt` is the reviewed release matrix. The runner validates every version string, requires at least two unique releases, runs each Maven-resolved client in a separate process boundary, checks 25 exact records and committed offset 25, rejects broker protocol errors, and writes image-ID-bound JSON evidence. Adding a row without running it does not count as support.
 
 I run `Test/compile` and install the pinned KafkaJS dependencies first. Without `-BrokerImage`, the same script retains its staged-JDK mode and also requires `stage`. Image mode inspects the tag once and runs that immutable image ID, so a tag change cannot silently replace the tested artifact. Synthetic data stays in ignored artifacts; the script removes only its uniquely named broker container. These are single-node checks, not multi-language cluster or physical-loss qualification.
 
