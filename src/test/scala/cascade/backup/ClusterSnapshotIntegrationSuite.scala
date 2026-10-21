@@ -1,7 +1,8 @@
 package cascade.backup
 
 import cascade.coordinator.CoordinatorProbe
-import cascade.fault.FaultCluster
+import cascade.cluster.InternalApi
+import cascade.fault.{FaultCluster, FaultSelector}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.time.Duration
@@ -45,6 +46,41 @@ final class ClusterSnapshotIntegrationSuite extends FunSuite:
       cluster.close()
       deleteTree(Option(destination.getParent).get)
   }
+
+  test("a missing prepare response prevents publication and releases every prepared broker") {
+    qualifyFailedPhase(InternalApi.SnapshotPrepare)
+  }
+
+  test("a missing capture response leaves no authoritative manifest and a later generation succeeds") {
+    qualifyFailedPhase(InternalApi.SnapshotCapture)
+  }
+
+  private def qualifyFailedPhase(apiKey: Short): Unit =
+    val cluster = FaultCluster(3, peerTimeoutMillis = 500, electionTimeoutMillis = 10000)
+    val root = Files.createTempDirectory("cascade-cluster-snapshot-fault")
+    try
+      cluster.startAll()
+      val admin = Admin.create(adminProperties(cluster.bootstrapServers))
+      try
+        admin.createTopics(java.util.List.of(NewTopic("snapshot-events", 1, 3.toShort))).all().get(20L, TimeUnit.SECONDS)
+        awaitFullIsr(admin, "snapshot-events")
+        produce(cluster.bootstrapServers, 10)
+        val controller = CoordinatorProbe.controller(cluster.nodes)
+        val target = cluster.nodes.find(_.id != controller.id).get
+        val selector = FaultSelector(controller.id, target.id, Some(apiKey))
+        cluster.faults.block(selector)
+        val failed = root.resolve("failed-generation")
+        intercept[Throwable](cluster.broker(controller.id).createClusterSnapshot(failed)): Unit
+        assert(!Files.exists(failed.resolve(ClusterSnapshotManifestCodec.FileName)))
+        cluster.faults.heal()
+        produce(cluster.bootstrapServers, 1, start = 10)
+        val recovered = cluster.broker(controller.id).createClusterSnapshot(root.resolve("recovered-generation"))
+        assertEquals(recovered.nodes.size, 3)
+      finally admin.close(Duration.ofSeconds(5))
+    finally
+      cluster.faults.heal()
+      cluster.close()
+      deleteTree(root)
 
   private def awaitFullIsr(admin: Admin, topic: String): Unit =
     val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos
