@@ -266,6 +266,19 @@ final class ClusterManager(config: BrokerConfig, registry: TopicRegistry, localN
 
   def metadataVersion: Long = current.version
 
+  def clusterSnapshotPosition: ClusterSnapshotPosition = synchronized {
+    val image = current
+    ClusterSnapshotPosition(
+      electedControllerId,
+      currentTerm,
+      image.version,
+      image.fingerprint.map(byte => f"${byte & 0xff}%02x").mkString,
+      effectiveMembership,
+      image.unavailableBrokerIds,
+      image.topics
+    )
+  }
+
   def quorumMembership: QuorumMembership = effectiveMembership
 
   def coordinatorMetadata: CoordinatorMetadata =

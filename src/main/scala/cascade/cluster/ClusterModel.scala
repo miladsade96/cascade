@@ -156,6 +156,20 @@ final case class ClusterMetadata(
 object ClusterMetadata:
   val Empty: ClusterMetadata = ClusterMetadata(0L, Vector.empty)
 
+final case class ClusterSnapshotPosition(
+    controllerId: Int,
+    controllerTerm: Long,
+    metadataVersion: Long,
+    metadataSha256: String,
+    membership: QuorumMembership,
+    unavailableBrokerIds: Set[Int],
+    topics: Vector[TopicMetadata]
+):
+  require(controllerId >= 0, "snapshot controller ID must be non-negative")
+  require(controllerTerm >= 0L, "snapshot controller term must be non-negative")
+  require(metadataVersion >= 0L, "snapshot metadata version must be non-negative")
+  require(metadataSha256.matches("[0-9a-f]{64}"), "snapshot metadata SHA-256 must be lowercase hexadecimal")
+
 /** The on-wire/storage capabilities advertised by one broker during a rolling upgrade. */
 final case class PeerCapabilities(
     release: String,
