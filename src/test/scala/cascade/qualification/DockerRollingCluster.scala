@@ -29,16 +29,17 @@ private[qualification] final class DockerRollingCluster(
         throw error
   }
 
-  def startNode(nodeId: Int, image: ReleaseImage): Unit = synchronized {
+  def startNode(nodeId: Int, image: ReleaseImage, waitForReadiness: Boolean = true): Unit = synchronized {
     require(provisioned, "rolling cluster is not provisioned")
     require(!running.contains(nodeId), s"rolling node $nodeId is already running")
     docker.requireSuccess(topology.runArguments(nodeId, image.imageId), Duration.ofMinutes(2))
     running += nodeId
-    try awaitNodeReady(nodeId)
-    catch
-      case error: Throwable =>
-        val diagnostics = logs(nodeId).mkString(" | ")
-        throw IllegalStateException(s"rolling node $nodeId failed readiness: $diagnostics", error)
+    if waitForReadiness then
+      try awaitNodeReady(nodeId)
+      catch
+        case error: Throwable =>
+          val diagnostics = logs(nodeId).mkString(" | ")
+          throw IllegalStateException(s"rolling node $nodeId failed readiness: $diagnostics", error)
   }
 
   def stopNode(nodeId: Int): Unit = synchronized {
@@ -50,6 +51,17 @@ private[qualification] final class DockerRollingCluster(
 
   def replaceNode(nodeId: Int, image: ReleaseImage): Unit =
     stopNode(nodeId)
+    startNode(nodeId, image)
+
+  def killNode(nodeId: Int): Unit = synchronized {
+    if running.contains(nodeId) then
+      docker.requireSuccess(Seq("kill", topology.containerName(nodeId)), Duration.ofSeconds(30))
+      docker.requireSuccess(Seq("rm", topology.containerName(nodeId)), Duration.ofSeconds(30))
+      running -= nodeId
+  }
+
+  def replaceNodeAbruptly(nodeId: Int, image: ReleaseImage): Unit =
+    killNode(nodeId)
     startNode(nodeId, image)
 
   def awaitReady(): Unit =
