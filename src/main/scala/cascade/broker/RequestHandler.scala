@@ -9,6 +9,7 @@ import cascade.protocol.handler.*
 import cascade.security.*
 import cascade.operations.{AuthenticationMetrics, PeerSecurityMetrics}
 import cascade.storage.TopicRegistry
+import cascade.backup.ClusterSnapshotParticipant
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
 import java.util.Arrays
@@ -21,6 +22,7 @@ final class RequestHandler(
     replicationManager: ReplicationManager,
     deliveryCoordinator: DeliveryCoordinator,
     advertisedPort: Int,
+    snapshotParticipant: ClusterSnapshotParticipant,
     peerSecurityMetrics: PeerSecurityMetrics = PeerSecurityMetrics(),
     authenticationMetrics: AuthenticationMetrics = AuthenticationMetrics()
 ) extends AutoCloseable:
@@ -150,6 +152,8 @@ final class RequestHandler(
             InternalApi.ReplicaRecoveryProbe | InternalApi.ReplicaTruncate | InternalApi.ReplicaCleanupPrepare |
             InternalApi.ReplicaCleanupCommit =>
           replicationManager.handleInternal(header.apiKey, body)
+        case InternalApi.SnapshotPrepare | InternalApi.SnapshotCapture | InternalApi.SnapshotRelease =>
+          snapshotParticipant.handle(header.apiKey, body)
         case _ => clusterManager.handleInternal(header.apiKey, header.apiVersion, body)
       return Some(ResponseFrame.encode(header, response))
     if !Compatibility.accepts(header.apiKey, header.apiVersion) then

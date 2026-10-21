@@ -8,15 +8,15 @@ import cascade.operations.{AuthenticationMetrics, BrokerHealth, BrokerMetricsSna
 import cascade.protocol.{ApiKey, ProtocolException, ProtocolThrottle}
 import cascade.security.{ConnectionAdmission, ConnectionAdmissionSnapshot, ConnectionSession, QuotaDecision, QuotaKind, QuotaLimit, ReloadableTlsContext, RequestAdmission, RequestAdmissionSnapshot, RequestQuota, RequestQuotaSnapshot, TlsClientAuth}
 import cascade.storage.{FlushStatistics, TopicRegistry}
-import cascade.backup.{BackupCreator, BackupManifest}
+import cascade.backup.{BackupCreator, BackupManifest, ClusterSnapshotCoordinator, ClusterSnapshotManifest, ClusterSnapshotParticipant, LocalSnapshotContent, Sha256, SnapshotRequestBarrier, SnapshotWatermark}
 import java.io.{BufferedInputStream, BufferedOutputStream, DataInputStream, DataOutputStream, EOFException}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException}
 import java.nio.file.Files
 import javax.net.ssl.{SSLPeerUnverifiedException, SSLSocket}
 import java.util.concurrent.{ExecutorService, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
-import java.util.concurrent.locks.ReentrantReadWriteLock
 import java.nio.file.Path
+import java.util.UUID
 
 final class KafkaBroker(
     val config: BrokerConfig,
@@ -65,7 +65,7 @@ final class KafkaBroker(
     config.security.resources.maxConnectionsPerIp
   )
   private val requestAdmission = RequestAdmission(config.security.resources.maxInFlightRequests)
-  private val snapshotBarrier = ReentrantReadWriteLock(true)
+  private val snapshotBarrier = SnapshotRequestBarrier()
   private val requestQuota = RequestQuota(
     config.security.resources.requestBytesPerSecond,
     config.security.resources.requestBurstBytes,
@@ -129,6 +129,7 @@ final class KafkaBroker(
   @volatile private var peerClient: PeerTransport | Null = null
   @volatile private var operationsServer: OperationsServer | Null = null
   @volatile private var capacityMonitor: CapacityMonitor | Null = null
+  @volatile private var clusterSnapshotCoordinator: ClusterSnapshotCoordinator | Null = null
 
   def start(): Unit = synchronized {
     if closed.get() then throw IllegalStateException("broker is closed")
@@ -163,6 +164,20 @@ final class KafkaBroker(
     replicationManager = replication
     deliveryCoordinator = delivery
     coordinatorStateMachine = coordinatorState.orNull
+    val snapshotParticipant = ClusterSnapshotParticipant(
+      config.nodeId,
+      () => cluster.clusterSnapshotPosition,
+      snapshotBarrier,
+      target => localSnapshotContent(target)
+    )
+    val snapshots = ClusterSnapshotCoordinator(
+      config.nodeId,
+      cluster,
+      peers,
+      snapshotParticipant,
+      config.replicaRecoveryTimeoutMillis
+    )
+    clusterSnapshotCoordinator = snapshots
     handler = RequestHandler(
       config,
       registry,
@@ -171,6 +186,7 @@ final class KafkaBroker(
       replication,
       delivery,
       advertisedPort,
+      snapshotParticipant,
       peerSecurityMetrics,
       authenticationMetrics
     )
@@ -256,10 +272,21 @@ final class KafkaBroker(
     val cluster = Option(clusterManager).getOrElse(throw IllegalStateException("cluster manager is not initialized"))
     if !cluster.supportsFeature(cascade.cluster.ClusterFeature.OnlineSnapshot) then
       throw IllegalStateException("online snapshots require every voter to advertise the feature")
-    val lock = snapshotBarrier.writeLock()
-    lock.lock()
-    try registry.withSnapshotBarrier(_ => BackupCreator.createOnline(config.dataDirectory, targetDirectory))
-    finally lock.unlock()
+    val snapshotId = UUID.randomUUID()
+    val leaseMillis = math.max(60_000L, Math.multiplyExact(config.replicaRecoveryTimeoutMillis.toLong, 2L))
+    snapshotBarrier.freeze(snapshotId, leaseMillis)
+    val capture = snapshotBarrier.beginCapture(snapshotId)
+    try localSnapshot(targetDirectory)._1
+    finally
+      capture.close()
+      snapshotBarrier.release(snapshotId)
+
+  /** Coordinates one fenced snapshot artifact per voter and atomically publishes the cluster manifest. */
+  def createClusterSnapshot(targetDirectory: Path): ClusterSnapshotManifest =
+    if !running.get() then throw IllegalStateException("broker must be running for a cluster snapshot")
+    Option(clusterSnapshotCoordinator)
+      .getOrElse(throw IllegalStateException("cluster snapshot coordinator is not initialized"))
+      .create(targetDirectory)
 
   def metricsSnapshot: BrokerMetricsSnapshot =
     val cluster = Option(clusterManager)
@@ -343,6 +370,7 @@ final class KafkaBroker(
       connections.awaitTermination(5, TimeUnit.SECONDS)
       registry.stopLifecycle()
       Option(handler).foreach(_.close())
+      Option(clusterSnapshotCoordinator).foreach(_.close())
       Option(coordinatorStateMachine).foreach(_.close())
       Option(replicationManager).foreach(_.close())
       Option(clusterManager).foreach(_.close())
@@ -416,17 +444,19 @@ final class KafkaBroker(
       output: DataOutputStream,
       enforceTrafficQuota: Boolean
   ): Boolean =
-    requestAdmission.tryAcquire() match
-      case None => false
-      case Some(lease) =>
-        val started = System.nanoTime()
-        trafficMetrics.recordRequest(frame.length + Integer.BYTES)
-        try
-          val currentHandler = handler
-          if currentHandler == null then throw IllegalStateException("request handler is not initialized")
-          val barrier = snapshotBarrier.readLock()
-          barrier.lock()
-          try currentHandler.handle(frame, session).foreach { response =>
+    val snapshotControl = apiKey == cascade.cluster.InternalApi.SnapshotPrepare ||
+      apiKey == cascade.cluster.InternalApi.SnapshotCapture || apiKey == cascade.cluster.InternalApi.SnapshotRelease
+    val barrierLease = Option.unless(snapshotControl)(snapshotBarrier.enter())
+    try
+      requestAdmission.tryAcquire() match
+        case None => false
+        case Some(lease) =>
+          val started = System.nanoTime()
+          trafficMetrics.recordRequest(frame.length + Integer.BYTES)
+          try
+            val currentHandler = handler
+            if currentHandler == null then throw IllegalStateException("request handler is not initialized")
+            currentHandler.handle(frame, session).foreach { response =>
             val ingressDelay = session.consumeThrottleMillis().toLong
             val responseDelay = if enforceTrafficQuota then egressDelay(responseQuota, session.principal, response.length) else 0L
             val fetchDelay =
@@ -438,16 +468,35 @@ final class KafkaBroker(
             output.write(response)
             output.flush()
             trafficMetrics.recordResponse(response.length)
-          }
-          finally barrier.unlock()
-          !session.terminateRequested
-        catch
-          case error: Throwable =>
-            trafficMetrics.recordFailure()
-            throw error
-        finally
-          trafficMetrics.recordDuration(System.nanoTime() - started)
-          lease.close()
+            }
+            !session.terminateRequested
+          catch
+            case error: Throwable =>
+              trafficMetrics.recordFailure()
+              throw error
+          finally
+            trafficMetrics.recordDuration(System.nanoTime() - started)
+            lease.close()
+    finally barrierLease.foreach(_.close())
+
+  private def localSnapshot(targetDirectory: Path): (BackupManifest, Map[cascade.storage.TopicPartition, Long]) =
+    var capturedWatermarks = Map.empty[cascade.storage.TopicPartition, Long]
+    val manifest = registry.withSnapshotBarrier { watermarks =>
+      capturedWatermarks = watermarks
+      BackupCreator.createOnline(config.dataDirectory, targetDirectory)
+    }
+    manifest -> capturedWatermarks
+
+  private def localSnapshotContent(targetDirectory: Path): LocalSnapshotContent =
+    val (manifest, watermarks) = localSnapshot(targetDirectory)
+    LocalSnapshotContent(
+      Sha256.file(targetDirectory.resolve(BackupManifest.FileName)),
+      manifest.entries.size,
+      manifest.entries.map(_.length).sum,
+      watermarks.toVector.map { case (partition, highWatermark) =>
+        SnapshotWatermark(partition.topic, partition.partition, highWatermark)
+      }.sortBy(value => value.topic -> value.partition)
+    )
 
   private def applyIngressQuota(quota: RequestQuota, session: ConnectionSession, bytes: Int): Boolean =
     quota.evaluate(session.principal, bytes) match
