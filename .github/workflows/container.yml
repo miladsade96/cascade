@@ -8,6 +8,16 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      baseline_image:
+        description: Optional adjacent release image, for example miladsade96/cascade:1.14.0
+        required: false
+        type: string
+      baseline_version:
+        description: Version label expected on the adjacent baseline image
+        required: false
+        default: "1.14.0"
+        type: string
 
 permissions:
   contents: read
@@ -97,6 +107,7 @@ jobs:
           docker buildx build --platform linux/amd64 --load --sbom=true --provenance=mode=max \
             --build-arg VERSION="${{ steps.release.outputs.version }}" \
             --build-arg REVISION="${GITHUB_SHA}" \
+            --build-arg CREATED="$(git show -s --format=%cI HEAD)" \
             --tag cascade:smoke \
             .
 
@@ -156,6 +167,35 @@ jobs:
       - name: Qualify TLS and SASL using the packaged JVM and broker
         shell: pwsh
         run: ./scripts/qualify-image-runtime.ps1 -BrokerImage cascade:smoke -ExpectedVersion '${{ steps.release.outputs.version }}'
+
+      - name: Qualify Kafka Java client versions 3.9 through 4.3
+        shell: pwsh
+        run: ./scripts/qualify-java-client-versions.ps1 -BrokerImage cascade:smoke -ExpectedVersion '${{ steps.release.outputs.version }}'
+
+      - name: Pull the requested adjacent baseline image
+        if: github.event_name == 'workflow_dispatch' && inputs.baseline_image != ''
+        run: docker pull '${{ inputs.baseline_image }}'
+
+      - name: Qualify the adjacent image rolling boundary
+        if: github.event_name == 'workflow_dispatch' && inputs.baseline_image != ''
+        shell: pwsh
+        run: >-
+          ./scripts/qualify-adjacent-images.ps1
+          -BaselineImage '${{ inputs.baseline_image }}'
+          -BaselineVersion '${{ inputs.baseline_version }}'
+          -CandidateImage cascade:smoke
+          -CandidateVersion '${{ steps.release.outputs.version }}'
+          -Report artifacts/adjacent-images.json
+
+      - name: Archive compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-compatibility-evidence
+          path: |
+            artifacts/java-client-versions-*.json
+            artifacts/adjacent-images.json
+          if-no-files-found: warn
 
       - name: Block publication on vulnerabilities or scanner errors
         run: node scripts/qualify-image-security.mjs cascade:smoke '${{ steps.release.outputs.version }}' artifacts/container-security
