@@ -190,7 +190,8 @@ object PeerCapabilities:
       ClusterFeature.DistributedQuotas -> 2,
       ClusterFeature.IndependentCoordinator -> 1,
       ClusterFeature.TransactionVersion -> 2,
-      ClusterFeature.ReplicatedCleanup -> 1
+      ClusterFeature.ReplicatedCleanup -> 1,
+      ClusterFeature.ClusterSnapshot -> 1
     )
   )
 
@@ -207,6 +208,7 @@ object ClusterFeature:
   val IndependentCoordinator = "independent-coordinator"
   val TransactionVersion = "transaction.version"
   val ReplicatedCleanup = "replicated-cleanup"
+  val ClusterSnapshot = "cluster-snapshot"
 
   /** Features that change shared wire/state semantics activate only after every voter commits them. */
   def requiresFullVoterCommit(current: Map[String, Short], candidate: Map[String, Short]): Boolean =
@@ -216,7 +218,9 @@ object ClusterFeature:
       current.getOrElse(TransactionVersion, 0.toShort) < 2 && candidate.getOrElse(TransactionVersion, 0.toShort) >= 2
     val replicatedCleanupActivation =
       current.getOrElse(ReplicatedCleanup, 0.toShort) < 1 && candidate.getOrElse(ReplicatedCleanup, 0.toShort) >= 1
-    distributedQuotaActivation || transactionV2Activation || replicatedCleanupActivation
+    val clusterSnapshotActivation =
+      current.getOrElse(ClusterSnapshot, 0.toShort) < 1 && candidate.getOrElse(ClusterSnapshot, 0.toShort) >= 1
+    distributedQuotaActivation || transactionV2Activation || replicatedCleanupActivation || clusterSnapshotActivation
 
 final case class NegotiatedCapabilities(metadataFormat: Short, featureLevels: Map[String, Short]):
   def featureLevel(name: String): Short = featureLevels.getOrElse(name, 0.toShort)
@@ -284,5 +288,8 @@ object InternalApi:
   val QuotaReserve: Short = -130
   val ReplicaCleanupPrepare: Short = -131
   val ReplicaCleanupCommit: Short = -132
+  val SnapshotPrepare: Short = -133
+  val SnapshotCapture: Short = -134
+  val SnapshotRelease: Short = -135
 
-  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= ReplicaCleanupCommit
+  def contains(apiKey: Short): Boolean = apiKey <= Ping && apiKey >= SnapshotRelease
