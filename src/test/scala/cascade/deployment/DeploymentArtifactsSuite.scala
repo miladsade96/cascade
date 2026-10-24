@@ -29,6 +29,8 @@ final class DeploymentArtifactsSuite extends FunSuite:
     assert(dockerfile.contains("ARG RUNTIME_JDK_IMAGE=eclipse-temurin:21-jdk-alpine@sha256:"))
     assert(dockerfile.contains("FROM scratch AS runtime"))
     assert(dockerfile.contains("--root /runtime --initdb --no-cache --no-scripts"))
+    assert(dockerfile.contains("musl=1.2.6-r6"))
+    assert(!dockerfile.contains("musl=1.2.6-r2"))
     assert(read("compose.yaml").contains(s"VERSION: $${CASCADE_VERSION:-$releaseVersion}"))
     assert(read("compose.cluster.yaml").contains(s"VERSION: $${CASCADE_VERSION:-$releaseVersion}"))
     assertEquals(occurrences(deployment, s"image: miladsade96/cascade:$deploymentVersion"), 3)
