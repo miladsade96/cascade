@@ -44,9 +44,10 @@ FROM ${RUNTIME_IMAGE} AS runtime-base-build
 RUN mkdir -p /runtime/etc/apk && \
     cp -a /etc/apk/keys /runtime/etc/apk/ && \
     apk --root /runtime --initdb --no-cache --no-scripts \
+      --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
       --repositories-file /etc/apk/repositories add \
       alpine-baselayout-data=3.7.2-r1 musl=1.2.6-r6 libstdc++=15.2.0-r5 \
-      ca-certificates-bundle=20260909-r0 tzdata=2026e-r0 && \
+      ca-certificates-bundle=20261020-r0 tzdata=2026e-r0 && \
     cp /etc/alpine-release /etc/os-release /runtime/etc/ && \
     mkdir -p /runtime/tmp /runtime/var/lib/cascade && \
     chmod 1777 /runtime/tmp && \
