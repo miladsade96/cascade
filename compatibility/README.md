@@ -32,13 +32,13 @@ The KafkaJS smoke test defaults to a single replica. For the three-broker exampl
 On Windows I can qualify the actual release image, including its declared non-root user, entry point, JVM settings, readiness check, and persistent-data restart:
 
 ```powershell
-./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.15.0 -ExpectedVersion 1.15.0 -GoProxy direct
+./scripts/qualify-staged-clients.ps1 -Java <Java-21-executable> -BrokerImage miladsade96/cascade:1.16.0 -ExpectedVersion 1.16.0 -GoProxy direct
 ```
 
 I run the independent Java-version matrix against the same immutable image with:
 
 ```powershell
-./scripts/qualify-java-client-versions.ps1 -BrokerImage miladsade96/cascade:1.15.0 -ExpectedVersion 1.15.0
+./scripts/qualify-java-client-versions.ps1 -BrokerImage miladsade96/cascade:1.16.0 -ExpectedVersion 1.16.0
 ```
 
 `compatibility/java/versions.txt` is the reviewed release matrix. The runner validates every version string, requires at least two unique releases, runs each Maven-resolved client in a separate process boundary, checks 25 exact records and committed offset 25, rejects broker protocol errors, and writes image-ID-bound JSON evidence. Adding a row without running it does not count as support.

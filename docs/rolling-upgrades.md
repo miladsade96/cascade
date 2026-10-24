@@ -43,7 +43,7 @@ I can roll a broker back only while the quorum feature map and metadata floor st
 
 The original 1.1.0 feature set requires format 8. `coordinator-deltas` raises the floor to format 9; `incremental-coordinator` raises it to format 10 and permits incremental journal/peer records; `shard-object-storage` raises it to format 11; and `independent-coordinator` raises it to format 12. Each feature activates only when every voter supports it. A format-8 peer keeps whole-image coordinator commits; a format-9 peer permits shard proposals but keeps full-image persistence/replication. Format 12 moves coordinator writes to forced per-shard quorum journals. Once a new floor is active, I roll forward. I never bypass the format check or edit either metadata or coordinator-shard journals. If I must return to an older binary after activation, I restore a verified pre-activation cluster backup into an isolated environment and follow the disaster-recovery runbook.
 
-The current source release is `1.15.0`; its [release notes](releases/1.15.0.md) record source qualification and local-image status separately from Docker Hub publication. Reclaimable quotas remain on the conservative level-1 path until every voter advertises and commits `distributed-quotas` level 2. Coordinated snapshots remain unavailable until every voter advertises and commits `cluster-snapshot` level 1. `-Baseline format10` pins the 1.2.0 source at `fbe4e98a7b9c55680a365453041ee084c0a6efbf`; its existing features remain active during a mixed cluster, while `shard-object-storage` must remain inactive. Unanimous activation raises the floor to format 11. Backup/restore and offline inspection must include the sibling shard-object directory.
+The current source release is `1.16.0`; its [release notes](releases/1.16.0.md) record source qualification and local-image status separately from Docker Hub publication. Reclaimable quotas remain on the conservative level-1 path until every voter advertises and commits `distributed-quotas` level 2. Coordinated snapshots remain unavailable until every voter advertises and commits `cluster-snapshot` level 1. `-Baseline format10` pins the 1.2.0 source at `fbe4e98a7b9c55680a365453041ee084c0a6efbf`; its existing features remain active during a mixed cluster, while `shard-object-storage` must remain inactive. Unanimous activation raises the floor to format 11. Backup/restore and offline inspection must include the sibling shard-object directory.
 
 The independent coordinator work is newer than the published 1.3.1 image. A mixed cluster must keep format 12 inactive until every voter runs a binary that understands the new internal phase APIs and `.cascade/coordinator-quorum` journals. After activation, rollback to format 11 is unsafe.
 
@@ -61,11 +61,11 @@ The source-runtime campaigns prove storage-format compatibility, but they do not
 
 ```powershell
 .\scripts\qualify-adjacent-images.ps1 `
-  -BaselineImage miladsade96/cascade:1.14.0 `
-  -BaselineVersion 1.14.0 `
-  -CandidateImage miladsade96/cascade:1.15.0 `
-  -CandidateVersion 1.15.0 `
-  -Report artifacts/adjacent-images-1.14.0-to-1.15.0.json
+  -BaselineImage miladsade96/cascade:1.15.0 `
+  -BaselineVersion 1.15.0 `
+  -CandidateImage miladsade96/cascade:1.16.0 `
+  -CandidateVersion 1.16.0 `
+  -Report artifacts/adjacent-images-1.15.0-to-1.16.0.json
 ```
 
 The gate creates an isolated Docker network and one persistent volume per voter, pins both tags to inspected SHA-256 image IDs, and rejects a wrong version, mutable identity, root user, missing health check, missing creation time, or non-Git revision. It starts three baseline brokers with replication factor three, minimum ISR two, synchronous flushing, read-only roots, dropped capabilities, and `no-new-privileges`.
@@ -74,7 +74,7 @@ One Kafka producer keeps the same idempotent session through the entire campaign
 
 The atomic JSON report binds versions, Git revisions, image IDs, elapsed time, phase list, retry count, leader node, rollback/downgrade outcomes, exact recovery, and final record count. Unique resource names prevent one run from deleting another. Cleanup targets only those validated names; `-KeepResources` preserves them for diagnosis. A failed or missing report is never converted into a pass.
 
-This adjacent pair does not introduce a new storage-format floor, so a 1.14.0 broker is expected to rejoin after the cluster has run 1.15.0. For a future release that activates an incompatible feature, I will change the pair's declared downgrade expectation and require the baseline to fail closed instead. I never infer downgrade safety from semantic version numbers alone.
+This adjacent pair does not introduce a new storage-format floor, so a 1.15.0 broker is expected to rejoin after the cluster has run 1.16.0. For a future release that activates an incompatible feature, I will change the pair's declared downgrade expectation and require the baseline to fail closed instead. I never infer downgrade safety from semantic version numbers alone.
 
 On 2026-10-21 this gate passed all ten phases in 96.321 seconds with 1,200 exact records, committed offset 1,200, 100 measured producer retries, rollback before the full upgrade, the declared compatible downgrade after it, and exact recovery after restarting all three candidate brokers. I keep the complete environment, image identities, discovered harness defects, and limitations in the [adjacent image rolling report](performance/2026-10-21-adjacent-image-rolling.md).
 

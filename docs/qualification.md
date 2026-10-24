@@ -4,17 +4,17 @@ I use these runners to produce auditable evidence rather than treating a short u
 
 ## Portfolio failover and comparison evidence
 
-I compile the test tools once, then run the exact 1.15.0 image through the short leader-failover demo:
+I compile the test tools once, then run the exact 1.16.0 image through the short leader-failover demo:
 
 ```powershell
 ./sbt.bat Test/compile
-./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.15.0 -Records 100000 -Java <Java-21-executable>
+./scripts/run-failover-demo.ps1 -Image miladsade96/cascade:1.16.0 -Records 100000 -Java <Java-21-executable>
 ```
 
 For the controlled RF=1 comparison, I run the same Kafka Java workload against Cascade and the official Kafka image:
 
 ```powershell
-./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.15.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
+./scripts/compare-kafka.ps1 -CascadeImage miladsade96/cascade:1.16.0 -KafkaImage apache/kafka:4.3.1 -Records 250000 -Java <Java-21-executable>
 ```
 
 The [failover guide](failover-demo.md) defines the failure timestamp and exactness gate. The [benchmark guide](benchmarking.md) defines the workload, environment inventory, and publication rules.
@@ -61,15 +61,15 @@ The gate requires one artifact per voter and durable directory ID, an unchanged 
 
 ## Adjacent release images and Java client versions
 
-I qualify the real 1.14.0-to-1.15.0 image boundary only after both immutable images exist locally:
+I qualify the real 1.15.0-to-1.16.0 image boundary only after both immutable images exist locally:
 
 ```powershell
 .\scripts\qualify-adjacent-images.ps1 `
-  -BaselineImage miladsade96/cascade:1.14.0 `
-  -BaselineVersion 1.14.0 `
-  -CandidateImage miladsade96/cascade:1.15.0 `
-  -CandidateVersion 1.15.0 `
-  -Report artifacts/adjacent-images-1.14.0-to-1.15.0.json
+  -BaselineImage miladsade96/cascade:1.15.0 `
+  -BaselineVersion 1.15.0 `
+  -CandidateImage miladsade96/cascade:1.16.0 `
+  -CandidateVersion 1.16.0 `
+  -Report artifacts/adjacent-images-1.15.0-to-1.16.0.json
 ```
 
 The pass condition includes immutable identity and release-label checks, pre-upgrade rollback, idempotent traffic through abrupt baseline-leader replacement, at least one measured Kafka producer retry, exact contiguous acknowledgements, the declared post-upgrade downgrade behavior, all-candidate restart recovery, exact records, exact committed offset, and no broker protocol errors. Source-only rolling evidence cannot satisfy this gate.
@@ -80,9 +80,9 @@ I then run five independently resolved Apache Kafka Java client releases against
 
 ```powershell
 .\scripts\qualify-java-client-versions.ps1 `
-  -BrokerImage miladsade96/cascade:1.15.0 `
-  -ExpectedVersion 1.15.0 `
-  -Report artifacts/java-client-versions-1.15.0.json
+  -BrokerImage miladsade96/cascade:1.16.0 `
+  -ExpectedVersion 1.16.0 `
+  -Report artifacts/java-client-versions-1.16.0.json
 ```
 
 The reviewed matrix is 3.9.1, 4.0.0, 4.1.1, 4.2.0, and 4.3.1. Every client must independently create a topic, produce 25 idempotent records with exact offsets, consume the exact ordered values through a group, commit offset 25, and retrieve that offset through Admin. The report is bound to the candidate image ID and Git revision. The existing five-language matrix remains a separate gate because one Java version matrix does not cover KafkaJS, librdkafka, franz-go, or Confluent.Kafka .NET.
