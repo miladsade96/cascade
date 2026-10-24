@@ -26,10 +26,11 @@ final class AuthenticatedClusterSoakSuite extends munit.FunSuite:
     )
 
     assert(report.passed, report.json)
-    assertEquals(report.records, 4L)
+    assert(report.cycles >= 1L)
+    assertEquals(report.records, report.cycles * 2L * 2L)
     assertEquals(report.counters.verifiedRecords, report.records)
     assertEquals(report.counters.recoveredRecords, report.records)
-    assertEquals(report.counters.abortedRecords, 2L)
+    assertEquals(report.counters.abortedRecords, report.cycles * 2L)
     assertEquals(report.counters.tlsRotations, 1L)
     assertEquals(report.counters.rebalances, 1L)
     assertEquals(report.counters.brokerRestarts, 1L)
