@@ -119,15 +119,22 @@ The original acknowledged-read result is recorded in the [2026-09-07 report](per
 
 ## Multi-day soak
 
-The soak runner starts an isolated Cascade broker, creates one topic per tenant, continuously produces deterministic payloads, consumes exact offsets and bytes, samples heap use, and writes an atomic JSON report. The default duration is 72 hours.
+The authenticated soak profile starts an RF=3 cluster with synchronous flushing, peer mTLS, per-tenant `SASL_SSL` identities, deny-by-default ACLs, distributed quotas, committed and aborted transactions, scheduled consumer rebalances, controller churn, live TLS rotation, and final full-cluster restart recovery. It compares every acknowledged offset and payload before and after restart and writes an atomic JSON report.
 
 ```powershell
 $env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'
 $env:PATH="$env:JAVA_HOME\bin;$env:PATH"
-.\sbt.bat "Test / runMain cascade.qualification.SoakTest --duration-hours 72 --tenants 8 --records-per-cycle 100 --payload-bytes 512 --report artifacts/soak-72h.json --keep-data"
+.\scripts\run-authenticated-soak.ps1 `
+  -EvidenceDirectory "D:\cascade-evidence\soak-1.16.0-$(Get-Date -Format yyyyMMdd-HHmmss)" `
+  -DurationHours 72 `
+  -Tenants 8 `
+  -RecordsPerCycle 100 `
+  -PayloadBytes 512
 ```
 
-I archive the report, broker events, metrics, JVM/OS telemetry, hardware description, exact commit, and retained data directory. I treat any missing/duplicate/corrupt record, unexpected broker exit, validation error, sustained backlog, or unexplained heap trend as a failure. The automated suite runs a one-second smoke check of this harness; it does not substitute for 72 hours of elapsed time.
+The wrapper records the exact clean revision, Java runtime, OS, architecture, processor count, workload and fault intervals. It fails closed on missing evidence, any record/offset mismatch, incomplete restart recovery, missing tenant audit evidence, authentication failure, quota rejection, or a scheduled rebalance, TLS rotation, or controller failover that did not happen. The complete procedure and JSON acceptance fields are in the [authenticated soak runbook](authenticated-soak.md).
+
+The automated suite forces every phase through a one-second two-tenant smoke campaign. That proves the harness and its failure checks, not 72 hours of stability. I do not mark the production gate complete until a clean release candidate runs the full duration on the documented qualification host and I archive its untouched evidence directory.
 
 ## Physical power or device loss
 
