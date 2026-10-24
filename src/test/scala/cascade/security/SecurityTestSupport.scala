@@ -35,13 +35,18 @@ object SecurityTestSupport:
     )
     path
 
-  def createMutualTlsMaterial(directory: Path, nodeIds: Vector[Int]): MutualTlsMaterial =
+  def createMutualTlsMaterial(
+      directory: Path,
+      nodeIds: Vector[Int],
+      validityDays: Int = 2
+  ): MutualTlsMaterial =
     require(nodeIds.nonEmpty && nodeIds.distinct.size == nodeIds.size, "mutual TLS node IDs must be non-empty and unique")
+    require(validityDays > 0, "mutual TLS validity must be positive")
     val caStore = directory.resolve("ca.p12")
     val caCertificate = directory.resolve("ca.cer")
     val trustStore = directory.resolve("trust.p12")
     runKeytool(
-      "-genkeypair", "-alias", "ca", "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
+      "-genkeypair", "-alias", "ca", "-keyalg", "RSA", "-keysize", "2048", "-validity", validityDays.toString,
       "-dname", "CN=Cascade Test CA, O=Cascade", "-ext", "bc=ca:true", "-storetype", "PKCS12",
       "-keystore", caStore.toString, "-storepass", StorePassword, "-keypass", StorePassword, "-noprompt"
     )
@@ -60,7 +65,7 @@ object SecurityTestSupport:
       val certificate = directory.resolve(s"$alias.cer")
       val distinguishedName = s"CN=$alias, OU=Test, O=Cascade"
       runKeytool(
-        "-genkeypair", "-alias", alias, "-keyalg", "RSA", "-keysize", "2048", "-validity", "2",
+        "-genkeypair", "-alias", alias, "-keyalg", "RSA", "-keysize", "2048", "-validity", validityDays.toString,
         "-dname", distinguishedName, "-ext", "SAN=dns:localhost,ip:127.0.0.1", "-storetype", "PKCS12",
         "-keystore", keyStore.toString, "-storepass", StorePassword, "-keypass", StorePassword, "-noprompt"
       )
@@ -70,7 +75,7 @@ object SecurityTestSupport:
       )
       runKeytool(
         "-gencert", "-rfc", "-alias", "ca", "-keystore", caStore.toString, "-storepass", StorePassword,
-        "-infile", request.toString, "-outfile", certificate.toString, "-validity", "2",
+        "-infile", request.toString, "-outfile", certificate.toString, "-validity", validityDays.toString,
         "-ext", "KU=digitalSignature,keyEncipherment", "-ext", "EKU=serverAuth,clientAuth",
         "-ext", "SAN=dns:localhost,ip:127.0.0.1"
       )
