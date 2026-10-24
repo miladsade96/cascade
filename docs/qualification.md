@@ -47,7 +47,7 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-21 the 1.15.0 release tree passed 688/688 tests in 178 seconds with no failures or errors. This adds immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version matrix to the existing coordinated snapshots, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.15.0 release notes](releases/1.15.0.md) record the complete result.
+On 2026-10-24 the 1.16.0 release tree passed 692/692 tests in 206 seconds with no failures or errors. The run includes the authenticated RF=3 soak smoke, immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version matrix in addition to the coordinated snapshot, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.16.0 release notes](releases/1.16.0.md) record the current result; the required 72-hour campaign remains separate and open.
 
 ## Coordinated snapshots
 
