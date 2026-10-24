@@ -27,11 +27,11 @@ Locally I additionally run the five-language matrix and three-broker replication
 
 I retain published digests and date each report. New advisories can affect an unchanged image later, so a clean release scan is not a permanent guarantee. The 1.3.0 post-publication findings are the reason for this policy.
 
-## 1.9.0 local release status
+## 1.16.0 local release status
 
-The exact local image `sha256:e212128215726b8280fed0e142ba92496c52b663e20c3df4bb5819d15746448d` from revision `e9a6060` passed the OCI identity, SBOM, provenance, minimal-package, non-root, packaged TLS/peer, and external secure-client checks. Grype 0.116.1, using its refreshed vulnerability database and `--fail-on negligible`, reported `No vulnerabilities found` with no exception list.
+The first 1.16.0 candidate scan correctly blocked release on `CVE-2026-107891` in `musl` `1.2.6-r2`. The runtime now pins Alpine's fixed `musl` `1.2.6-r6`; the rebuilt scratch image passed OCI identity, SBOM, provenance, minimal-package, non-root, packaged TLS/peer, external secure-client, and Docker Scout checks. Scout 1.26.0 scanned all 15 inventoried packages and reported zero findings with no exception list.
 
-The 1.9.0 image is built locally after the complete source suite passes. I do not publish it from this workflow. A zero-finding Scout result is still mandatory before I call the image qualified or push it to Docker Hub.
+The local image also passed the five-language client matrix, Kafka Java clients 3.9.1 through 4.3.1, and the adjacent 1.15.0-to-1.16.0 rolling campaign. I do not call it published until the exact qualified image is pushed without rebuilding and its registry digest is recorded. A later advisory can block the same bytes again.
 
 The [1.3.1 release](releases/1.3.1.md) passed this gate and an additional scan of its immutable Docker Hub reference on 2026-09-04: zero findings, with no exceptions. Its 32 gate regression tests include scanner failures, every severity, incomplete reports/inventories and image-identity mismatches.
 
