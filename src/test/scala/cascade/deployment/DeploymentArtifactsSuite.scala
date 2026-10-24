@@ -146,6 +146,24 @@ final class DeploymentArtifactsSuite extends FunSuite:
     metrics.foreach(metric => assertEquals(occurrences(dashboard, metric), 1))
   }
 
+  test("authenticated soak wrapper fails closed and binds durable evidence to the source") {
+    val runner = read("scripts/run-authenticated-soak.ps1")
+    assert(runner.contains("--profile authenticated-cluster"))
+    assert(runner.contains("git rev-parse HEAD"))
+    assert(runner.contains("git status --porcelain"))
+    assert(runner.contains("version \"21[\\.]"))
+    assert(runner.contains("result.status -ne \"passed\""))
+    assert(runner.contains("result.verified_records -ne [long]$result.records"))
+    assert(runner.contains("result.quota_reservations -le 0"))
+    assert(runner.contains("result.quota_rejected -ne 0"))
+    assert(runner.contains("result.authentication_successes -le 0"))
+    assert(runner.contains("result.authentication_failures -ne 0"))
+    assert(runner.contains("result.authenticated_tenants -ne $Tenants"))
+    assert(runner.contains("result.controller_failovers -le 0"))
+    assert(runner.contains("result.tls_rotations -le 0"))
+    assert(!runner.contains("continue-on-error"))
+  }
+
   private def read(path: String): String = Files.readString(Paths.get(path))
 
   private def occurrences(source: String, value: String): Int =
