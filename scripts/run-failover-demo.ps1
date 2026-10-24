@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Image = 'miladsade96/cascade:1.15.0',
+    [string]$Image = 'miladsade96/cascade:1.16.0',
     [ValidateRange(2, 10000000)][int]$Records = 100000,
     [string]$Java = 'java',
     [string]$Project = 'cascade-failover-demo',
