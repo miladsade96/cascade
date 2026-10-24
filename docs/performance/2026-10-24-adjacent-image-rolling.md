@@ -1,0 +1,9 @@
+# 1.15.0 to 1.16.0 adjacent-image qualification
+
+On 2026-10-24 I ran the immutable local images `miladsade96/cascade:1.15.0` and `miladsade96/cascade:1.16.0` through the complete adjacent-release campaign. The passing run used baseline image ID `sha256:477162b58f30a911134a70935770df03289d29103f4a9e777ee06f6248c04d89` at revision `abdcfe5ff5278f465a7e36b795983a8a18aea884` and candidate image ID `sha256:a239fdae9e4d522dc6cf4fc77d16246e3ac45c6561c8f3222ab955df44d94620` at revision `c89719a7803c4750eded15c825018ed354e5a43d`.
+
+The campaign passed all ten phases in 127.340 seconds. It preserved 1,200/1,200 exact records and committed offset 1,200, measured 2,000 idempotent producer retries, rolled node 2 back to 1.15.0 before completing the upgrade, replaced baseline leader 1, rejoined a compatible 1.15.0 node after the 1.16.0 transition, restored that node to 1.16.0, and recovered the exact ledger after a full-cluster restart. No broker protocol error was accepted.
+
+The first runs exposed three qualification defects rather than a storage mismatch: readiness did not prove that failover metadata had converged, a paused broker was resumed before forced removal and could reject pending requests while fenced, and a fresh AdminClient forgot the dead bootstrap broker on every probe. The final gate removes the paused container without resuming it, probes only surviving endpoints with one persistent AdminClient, confirms a successor partition leader, and only then rejoins the replacement image. Focused command-model regressions cover direct paused-container removal and survivor endpoint selection.
+
+This is local Docker Desktop evidence, not a Docker Hub digest, a multi-host network-partition test, a 72-hour stability result, or a dedicated-host capacity measurement. The candidate was rebuilt after documentation-only commits, so publication qualification must bind its scan and final smoke checks to the final image identity.

@@ -47,7 +47,7 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-24 the 1.16.0 release tree passed 692/692 tests in 206 seconds with no failures or errors. The run includes the authenticated RF=3 soak smoke, immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version matrix in addition to the coordinated snapshot, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.16.0 release notes](releases/1.16.0.md) record the current result; the required 72-hour campaign remains separate and open.
+On 2026-10-24 the 1.16.0 release tree passed 694/694 tests in 234 seconds with no failures or errors. The run includes the authenticated RF=3 soak smoke, immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version matrix in addition to the coordinated snapshot, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.16.0 release notes](releases/1.16.0.md) record the current result; the required 72-hour campaign remains separate and open.
 
 ## Coordinated snapshots
 
@@ -74,7 +74,7 @@ I qualify the real 1.15.0-to-1.16.0 image boundary only after both immutable ima
 
 The pass condition includes immutable identity and release-label checks, pre-upgrade rollback, idempotent traffic through abrupt baseline-leader replacement, a confirmed successor leader before the paused node is replaced, at least one measured Kafka producer retry, exact contiguous acknowledgements, the declared post-upgrade downgrade behavior, all-candidate restart recovery, exact records, exact committed offset, and no broker protocol errors. Source-only rolling evidence cannot satisfy this gate.
 
-The 2026-10-21 campaign passed all ten phases in 96.321 seconds. It preserved 1,200 exact records and committed offset 1,200 while recording 100 Kafka producer retries, replacing baseline leader 1, rolling node 2 back before full upgrade, rejoining 1.14.0 after all nodes had run 1.15.0, and recovering from an all-candidate restart. The [dated report](performance/2026-10-21-adjacent-image-rolling.md) records the image identities, defects found in the qualification harness, and boundaries.
+The 2026-10-24 1.15.0-to-1.16.0 campaign passed all ten phases in 127.340 seconds. It preserved 1,200 exact records and committed offset 1,200 while recording 2,000 Kafka producer retries, replacing baseline leader 1 without resuming its paused process, rolling node 2 back before full upgrade, rejoining 1.15.0 after all nodes had run 1.16.0, and recovering from an all-candidate restart. The [dated report](performance/2026-10-24-adjacent-image-rolling.md) records the immutable image identities, defects found in the qualification harness, and boundaries.
 
 I then run five independently resolved Apache Kafka Java client releases against the exact candidate image:
 
