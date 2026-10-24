@@ -21,4 +21,6 @@ When you publish coordinator performance evidence, record the exact revision, re
 
 If your change touches backup or restore, I need tests for traversal, symlinks, unexpected files, corruption, partial publication, existing targets, and exact Kafka-client recovery. I keep the source offline, publish only through a sibling atomic rename, and never weaken manifest verification to make a damaged backup pass.
 
+If your change touches the soak harness, I need the authenticated RF=3 smoke to force transaction commit/abort, exact read-committed verification, consumer rebalance, controller failover, TLS rotation, quota reservation, audit coverage for every tenant, and full restart recovery. Keep the 72-hour campaign separate from the smoke result, bind every report to a clean source revision, and never reuse or edit a failed evidence directory.
+
 If you're unsure about the behavior of an API, open an issue before building a large change. I'm happy to discuss the design first.

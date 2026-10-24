@@ -238,6 +238,7 @@ The repository tests:
 - stale terms, stale metadata images, quorum loss, and joint-consensus failure;
 - disk reserve rejection without offset movement;
 - TLS trust/key and peer-identity rotation during replicated traffic;
+- authenticated RF=3 multi-tenant soak smoke with transactions, quotas, rebalance, controller churn, TLS rotation, and exact restart verification;
 - transaction and committed-offset recovery after failover;
 - exact record, offset, producer epoch, and transaction visibility.
 
@@ -286,7 +287,7 @@ The [production-readiness document](docs/production-readiness.md) maps capabilit
 
 ## Roadmap
 
-1. Run and archive the 72-hour authenticated multi-tenant soak and real power/device-loss campaign.
+1. Run and archive the implemented [72-hour authenticated multi-tenant soak](docs/authenticated-soak.md) and real power/device-loss campaign.
 2. Publish dedicated-host RF=3/TLS capacity and failover envelopes.
 3. Run recurring encrypted off-host snapshot collection, retention, and full-cluster restore drills at production data scale.
 4. Repeat the immutable adjacent-image gate for every release and expand the version matrix for non-Java clients.
