@@ -65,8 +65,7 @@ private[qualification] final class DockerRollingCluster(
 
   def killNode(nodeId: Int): Unit = synchronized {
     if running.contains(nodeId) then
-      docker.requireSuccess(Seq("kill", topology.containerName(nodeId)), Duration.ofSeconds(30))
-      docker.requireSuccess(Seq("rm", topology.containerName(nodeId)), Duration.ofSeconds(30))
+      docker.requireSuccess(Seq("rm", "--force", topology.containerName(nodeId)), Duration.ofSeconds(30))
       running -= nodeId
   }
 

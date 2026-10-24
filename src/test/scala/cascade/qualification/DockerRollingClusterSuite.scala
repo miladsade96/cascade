@@ -45,3 +45,23 @@ final class DockerRollingClusterSuite extends FunSuite:
     assert(!commands.exists(command => command.contains("rm") && command.contains("--force")))
     assertEquals(cluster.runningNodeIds, Vector(2))
   }
+
+  test("abrupt removal does not resume a paused broker") {
+    val commands = scala.collection.mutable.ArrayBuffer.empty[Vector[String]]
+    val runner = new CommandRunner:
+      override def run(command: Vector[String], timeout: Duration): CommandResult =
+        commands += command
+        CommandResult(0, Vector(if command.contains("inspect") then "healthy" else "ok"))
+    val cluster = DockerRollingCluster(DockerCli("docker-test", runner), topology, keepResources = false)
+    cluster.provision()
+    cluster.startNode(1, image)
+    cluster.pauseNode(1)
+    cluster.killNode(1)
+    assertEquals(cluster.runningNodeIds, Vector.empty)
+    cluster.close()
+
+    assert(commands.exists(command =>
+      command.contains("rm") && command.contains("--force") && command.contains(topology.containerName(1))
+    ))
+    assert(!commands.exists(_.contains("unpause")))
+  }

@@ -66,7 +66,6 @@ object AdjacentImageRollingQualification:
       cluster.pauseNode(leaderTransitionNode)
       traffic.nn.produceDuring(s"abrupt-leader-$leaderTransitionNode-cross-version", config.transitionRecords) {
         traffic.nn.awaitRetry(Duration.ofSeconds(30))
-        cluster.unpauseNode(leaderTransitionNode)
         cluster.killNode(leaderTransitionNode)
         traffic.nn.awaitLeaderChange(leaderTransitionNode, Duration.ofSeconds(60))
         cluster.startNode(leaderTransitionNode, candidate)
