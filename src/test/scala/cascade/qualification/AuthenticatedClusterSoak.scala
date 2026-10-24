@@ -593,12 +593,14 @@ private final class SecureSoakCluster private (root: Path, config: SoakConfig) e
     val replacement = currentController(Duration.ofSeconds(20), excluded = Set(previous))
     start(previous)
     awaitReady(Duration.ofSeconds(30))
+    awaitDistributedQuotas(Duration.ofSeconds(30))
     replacement != previous
 
   def restartAll(): Unit =
     nodeIds.foreach(stop)
     nodeIds.foreach(start)
     awaitReady(Duration.ofSeconds(45))
+    awaitDistributedQuotas(Duration.ofSeconds(30))
 
   def authenticatedTenantCount: Int =
     val audit = nodeIds.iterator.map(nodeId => root.resolve(s"audit-$nodeId.jsonl"))

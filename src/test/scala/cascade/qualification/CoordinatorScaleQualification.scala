@@ -5,6 +5,7 @@ import cascade.coordinator.CoordinatorPublicationConfig
 import cascade.fault.FaultCluster
 import cascade.group.OffsetBatchConfig
 import java.nio.file.{Files, Path}
+import java.time.Duration
 import java.time.Instant
 import java.util.Properties
 import java.util.concurrent.{Callable, Executors, TimeUnit}
@@ -156,6 +157,7 @@ object CoordinatorScaleQualification:
     }
     try
       cluster.startAll()
+      awaitReady(cluster, cluster.nodes.map(_.id).toSet, Duration.ofSeconds(30L))
       CoordinatorProbe.activate(cluster.bootstrapServers)
       val controller = CoordinatorProbe.controller(cluster.nodes)
       if persistent then
@@ -175,6 +177,7 @@ object CoordinatorScaleQualification:
       cluster.stop(controller.id)
       val survivors = cluster.nodes.filterNot(_.id == controller.id)
       CoordinatorProbe.controller(survivors, Set(controller.id))
+      awaitReady(cluster, survivors.map(_.id).toSet, Duration.ofSeconds(30L))
       val bootstrap = survivors.map(n => s"${n.host}:${n.port}").mkString(",")
       enter("failover-verification")
       verify(bootstrap, 0, rounds)
@@ -211,6 +214,7 @@ object CoordinatorScaleQualification:
       survivors.foreach(n => cluster.stop(n.id))
       cluster.startAll()
       CoordinatorProbe.controller(cluster.nodes)
+      awaitReady(cluster, cluster.nodes.map(_.id).toSet, Duration.ofSeconds(30L))
       enter("restart-verification")
       verify(cluster.bootstrapServers, 1, 1)
       require(cluster.nodes.forall(n => cluster.broker(n.id).metricsSnapshot.rejectedConnections == 0L),
@@ -265,6 +269,19 @@ object CoordinatorScaleQualification:
         catch case scala.util.control.NonFatal(error) => System.err.println(s"benchmark client cleanup failed: ${error.getMessage}")
       }
       finally cluster.close()
+
+  private def awaitReady(cluster: FaultCluster, nodeIds: Set[Int], timeout: Duration): Unit =
+    val deadline = System.nanoTime() + timeout.toNanos
+    var ready = false
+    while !ready && System.nanoTime() < deadline do
+      ready = nodeIds.forall { nodeId =>
+        try
+          val broker = cluster.broker(nodeId)
+          broker.healthSnapshot.ready && !broker.metricsSnapshot.brokerFenced
+        catch case scala.util.control.NonFatal(_) => false
+      }
+      if !ready then Thread.sleep(25L)
+    require(ready, s"brokers ${nodeIds.toVector.sorted.mkString(",")} did not converge to ready before $timeout")
 
   private def currentRevision(): String =
     def git(arguments: String*): String =
