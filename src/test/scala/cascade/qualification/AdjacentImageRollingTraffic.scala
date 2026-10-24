@@ -20,9 +20,11 @@ private[qualification] final class AdjacentImageRollingTraffic private (
   private val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties)
   private val executor = Executors.newVirtualThreadPerTaskExecutor()
 
-  def leaderId: Int =
+  def leaderId: Int = leaderIdFrom(bootstrapServers)
+
+  private def leaderIdFrom(endpoints: String): Int =
     val admin = Admin.create(properties(
-      AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG -> bootstrapServers,
+      AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG -> endpoints,
       AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG -> "10000",
       AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG -> "30000"
     ))
@@ -65,10 +67,11 @@ private[qualification] final class AdjacentImageRollingTraffic private (
 
   def awaitLeaderChange(previousLeader: Int, timeout: Duration): Int =
     require(!timeout.isZero && !timeout.isNegative, "leader change timeout must be positive")
+    val survivorEndpoints = AdjacentImageRollingTraffic.withoutNode(bootstrapServers, previousLeader)
     val deadline = System.nanoTime() + timeout.toNanos
     var currentLeader = previousLeader
     while currentLeader == previousLeader && System.nanoTime() < deadline do
-      try currentLeader = leaderId
+      try currentLeader = leaderIdFrom(survivorEndpoints)
       catch case _: Exception => ()
       if currentLeader == previousLeader then Thread.sleep(100L)
     require(currentLeader != previousLeader, s"leader did not move away from paused node $previousLeader")
@@ -144,6 +147,11 @@ private[qualification] final class AdjacentImageRollingTraffic private (
     result
 
 private[qualification] object AdjacentImageRollingTraffic:
+  def withoutNode(bootstrapServers: String, nodeId: Int): String =
+    val endpoints = bootstrapServers.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
+    require(nodeId >= 1 && nodeId <= endpoints.size, s"node $nodeId has no bootstrap endpoint")
+    endpoints.patch(nodeId - 1, Nil, 1).mkString(",")
+
   def create(bootstrapServers: String, topic: String): AdjacentImageRollingTraffic =
     require(bootstrapServers.nonEmpty && topic.nonEmpty, "rolling traffic endpoint and topic must not be empty")
     val admin = Admin.create({

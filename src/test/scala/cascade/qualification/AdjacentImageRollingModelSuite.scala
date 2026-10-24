@@ -58,3 +58,16 @@ final class AdjacentImageRollingModelSuite extends FunSuite:
     intercept[IllegalArgumentException](inspect(valid.replace("\"1.15.0\"", "\"1.14.0\""))): Unit
     intercept[IllegalArgumentException](inspect(valid.replace("\thealth", "\tmissing"))): Unit
   }
+
+  test("leader transition probes only surviving bootstrap endpoints") {
+    val endpoints = "127.0.0.1:19092,127.0.0.1:19093,127.0.0.1:19094"
+    assertEquals(
+      AdjacentImageRollingTraffic.withoutNode(endpoints, 1),
+      "127.0.0.1:19093,127.0.0.1:19094"
+    )
+    assertEquals(
+      AdjacentImageRollingTraffic.withoutNode(endpoints, 2),
+      "127.0.0.1:19092,127.0.0.1:19094"
+    )
+    intercept[IllegalArgumentException](AdjacentImageRollingTraffic.withoutNode(endpoints, 4)): Unit
+  }
