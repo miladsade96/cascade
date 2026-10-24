@@ -20,18 +20,21 @@ private[qualification] final class AdjacentImageRollingTraffic private (
   private val producer = KafkaProducer[Array[Byte], Array[Byte]](producerProperties)
   private val executor = Executors.newVirtualThreadPerTaskExecutor()
 
-  def leaderId: Int = leaderIdFrom(bootstrapServers)
+  def leaderId: Int =
+    val admin = leaderAdmin(bootstrapServers)
+    try describeLeader(admin)
+    finally admin.close(Duration.ofSeconds(5))
 
-  private def leaderIdFrom(endpoints: String): Int =
-    val admin = Admin.create(properties(
+  private def leaderAdmin(endpoints: String): Admin =
+    Admin.create(properties(
       AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG -> endpoints,
       AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG -> "10000",
       AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG -> "30000"
     ))
-    try
-      admin.describeTopics(Collections.singleton(topic)).allTopicNames().get(30L, TimeUnit.SECONDS)
-        .get(topic).partitions().getFirst.leader().id()
-    finally admin.close(Duration.ofSeconds(5))
+
+  private def describeLeader(admin: Admin): Int =
+    admin.describeTopics(Collections.singleton(topic)).allTopicNames().get(30L, TimeUnit.SECONDS)
+      .get(topic).partitions().getFirst.leader().id()
 
   def produce(label: String, count: Int): Unit =
     val planned = ledger.reserve(label, count)
@@ -70,10 +73,13 @@ private[qualification] final class AdjacentImageRollingTraffic private (
     val survivorEndpoints = AdjacentImageRollingTraffic.withoutNode(bootstrapServers, previousLeader)
     val deadline = System.nanoTime() + timeout.toNanos
     var currentLeader = previousLeader
-    while currentLeader == previousLeader && System.nanoTime() < deadline do
-      try currentLeader = leaderIdFrom(survivorEndpoints)
-      catch case _: Exception => ()
-      if currentLeader == previousLeader then Thread.sleep(100L)
+    val admin = leaderAdmin(survivorEndpoints)
+    try
+      while currentLeader == previousLeader && System.nanoTime() < deadline do
+        try currentLeader = describeLeader(admin)
+        catch case _: Exception => ()
+        if currentLeader == previousLeader then Thread.sleep(100L)
+    finally admin.close(Duration.ofSeconds(5))
     require(currentLeader != previousLeader, s"leader did not move away from paused node $previousLeader")
     currentLeader
 
