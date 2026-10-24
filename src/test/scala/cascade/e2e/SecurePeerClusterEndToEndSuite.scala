@@ -86,6 +86,9 @@ final class SecurePeerClusterEndToEndSuite extends munit.FunSuite:
     val bootstrap = nodes.map(node => s"${node.host}:${node.port}").mkString(",")
     try
       brokers.foreach(_.start())
+      eventually(Duration.ofSeconds(20)) {
+        brokers.forall(_.healthSnapshot.ready)
+      }
       val admin = Admin.create(clientProperties(bootstrap, bridgeTrust))
       try admin.createTopics(java.util.List.of(NewTopic("secure-replicated", 1, 3.toShort))).all().get(20, TimeUnit.SECONDS)
       finally admin.close(Duration.ofSeconds(5))
