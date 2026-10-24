@@ -72,7 +72,7 @@ I qualify the real 1.15.0-to-1.16.0 image boundary only after both immutable ima
   -Report artifacts/adjacent-images-1.15.0-to-1.16.0.json
 ```
 
-The pass condition includes immutable identity and release-label checks, pre-upgrade rollback, idempotent traffic through abrupt baseline-leader replacement, at least one measured Kafka producer retry, exact contiguous acknowledgements, the declared post-upgrade downgrade behavior, all-candidate restart recovery, exact records, exact committed offset, and no broker protocol errors. Source-only rolling evidence cannot satisfy this gate.
+The pass condition includes immutable identity and release-label checks, pre-upgrade rollback, idempotent traffic through abrupt baseline-leader replacement, a confirmed successor leader before the paused node is replaced, at least one measured Kafka producer retry, exact contiguous acknowledgements, the declared post-upgrade downgrade behavior, all-candidate restart recovery, exact records, exact committed offset, and no broker protocol errors. Source-only rolling evidence cannot satisfy this gate.
 
 The 2026-10-21 campaign passed all ten phases in 96.321 seconds. It preserved 1,200 exact records and committed offset 1,200 while recording 100 Kafka producer retries, replacing baseline leader 1, rolling node 2 back before full upgrade, rejoining 1.14.0 after all nodes had run 1.15.0, and recovering from an all-candidate restart. The [dated report](performance/2026-10-21-adjacent-image-rolling.md) records the image identities, defects found in the qualification harness, and boundaries.
 

@@ -63,6 +63,17 @@ private[qualification] final class AdjacentImageRollingTraffic private (
     while retryCount == 0L && System.nanoTime() < deadline do Thread.sleep(25L)
     require(retryCount > 0L, "paused leader did not cause an idempotent producer retry")
 
+  def awaitLeaderChange(previousLeader: Int, timeout: Duration): Int =
+    require(!timeout.isZero && !timeout.isNegative, "leader change timeout must be positive")
+    val deadline = System.nanoTime() + timeout.toNanos
+    var currentLeader = previousLeader
+    while currentLeader == previousLeader && System.nanoTime() < deadline do
+      try currentLeader = leaderId
+      catch case _: Exception => ()
+      if currentLeader == previousLeader then Thread.sleep(100L)
+    require(currentLeader != previousLeader, s"leader did not move away from paused node $previousLeader")
+    currentLeader
+
   def verifyExact(): Unit =
     producer.flush()
     val consumer = KafkaConsumer[Array[Byte], Array[Byte]](consumerProperties)
