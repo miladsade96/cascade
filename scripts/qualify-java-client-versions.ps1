@@ -4,7 +4,8 @@ param(
     [string]$ExpectedVersion,
     [string]$VersionsFile,
     [string]$Report,
-    [string]$MavenImage = 'maven@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237'
+    [string]$MavenImage = 'maven@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237',
+    [ValidateRange(1, 10)][int]$DependencyAttempts = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +47,7 @@ $listener.Stop()
 $runId = [Guid]::NewGuid().ToString('N')
 $containerName = "cascade-java-matrix-$runId"
 $volumeName = "cascade-java-matrix-data-$runId"
+$mavenCacheName = "cascade-java-matrix-m2-$runId"
 $javaProject = [IO.Path]::GetFullPath((Join-Path $repository 'compatibility/java'))
 $bootstrap = "host.docker.internal:$hostPort"
 $startedAt = [DateTimeOffset]::UtcNow
@@ -53,6 +55,8 @@ $startedAt = [DateTimeOffset]::UtcNow
 try {
     & docker volume create --label 'cascade.qualification=java-client-matrix' $volumeName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the Java client matrix volume.' }
+    & docker volume create --label 'cascade.qualification=java-client-matrix' $mavenCacheName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the Java client matrix dependency-cache volume.' }
     & docker run --detach --init --name $containerName --read-only --cap-drop ALL `
         --security-opt no-new-privileges:true --memory 2g `
         --tmpfs '/tmp:size=64m,mode=1777,nosuid,nodev,noexec' `
@@ -71,11 +75,34 @@ try {
     }
     if (-not $healthy) { throw "Java client matrix broker did not become healthy: $(docker logs $containerName 2>&1)" }
 
+    $prefetchAttempts = [ordered]@{}
+    foreach ($version in $versions) {
+        $resolved = $false
+        for ($attempt = 1; $attempt -le $DependencyAttempts; $attempt++) {
+            & docker run --rm --pull never `
+                --mount "type=bind,source=$javaProject,target=/work,readonly" --workdir /work `
+                --mount "type=volume,source=$mavenCacheName,target=/root/.m2" `
+                $MavenImage mvn -q -B -ntp "-Dkafka.version=$version" dependency:go-offline
+            if ($LASTEXITCODE -eq 0) {
+                $resolved = $true
+                $prefetchAttempts[$version] = $attempt
+                break
+            }
+            if ($attempt -lt $DependencyAttempts) {
+                Start-Sleep -Seconds ([Math]::Min(20, [Math]::Pow(2, $attempt)))
+            }
+        }
+        if (-not $resolved) {
+            throw "Could not prefetch Kafka Java client $version after $DependencyAttempts attempts."
+        }
+    }
+
     foreach ($version in $versions) {
         $topic = "java-client-$($version.Replace('.', '-'))"
-        & docker run --rm --add-host 'host.docker.internal:host-gateway' `
-            --mount "type=bind,source=$javaProject,target=/work" --workdir /work `
-            $MavenImage mvn -q "-Dkafka.version=$version" `
+        & docker run --rm --pull never --add-host 'host.docker.internal:host-gateway' `
+            --mount "type=bind,source=$javaProject,target=/work,readonly" --workdir /work `
+            --mount "type=volume,source=$mavenCacheName,target=/root/.m2" `
+            $MavenImage mvn -q -o -B -ntp "-Dkafka.version=$version" `
             "-Dexec.args=$bootstrap $topic $version" compile exec:java
         if ($LASTEXITCODE -ne 0) { throw "Kafka Java client $version failed." }
     }
@@ -91,6 +118,8 @@ try {
         revision = $revision
         client_versions = $versions
         records_per_version = 25
+        dependency_mode = 'prefetched-then-offline'
+        dependency_attempts = $prefetchAttempts
     }
     $directory = Split-Path -Parent $Report
     if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -102,4 +131,5 @@ try {
 finally {
     & docker rm --force $containerName 2>$null | Out-Null
     & docker volume rm --force $volumeName 2>$null | Out-Null
+    & docker volume rm --force $mavenCacheName 2>$null | Out-Null
 }

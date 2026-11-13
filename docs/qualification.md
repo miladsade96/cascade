@@ -47,7 +47,7 @@ For transaction protocol V2 I also require feature negotiation, flexible Produce
 .\sbt.bat clean test
 ```
 
-On 2026-10-24 the 1.16.0 release tree passed 694/694 tests in 234 seconds with no failures or errors. The run includes the authenticated RF=3 soak smoke, immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version matrix in addition to the coordinated snapshot, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.16.0 release notes](releases/1.16.0.md) record the current result; the required 72-hour campaign remains separate and open.
+On 2026-10-27 the 1.16.0 release tree passed **696/696** tests in **191 seconds** with no failures or errors. The run includes the authenticated RF=3 soak smoke, immutable adjacent-image inspection, hardened Docker lifecycle tests, exact cross-version traffic accounting, legacy producer-checkpoint duplicate recovery, and the client-version and disaster-recovery ledger contracts in addition to the coordinated snapshot, replicated cleanup, producer-state, transaction V2, magic-v2, and all-codec compaction gates. The [1.16.0 release notes](releases/1.16.0.md) record the current result; the required 72-hour and three-independent-host campaigns remain separate and open.
 
 ## Coordinated snapshots
 
@@ -85,7 +85,38 @@ I then run five independently resolved Apache Kafka Java client releases against
   -Report artifacts/java-client-versions-1.16.0.json
 ```
 
-The reviewed matrix is 3.9.1, 4.0.0, 4.1.1, 4.2.0, and 4.3.1. Every client must independently create a topic, produce 25 idempotent records with exact offsets, consume the exact ordered values through a group, commit offset 25, and retrieve that offset through Admin. The report is bound to the candidate image ID and Git revision. The existing five-language matrix remains a separate gate because one Java version matrix does not cover KafkaJS, librdkafka, franz-go, or Confluent.Kafka .NET.
+The reviewed matrix is 3.9.1, 4.0.0, 4.1.1, 4.2.0, and 4.3.1. Every client must independently create a topic, produce 25 idempotent records with exact offsets, consume the exact ordered values through a group, commit offset 25, and retrieve that offset through Admin. The runner prefetches each pinned dependency graph with bounded retries and executes the compatibility phase offline from that cache. The report is bound to the candidate image ID and Git revision. On 2026-10-27 all five clients passed against exact image ID `sha256:85c727ab007c3f5fbb10f0f616e27f76e5fbbea989ea90caeacc88942be30883`. The existing five-language matrix remains a separate gate because one Java version matrix does not cover KafkaJS, librdkafka, franz-go, or Confluent.Kafka .NET.
+
+## External object-store recovery
+
+I qualify the exact image after deleting every local recovery source:
+
+```powershell
+.\scripts\qualify-off-cluster-restore.ps1 `
+  -BrokerImage miladsade96/cascade:1.16.0 `
+  -ExpectedVersion 1.16.0 `
+  -Records 250 `
+  -Report artifacts/off-cluster-restore-1.16.0.json
+```
+
+The 2026-10-27 run recovered 250/250 exact records, last offset 249, and committed offset 250 from a pinned S3-compatible object-store image. It reported zero observed record loss, a 4,658 ms protection lag, and a 16,434 ms RTO through exact Kafka validation. The store was outside the broker cluster but on the same physical machine, so this closes the external-store mechanics gate rather than the off-host or full-cluster production-scale gate.
+
+## Independent-host failure domains
+
+I use three Docker contexts that resolve to three distinct Linux engine IDs and three routable host addresses:
+
+```powershell
+.\scripts\qualify-multi-host-failure-domain.ps1 `
+  -Contexts cascade-host-a,cascade-host-b,cascade-host-c `
+  -Hosts 10.20.0.11,10.20.0.12,10.20.0.13 `
+  -BaselineImage miladsade96/cascade:1.15.0 `
+  -CandidateImage miladsade96/cascade:1.16.0 `
+  -Report artifacts/multi-host-1.15.0-to-1.16.0.json
+```
+
+The runner creates one durable volume per engine, writes an exact RF=3 ledger, disconnects one broker's bridge network and continues at ISR=2, heals it to ISR=3, discovers the active controller through Kafka `DescribeQuorum`, stops that controller and a second broker concurrently, and proves the minority cannot acknowledge a write. It restores quorum, rolls 1.15.0 to 1.16.0 one host at a time under traffic, restarts all three candidate brokers, and verifies every record, offset, committed group position, and broker log.
+
+This machine exposes `default` and `desktop-linux`, but both resolve to Engine ID `4007c204-dd69-4c0c-a291-dba3ab25a798`. The 2026-10-27 preflight therefore failed before provisioning, exactly as intended. I do not convert one physical Docker Engine into multi-host evidence; the actual three-host campaign still needs three independent reachable engines.
 
 ## Distributed quotas
 

@@ -108,4 +108,20 @@ For a full-cluster restore I first run `verify-cluster-snapshot`, then restore e
 
 I run a restore drill after changing storage formats or maintenance code and on a regular operations schedule. The offline automated end-to-end test produces 100 ordered Kafka records, restores them into a new directory, and consumes the exact values. The coordinated integration test writes 50 records to a three-voter cluster, captures every voter, requires high watermark 50 on each ISR artifact, verifies the collected generation, and proves dropped prepare/capture calls cannot publish a global manifest. Unit and command tests cover leases, malformed wire frames/manifests, position fencing, tampering, extra files, unsafe paths, retention ordering, and corrupt-generation fail-closed behavior.
 
-These tests prove the implemented format, coordination safety, and local recovery path. They do not replace physical power-loss testing, lost-device recovery, a recurring encrypted off-host transfer and full-cluster restore campaign, or multi-terabyte restore timing. I track those remaining gates in [production-readiness.md](production-readiness.md).
+For the release-image external-store drill I run:
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'
+$env:PATH="$env:JAVA_HOME\bin;$env:PATH"
+.\scripts\qualify-off-cluster-restore.ps1 `
+  -BrokerImage miladsade96/cascade:1.16.0 `
+  -ExpectedVersion 1.16.0 `
+  -Records 250 `
+  -Report artifacts/off-cluster-restore-1.16.0.json
+```
+
+The runner stops the broker cleanly, creates and verifies a checksummed backup, uploads it to a digest-pinned S3-compatible MinIO service outside the broker cluster, and verifies the remote manifest. It then deletes both the original broker-data volume and the local staging volume, downloads into a new staging volume, verifies again, restores into a new data volume, waits for broker readiness, and compares every record, offset, ledger checksum, and committed group offset.
+
+On 2026-10-27 the exact published 1.16.0 image recovered **250/250** records, last offset **249**, and committed offset **250** with zero observed record loss. The measured RPO was **0 records / 0 ms**, the interval from the last acknowledgement to durable object-store completion was **4,658 ms**, and RTO from remote download through exact Kafka validation was **16,434 ms**. Backup, upload, download, restore, readiness, and validation timings are preserved in the [dated report](performance/2026-10-27-recovery-and-failure-domains.md).
+
+This run proves an external object-store copy can recover the exact single-broker state after both local copies are gone. Its object store used a distinct container and volume on the same physical Docker host, so it does not replace physical power-loss testing, lost-device recovery, encrypted off-host storage, a recurring coordinated full-cluster restore campaign, or multi-terabyte restore timing. I track those remaining gates in [production-readiness.md](production-readiness.md).

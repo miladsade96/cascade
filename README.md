@@ -25,10 +25,13 @@ The current release is `1.16.0`. The source, deployment manifests, compatibility
 | Resource isolation | Connection/request admission and exact cluster-wide per-principal quotas with idle-capacity reclamation |
 | Operations | Prometheus, health/readiness, structured events, backup/restore, Docker, and Kubernetes |
 
-The latest complete source qualification passed **694/694** unit, integration, Kafka-client, fault, security, storage, backup, soak-harness, rolling-gate, and end-to-end tests in **234 seconds**. The authenticated RF=3 smoke also exercised transactions, exact replay, distributed quotas, tenant ACLs, consumer rebalancing, controller churn, live TLS rotation, and full-cluster restart with zero mismatches. The real 1.15.0-to-1.16.0 image campaign preserved **1,200/1,200** exact records and their committed offset through rollback, **2,000 measured idempotent retries**, leader replacement, compatible downgrade, and a full-cluster restart. The five-version Java matrix covers Kafka clients 3.9.1 through 4.3.1. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity or completion of the 72-hour gate.
+The latest complete source qualification passed **696/696** unit, integration, Kafka-client, fault, security, storage, backup, soak-harness, rolling-gate, and end-to-end tests in **191 seconds**. The authenticated RF=3 smoke also exercised transactions, exact replay, distributed quotas, tenant ACLs, consumer rebalancing, controller churn, live TLS rotation, and full-cluster restart with zero mismatches. The real 1.15.0-to-1.16.0 image campaign preserved **1,200/1,200** exact records and their committed offset through rollback, **2,000 measured idempotent retries**, leader replacement, compatible downgrade, and a full-cluster restart. The exact published 1.16.0 digest passes Kafka Java clients 3.9.1 through 4.3.1, and its external-object-store restore recovered 250/250 records and committed offset 250 with zero observed record loss. The latest ten-million-record regression verified **10,000,000/10,000,000** records. These are development-machine results with documented boundaries, not claims of universal production capacity or completion of the 72-hour or independent-host gates.
 
 > [!IMPORTANT]
 > Cascade is not yet a production replacement for Apache Kafka. The [production-readiness checklist](docs/production-readiness.md) keeps the remaining multi-day, physical-device, future cross-version-image, and dedicated-host gates explicit.
+
+> [!WARNING]
+> I have deprecated Docker tags `1.12.0`, `1.13.0`, `1.14.0`, and `1.15.0` because their musl `1.2.6-r2` package is affected by `CVE-2026-107891`. I keep those immutable tags only for historical and upgrade testing. New deployments should use `miladsade96/cascade:1.16.0`, whose Docker Scout result is zero findings.
 
 ## Architecture
 
@@ -239,6 +242,7 @@ The repository tests:
 - disk reserve rejection without offset movement;
 - TLS trust/key and peer-identity rotation during replicated traffic;
 - authenticated RF=3 multi-tenant soak smoke with transactions, quotas, rebalance, controller churn, TLS rotation, and exact restart verification;
+- deletion of the local source and staging copies followed by exact restore from an external S3-compatible object store with measured RPO/RTO;
 - transaction and committed-offset recovery after failover;
 - exact record, offset, producer epoch, and transaction visibility.
 
@@ -279,7 +283,8 @@ What I will not claim yet:
 - no completed 72-hour authenticated multi-tenant soak on release hardware;
 - no physical host-power or storage-device-loss qualification;
 - no dedicated-host RF=3/TLS capacity envelope;
-- no completed recurring off-host transfer and full-cluster restore campaign for coordinated snapshots;
+- no completed recurring encrypted off-host and full-cluster restore campaign for coordinated snapshots at production scale; the single-broker external-object-store drill is complete;
+- no completed three-independent-host failure-domain run; the runner correctly refuses this single Docker Engine;
 - no full Kafka API or transaction-protocol-V2 parity;
 - no exhaustive published-image rolling matrix across every adjacent release.
 

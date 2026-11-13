@@ -172,6 +172,18 @@ jobs:
         shell: pwsh
         run: ./scripts/qualify-java-client-versions.ps1 -BrokerImage cascade:smoke -ExpectedVersion '${{ steps.release.outputs.version }}'
 
+      - name: Pull the pinned external object-store fixture
+        run: docker pull minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+
+      - name: Qualify external object-store restore and measure RPO/RTO
+        shell: pwsh
+        run: >-
+          ./scripts/qualify-off-cluster-restore.ps1
+          -BrokerImage cascade:smoke
+          -ExpectedVersion '${{ steps.release.outputs.version }}'
+          -Records 250
+          -Report artifacts/off-cluster-restore.json
+
       - name: Pull the requested adjacent baseline image
         if: github.event_name == 'workflow_dispatch' && inputs.baseline_image != ''
         run: docker pull '${{ inputs.baseline_image }}'
@@ -195,6 +207,7 @@ jobs:
           path: |
             artifacts/java-client-versions-*.json
             artifacts/adjacent-images.json
+            artifacts/off-cluster-restore.json
           if-no-files-found: warn
 
       - name: Block publication on vulnerabilities or scanner errors

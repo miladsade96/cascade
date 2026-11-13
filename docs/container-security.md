@@ -27,11 +27,13 @@ Locally I additionally run the five-language matrix and three-broker replication
 
 I retain published digests and date each report. New advisories can affect an unchanged image later, so a clean release scan is not a permanent guarantee. The 1.3.0 post-publication findings are the reason for this policy.
 
-## 1.16.0 local release status
+## 1.16.0 published release status
 
 The first 1.16.0 candidate scan correctly blocked release on `CVE-2026-107891` in `musl` `1.2.6-r2`. The runtime now pins Alpine's fixed `musl` `1.2.6-r6`; the rebuilt scratch image passed OCI identity, SBOM, provenance, minimal-package, non-root, packaged TLS/peer, external secure-client, and Docker Scout checks. Scout 1.26.0 scanned all 15 inventoried packages and reported zero findings with no exception list.
 
-The local image also passed the five-language client matrix, Kafka Java clients 3.9.1 through 4.3.1, and the adjacent 1.15.0-to-1.16.0 rolling campaign. I do not call it published until the exact qualified image is pushed without rebuilding and its registry digest is recorded. A later advisory can block the same bytes again.
+The exact published index is `sha256:85c727ab007c3f5fbb10f0f616e27f76e5fbbea989ea90caeacc88942be30883`; its runtime manifest is `sha256:48bd895fdb578510f823bc93d26b89c084fe6c4970f110ebe69495d05726d76e`. Docker Hub reports no vulnerabilities for this tag. The same image passes the five-language matrix, Kafka Java clients 3.9.1 through 4.3.1, the adjacent 1.15.0-to-1.16.0 rolling campaign, and exact external-object-store recovery. A later advisory can block the same immutable bytes again.
+
+Docker tags 1.12.0 through 1.15.0 retain the older vulnerable musl `1.2.6-r2`. Because Docker Hub does not expose a per-tag deprecation field and these tags are immutable, I preserve them for history and upgrade testing, mark them unsupported in the version-controlled Docker Hub Overview, and direct deployments to 1.16.0.
 
 The [1.3.1 release](releases/1.3.1.md) passed this gate and an additional scan of its immutable Docker Hub reference on 2026-09-04: zero findings, with no exceptions. Its 32 gate regression tests include scanner failures, every severity, incomplete reports/inventories and image-identity mismatches.
 
